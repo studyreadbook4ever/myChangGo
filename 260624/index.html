@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QAZ 노스텔지아</title>
+    <link rel="stylesheet" href="src/style.css" />
+  </head>
+  <body>
+    <canvas id="gpu-canvas" aria-label="WebGPU rhythm typing playfield"></canvas>
+    <div id="note-layer" aria-hidden="true"></div>
+
+    <main id="app-ui">
+      <section id="menu" class="menu-panel" aria-labelledby="game-title">
+        <p class="eyebrow">WebGPU Rhythm Type</p>
+        <h1 id="game-title">QAZ 반속테스트</h1>
+
+        <div id="last-result" class="last-result hidden"></div>
+
+        <label class="rate-control" for="note-rate">
+          <span>노트/초</span>
+          <output id="rate-output" for="note-rate">4.0</output>
+        </label>
+        <div class="rate-inputs">
+          <input id="note-rate" type="range" min="1" max="14" step="0.5" value="4" />
+          <input id="rate-number" type="number" min="1" max="14" step="0.5" value="4" inputmode="decimal" />
+        </div>
+
+        <button id="start-button" type="button" disabled>
+          <span aria-hidden="true">▶</span>
+          <span>30초 시작</span>
+        </button>
+
+        <p id="webgpu-status" class="status">WebGPU 준비 중</p>
+      </section>
+
+      <section id="hud" class="hud hidden" aria-label="game status">
+        <div>
+          <span>점수</span>
+          <strong id="score">0</strong>
+        </div>
+        <div>
+          <span>콤보</span>
+          <strong id="combo">0</strong>
+        </div>
+        <div>
+          <span>시간</span>
+          <strong id="timer">30.0</strong>
+        </div>
+        <div>
+          <span>정확도</span>
+          <strong id="accuracy">100%</strong>
+        </div>
+        <div id="feedback" class="feedback">READY</div>
+      </section>
+
+      <div id="key-strip" class="key-strip" aria-hidden="true"></div>
+    </main>
+
+    <script type="module" src="src/game.js"></script>
+  </body>
+</html>
