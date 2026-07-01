@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ontology Sheet Editor</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">4D</span>
+          <div>
+            <h1>Ontology Sheet</h1>
+            <p>4층 셀 편집기</p>
+          </div>
+        </div>
+        <div id="editorToolbar" class="toolbar is-hidden" aria-label="시트 작업">
+          <button id="exportCsv" class="primary-action" type="button">이거 csv로 내보내기</button>
+          <label class="button-like" for="csvFile">CSV 가져오기</label>
+          <input id="csvFile" class="visually-hidden" type="file" accept=".csv,text/csv">
+          <button id="addRow" type="button">행 추가</button>
+          <button id="removeRow" type="button">행 감소</button>
+          <button id="addCol" type="button">열 추가</button>
+          <button id="removeCol" type="button">열 감소</button>
+        </div>
+      </header>
+
+      <main id="setupScreen" class="setup-screen" aria-label="테이블 크기 설정">
+        <section class="setup-panel">
+          <div>
+            <span class="eyebrow">새 테이블</span>
+            <h2>크기 설정</h2>
+          </div>
+          <form id="setupForm" class="setup-form">
+            <label class="number-field" for="rowCount">
+              <span>행</span>
+              <input id="rowCount" name="rowCount" type="number" min="1" max="200" step="1" value="4" inputmode="numeric">
+            </label>
+            <label class="number-field" for="columnCount">
+              <span>열</span>
+              <input id="columnCount" name="columnCount" type="number" min="1" max="100" step="1" value="4" inputmode="numeric">
+            </label>
+            <label class="number-field" for="layerCount">
+              <span>높이</span>
+              <input id="layerCount" name="layerCount" type="number" value="4" disabled>
+            </label>
+            <button class="primary-action" type="submit">테이블 시작</button>
+          </form>
+        </section>
+      </main>
+
+      <main id="editorScreen" class="workspace is-hidden">
+        <section class="sheet-panel" aria-label="3차원 테이블">
+          <div class="sheet-panel-head">
+            <div class="layer-tabs" role="tablist" aria-label="층 선택">
+              <button class="layer-tab is-active" type="button" role="tab" aria-selected="true" data-layer-tab="value">값</button>
+              <button class="layer-tab" type="button" role="tab" aria-selected="false" data-layer-tab="procedure">절차</button>
+              <button class="layer-tab" type="button" role="tab" aria-selected="false" data-layer-tab="period">주기</button>
+              <button class="layer-tab" type="button" role="tab" aria-selected="false" data-layer-tab="source">출처</button>
+            </div>
+            <output id="sheetStatus" class="sheet-status" aria-live="polite"></output>
+          </div>
+          <div id="tableHost" class="table-host"></div>
+        </section>
+
+        <aside class="inspector" aria-label="선택 셀">
+          <div class="inspector-head">
+            <div>
+              <span class="eyebrow">선택 셀</span>
+              <h2 id="activeCellTitle">A1</h2>
+            </div>
+            <span id="layerBadge" class="layer-badge">값</span>
+          </div>
+
+          <div id="cellFields" class="cell-fields"></div>
+
+          <div class="paste-panel">
+            <label for="csvPaste">CSV 붙여넣기</label>
+            <textarea id="csvPaste" spellcheck="false"></textarea>
+            <button id="importPasted" type="button">붙여넣은 CSV 적용</button>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>
