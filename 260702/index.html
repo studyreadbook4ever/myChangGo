@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reasoning Foundry</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div id="brandMark" class="brand-mark">RF</div>
+          <div>
+            <h1 id="appTitle">Reasoning Foundry</h1>
+            <p id="rendererStatus">Renderer initializing</p>
+          </div>
+        </div>
+        <nav class="domain-tabs" aria-label="Tree navigation">
+          <a id="treeNavLink" class="domain-tab" href="#tree">TREE</a>
+        </nav>
+      </header>
+
+      <nav id="safLocalNav" class="saf-local-nav hidden" aria-label="SAF views">
+        <span class="saf-local-label">SAF</span>
+          <button id="beltTab" class="domain-tab active" data-domain="belt">Belt</button>
+          <button id="settingsTab" class="domain-tab" data-domain="settings">Settings / Data</button>
+      </nav>
+
+      <section id="treeDomain" class="domain tree-domain">
+        <div class="tree-shell">
+          <section class="tree-intro">
+            <span class="tree-kicker">TREE</span>
+            <h2>Reasoning Data Subdomains</h2>
+            <div class="mobile-tree-warning">
+              모바일에서는 annotation 작업이 어렵습니다. 데스크톱 Chrome에서 이어가 주세요.
+            </div>
+            <p>
+              고난도 reasoning 데이터셋을 사람이 컨베이어벨트처럼 뽑아내기 위한 로컬 작업대 모음.
+              각 서브도메인에서는 이 TREE로 돌아오는 링크만 두고, 도메인 간 이동은 여기서만 한다.
+            </p>
+          </section>
+
+          <section class="tree-map" aria-label="Subdomain map">
+            <a class="tree-card tree-card-geom saf-card" href="#saf">
+              <span>SAF</span>
+              <strong>Spatial Annotation Foundry</strong>
+              <em><b>GEOM</b> 3D spatial + electric charge static annotation</em>
+            </a>
+            <a class="tree-card tree-card-geom" href="#bi">
+              <span>BI</span>
+              <strong>Billiards</strong>
+              <em><b>GEOM</b> collision, reflection, and next-path labeling</em>
+            </a>
+            <a class="tree-card tree-card-geom" href="#mp">
+              <span>MP</span>
+              <strong>Mirror Pattern</strong>
+              <em><b>GEOM</b> symmetry, reflection, and missing-half labels</em>
+            </a>
+            <a class="tree-card tree-card-geom" href="#cc">
+              <span>CC</span>
+              <strong>Cube Count</strong>
+              <em><b>GEOM</b> visible, hidden, stacked, and total cube counts</em>
+            </a>
+            <a class="tree-card tree-card-geom" href="#mc">
+              <span>MC</span>
+              <strong>Mirror Clock</strong>
+              <em><b>GEOM</b> reflected analog clock and angle reasoning</em>
+            </a>
+            <a class="tree-card tree-card-geom" href="#ov">
+              <span>OV</span>
+              <strong>Overlap</strong>
+              <em><b>GEOM</b> occlusion, intersection, and layer-order labels</em>
+            </a>
+            <a class="tree-card tree-card-sql" href="#vq">
+              <span>VQ</span>
+              <strong>Visual Query</strong>
+              <em><b>SQL</b> select, join, group, count reasoning without text tables</em>
+            </a>
+            <a class="tree-card tree-card-sql" href="#rc">
+              <span>RC</span>
+              <strong>Relation Classifier</strong>
+              <em><b>SQL</b> classify relational joins and chain predicates</em>
+            </a>
+            <a class="tree-card tree-card-sql" href="#cf">
+              <span>CF</span>
+              <strong>Condition Filter</strong>
+              <em><b>SQL</b> where-clause, exclusion, and threshold labels</em>
+            </a>
+            <a class="tree-card tree-card-sql" href="#tg">
+              <span>TG</span>
+              <strong>Table Grouping</strong>
+              <em><b>SQL</b> group-by, having, bucket, and aggregate labels</em>
+            </a>
+            <a class="tree-card tree-card-sql" href="#pm">
+              <span>PM</span>
+              <strong>Predicate Mapping</strong>
+              <em><b>SQL</b> map visual clauses into reusable predicate labels</em>
+            </a>
+            <a class="tree-card tree-card-sql" href="#ca">
+              <span>CA</span>
+              <strong>Column Assignment</strong>
+              <em><b>SQL</b> choose source columns, keys, and target fields</em>
+            </a>
+          </section>
+        </div>
+      </section>
+
+      <section id="beltDomain" class="domain belt-domain hidden">
+        <section class="belt-shell">
+          <div class="belt-status-row">
+            <div class="reasoning-title-block">
+              <span class="reasoning-badge">SAF</span>
+              <div>
+                <h2>Spatial Annotation Foundry</h2>
+                <span id="instanceId" class="mono">no-instance</span>
+              </div>
+              <h2 id="promptText" class="dataset-prompt">Generate a batch to start annotation.</h2>
+            </div>
+            <div class="prompt-meta">
+              <span id="queueCountBadge" class="pill">0 items</span>
+              <span id="statusBadge" class="pill">pending</span>
+            </div>
+          </div>
+
+          <div class="belt-main">
+            <div class="canvas-wrap">
+              <canvas id="fieldCanvas" width="1100" height="760" aria-label="Field texture"></canvas>
+              <canvas id="sceneCanvas" width="1100" height="760" aria-label="Static electric charge problem"></canvas>
+            </div>
+
+            <aside class="decision-station">
+              <div class="station-kicker">지금 할 일</div>
+              <h2 id="workInstruction">정답 후보 하나를 고르고 넘기세요.</h2>
+
+              <label class="big-answer-label" for="humanAnswerSelect">입력부</label>
+              <select id="humanAnswerSelect" class="big-answer-select"></select>
+
+              <button id="submitNextBtn" class="primary-btn submit-btn">Save & Next</button>
+
+              <div class="belt-secondary-actions">
+                <button data-status="rejected" class="status-btn reject">Reject</button>
+                <button data-status="ambiguous" class="status-btn warn">Ambiguous</button>
+                <button id="skipBtn" class="quiet-btn">Skip</button>
+              </div>
+            </aside>
+          </div>
+
+          <div class="belt-controls">
+            <button id="prevBtn" class="quiet-btn">Previous</button>
+            <input id="carouselRange" type="range" min="0" max="0" value="0" />
+            <button id="nextBtn" class="quiet-btn">Next</button>
+            <button id="cycleBatchBtn" class="quiet-btn">Export JSONL</button>
+            <button id="safNewBtn" class="quiet-btn">New 100</button>
+            <button id="resetBatchBtn" class="danger-btn">Reset 100</button>
+            <button id="safSettingsBtn" class="quiet-btn">Settings</button>
+          </div>
+          <div class="thumb-strip" id="thumbStrip"></div>
+        </section>
+      </section>
+
+      <section id="settingsDomain" class="domain settings-domain hidden">
+        <div class="settings-toolbar">
+          <button id="safBeltBtn" class="quiet-btn">Back to SAF Belt</button>
+        </div>
+        <div class="settings-grid">
+          <section class="panel generator-panel">
+            <div class="panel-heading">
+              <h2>Generator Settings</h2>
+              <span id="settingsQueueBadge" class="pill">0 items</span>
+            </div>
+
+            <label class="field-label" for="familySelect">Dataset Family</label>
+            <select id="familySelect">
+              <option value="spatial_3d_scene">3D Spatial Labeling</option>
+              <option value="electric_charge_field">Electric Charge Field</option>
+            </select>
+
+            <label class="field-label field-gap" for="seedInput">Seed</label>
+            <div class="input-row">
+              <input id="seedInput" type="text" value="human-loop-260631" spellcheck="false" />
+              <button id="randomSeedBtn" class="icon-btn" title="Random seed">↻</button>
+            </div>
+
+            <label class="field-label" for="problemTypeSelect">Problem Type</label>
+            <select id="problemTypeSelect">
+              <option value="mixed">Mixed hard set</option>
+              <optgroup label="3D Spatial">
+                <option value="frontmost_object">Frontmost object</option>
+                <option value="leftmost_object">Leftmost object</option>
+                <option value="tallest_object">Tallest object</option>
+                <option value="count_color">Count by color</option>
+                <option value="count_occluded">Count partially hidden</option>
+                <option value="nearest_to_target">Nearest to target</option>
+              </optgroup>
+              <optgroup label="Electric Charge">
+                <option value="field_direction">Net field direction</option>
+                <option value="force_positive">Force on + test charge</option>
+                <option value="force_negative">Force on - test charge</option>
+                <option value="weakest_field_candidate">Weakest field candidate</option>
+                <option value="highest_potential_candidate">Highest potential candidate</option>
+                <option value="potential_sign">Potential sign</option>
+              </optgroup>
+            </select>
+
+            <div class="slider-field">
+              <div class="slider-meta">
+                <label for="difficultyRange">Difficulty</label>
+                <output id="difficultyOut">7</output>
+              </div>
+              <input id="difficultyRange" type="range" min="1" max="10" value="7" />
+            </div>
+
+            <div class="control-grid">
+              <label>
+                Objects / Charges
+                <input id="chargeCountInput" type="number" min="2" max="14" value="8" />
+              </label>
+              <label>
+                Candidates
+                <input id="candidateCountInput" type="number" min="3" max="6" value="4" />
+              </label>
+              <label>
+                Batch
+                <input id="batchCountInput" type="number" min="1" max="200" value="100" />
+              </label>
+              <label>
+                Grid
+                <input id="gridExtentInput" type="number" min="4" max="10" value="6" />
+              </label>
+            </div>
+
+            <div class="toggle-list">
+              <label><input id="nearCancelToggle" type="checkbox" checked /> Favor near-cancellation</label>
+              <label><input id="symmetryToggle" type="checkbox" checked /> Add symmetry traps</label>
+              <label><input id="hardDistractorToggle" type="checkbox" checked /> Hard distractors</label>
+            </div>
+
+            <button id="generateBtn" class="primary-btn">Regenerate Batch</button>
+          </section>
+
+          <section class="panel data-panel">
+            <div class="panel-heading">
+              <h2>Files</h2>
+            </div>
+
+            <div class="file-actions">
+              <button id="exportJsonlBtn" class="quiet-btn">Export Full JSONL</button>
+              <button id="extractApprovedBtn" class="quiet-btn">Extract Approved JSONL</button>
+              <button id="exportPngBtn" class="quiet-btn">Export Current PNG</button>
+              <label class="file-import-btn">
+                Import JSONL
+                <input id="importJsonlInput" type="file" accept=".jsonl,.json,application/jsonl,application/json" />
+              </label>
+              <button id="clearReviewedBtn" class="danger-btn">Clear Reviewed</button>
+            </div>
+
+            <div class="answer-box settings-answer">
+              <span>Auto Solver</span>
+              <strong id="autoAnswerText">-</strong>
+            </div>
+
+            <div class="stats-grid" id="statsGrid">
+              <div><strong>0</strong><span>approved</span></div>
+              <div><strong>0</strong><span>rejected</span></div>
+              <div><strong>0</strong><span>pending</span></div>
+              <div><strong>0</strong><span>eval picks</span></div>
+            </div>
+
+            <details class="solver-card">
+              <summary>Current Solver Trace</summary>
+              <pre id="solverTrace"></pre>
+            </details>
+
+            <details class="solver-card">
+              <summary>Current Instance Variables</summary>
+              <pre id="variablesView"></pre>
+            </details>
+          </section>
+
+          <section class="panel review-panel">
+            <div class="panel-heading">
+              <h2>Detailed Labeling</h2>
+              <select id="splitSelect">
+                <option value="train">train</option>
+                <option value="eval">eval</option>
+                <option value="test">test</option>
+                <option value="quarantine">quarantine</option>
+              </select>
+            </div>
+
+            <div class="action-grid">
+              <button data-status="approved" class="status-btn approve">Approve</button>
+              <button data-status="fixed" class="status-btn fix">Fix</button>
+              <button data-status="rejected" class="status-btn reject">Reject</button>
+              <button data-status="ambiguous" class="status-btn warn">Ambiguous</button>
+            </div>
+
+            <div class="flag-grid" id="flagGrid">
+              <button data-flag="good_eval_sample">Good Eval</button>
+              <button data-flag="solver_suspicious">Solver Suspicious</button>
+              <button data-flag="image_unclear">Image Unclear</button>
+              <button data-flag="too_easy">Too Easy</button>
+              <button data-flag="too_hard">Too Hard</button>
+              <button data-flag="duplicate_pattern">Duplicate</button>
+              <button data-flag="high_cancellation">High Cancellation</button>
+              <button data-flag="needs_second_pass">Second Pass</button>
+            </div>
+
+            <div class="label-sliders">
+              <label>
+                Visual clarity
+                <input data-label="visualClarity" type="range" min="1" max="5" value="4" />
+              </label>
+              <label>
+                Math depth
+                <input data-label="mathDepth" type="range" min="1" max="5" value="4" />
+              </label>
+              <label>
+                Ambiguity risk
+                <input data-label="ambiguityRisk" type="range" min="1" max="5" value="2" />
+              </label>
+              <label>
+                Novelty
+                <input data-label="novelty" type="range" min="1" max="5" value="3" />
+              </label>
+              <label>
+                Pedagogical value
+                <input data-label="pedagogicalValue" type="range" min="1" max="5" value="4" />
+              </label>
+            </div>
+
+            <label class="field-label" for="notesInput">Notes</label>
+            <textarea id="notesInput" rows="4" placeholder="Human correction, uncertainty, or why this is a strong sample"></textarea>
+
+            <button id="overlayBtn" class="quiet-btn overlay-wide-btn">Solver Overlay</button>
+          </section>
+        </div>
+      </section>
+
+      <section id="reasoningDomain" class="domain reasoning-domain hidden">
+        <div class="reasoning-shell">
+          <section class="reasoning-board">
+            <div class="reasoning-head">
+              <div class="reasoning-title-block">
+                <span id="reasoningBadge" class="reasoning-badge">VQ</span>
+                <div>
+                  <h2 id="reasoningTitle">Visual Query</h2>
+                  <p id="reasoningSubtitle">SQL-like visual reasoning scaffold</p>
+                </div>
+              </div>
+              <div class="prompt-meta">
+                <span id="reasoningCountBadge" class="pill">100 drafts</span>
+                <span id="reasoningStatusBadge" class="pill">pending</span>
+              </div>
+            </div>
+
+            <div class="reasoning-main">
+              <div class="reasoning-specimen">
+                <div id="reasoningScene" class="reasoning-scene" aria-label="Static reasoning draft"></div>
+              </div>
+
+              <aside class="decision-station reasoning-station">
+                <div class="station-kicker">지금 할 일</div>
+                <h2 id="reasoningInstruction">정답 후보 하나를 고르고 넘기세요.</h2>
+
+                <label class="big-answer-label" for="reasoningAnswerSelect">입력부</label>
+                <select id="reasoningAnswerSelect" class="big-answer-select"></select>
+
+                <button id="reasoningSubmitNextBtn" class="primary-btn submit-btn">Save & Next</button>
+
+                <div class="belt-secondary-actions">
+                  <button data-rf-status="rejected" class="status-btn reject">Reject</button>
+                  <button data-rf-status="ambiguous" class="status-btn warn">Ambiguous</button>
+                  <button id="reasoningSkipBtn" class="quiet-btn">Skip</button>
+                </div>
+              </aside>
+            </div>
+
+            <div class="reasoning-controls">
+              <button id="reasoningPrevBtn" class="quiet-btn">Previous</button>
+              <input id="reasoningRange" type="range" min="0" max="0" value="0" />
+              <button id="reasoningNextBtn" class="quiet-btn">Next</button>
+              <button id="reasoningExportBtn" class="quiet-btn">Export JSONL</button>
+              <button id="reasoningNewBtn" class="quiet-btn">New 100</button>
+              <button id="reasoningSchemaBtn" class="quiet-btn">Label Schema</button>
+            </div>
+            <div class="thumb-strip reasoning-thumb-strip" id="reasoningThumbStrip"></div>
+          </section>
+        </div>
+      </section>
+
+      <div id="confirmModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <div class="modal-card">
+          <h2 id="confirmTitle">Export current batch?</h2>
+          <p id="confirmMessage">
+            This will download the current JSONL batch, then replace the belt with a fresh 100-item batch.
+          </p>
+          <div class="modal-actions">
+            <button id="confirmNoBtn" class="quiet-btn">No</button>
+            <button id="confirmYesBtn" class="primary-btn">Yes</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="schemaModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="schemaTitle">
+        <div class="modal-card schema-modal-card">
+          <div class="panel-heading">
+            <h2 id="schemaTitle">Label Schema</h2>
+            <button id="schemaCloseBtn" class="quiet-btn modal-icon-btn">Close</button>
+          </div>
+          <div id="schemaMeta" class="reasoning-schema"></div>
+          <label class="field-label field-gap" for="reasoningNotesInput">Notes</label>
+          <textarea id="reasoningNotesInput" rows="6" placeholder="판단 근거, 애매한 지점, 생성 규칙 아이디어"></textarea>
+          <button id="schemaDoneBtn" class="primary-btn schema-done-btn">Done</button>
+        </div>
+      </div>
+    </main>
+
+    <script src="src/core.js"></script>
+    <script src="src/app.js"></script>
+  </body>
+</html>
