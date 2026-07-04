@@ -17,7 +17,7 @@ https://github.com/studyreadbook4ever/myChangGo/raw/main/260704pw/password-stora
 ## 사용법
 
 1. APK를 설치하고 `Password Storage` 앱을 실행합니다.
-2. 최초 화면에서 `엔터프라이즈 추가`를 눌러 금고 이름을 만듭니다.
+2. 최초 화면에서 `추가` 버튼을 눌러 엔터프라이즈 금고 이름을 만듭니다.
 3. 이후 최초 화면에서 원하는 엔터프라이즈를 선택하면 해당 금고의 표로 들어갑니다.
 4. 표는 `6 x 40` 구조입니다. 40개의 행마다 `Slot`, `Password`, `ID`, `Name`, `Memo`, `Reset` 6칸이 있습니다.
 5. `Slot`과 `Password` 칸은 직접 수정할 수 없는 고정 칸입니다.

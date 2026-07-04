@@ -111,34 +111,53 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(COLOR_BG)
-            setPadding(dp(18f), dp(18f), dp(18f), dp(14f))
+            setPadding(dp(24f), dp(52f), dp(24f), dp(18f))
             filterTouchesWhenObscured = true
         }
 
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val titleBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        val eyebrow = TextView(this).apply {
+            text = "LOCAL VAULTS"
+            setTextColor(COLOR_MUTED)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.08f
+        }
+        titleBox.addView(eyebrow, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
         val title = TextView(this).apply {
-            text = "Password Storage"
+            text = "Password Store"
             setTextColor(COLOR_HEADER)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 27f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
             typeface = Typeface.DEFAULT_BOLD
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
         }
-        root.addView(title, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        titleBox.addView(title, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        header.addView(titleBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(createAddEnterpriseButton(), LinearLayout.LayoutParams(dp(116f), dp(42f)))
+        root.addView(header, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         val subtitle = TextView(this).apply {
             text = "엔터프라이즈를 추가하거나 선택하세요"
             setTextColor(COLOR_MUTED)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setPadding(0, dp(5f), 0, dp(14f))
+            setPadding(0, dp(4f), 0, dp(18f))
         }
         root.addView(subtitle, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-
-        root.addView(createAddEnterpriseButton(), LinearLayout.LayoutParams.MATCH_PARENT, dp(52f))
 
         val scroll = ScrollView(this).apply {
             isFillViewport = true
             clipToPadding = false
-            setPadding(0, dp(12f), 0, 0)
         }
 
         val list = LinearLayout(this).apply {
@@ -170,14 +189,15 @@ class MainActivity : Activity() {
 
     private fun createAddEnterpriseButton(): TextView {
         return TextView(this).apply {
-            text = "엔터프라이즈 추가"
+            text = "추가"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            background = rounded(COLOR_ACCENT, COLOR_ACCENT, 8)
+            background = rounded(COLOR_ACCENT, COLOR_ACCENT, 6)
             setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_add_enterprise, 0, 0, 0)
-            compoundDrawablePadding = dp(8f)
+            compoundDrawablePadding = dp(6f)
+            contentDescription = "엔터프라이즈 추가"
             filterTouchesWhenObscured = true
             setOnClickListener { requestEnterpriseName() }
         }
@@ -196,37 +216,78 @@ class MainActivity : Activity() {
 
     private fun createEnterpriseRow(enterprise: Enterprise): View {
         val row = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = rounded(COLOR_PANEL, COLOR_BORDER, 8)
-            setPadding(dp(16f), 0, dp(16f), 0)
+            setPadding(dp(12f), 0, dp(12f), 0)
             filterTouchesWhenObscured = true
             setOnClickListener { openEnterprise(enterprise.id) }
         }
 
+        val avatar = TextView(this).apply {
+            text = enterpriseInitials(enterprise.name)
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            background = rounded(enterpriseColor(enterprise.id), enterpriseColor(enterprise.id), 6)
+            includeFontPadding = false
+        }
+        row.addView(avatar, LinearLayout.LayoutParams(dp(42f), dp(42f)))
+
+        val textBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12f), 0, dp(8f), 0)
+        }
         val name = TextView(this).apply {
             text = enterprise.name
             setTextColor(COLOR_TEXT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             typeface = Typeface.DEFAULT_BOLD
             isSingleLine = true
             ellipsize = TextUtils.TruncateAt.END
         }
-        row.addView(name, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        textBox.addView(name, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         val detail = TextView(this).apply {
-            text = "6칸 x 40행 비밀번호 금고"
+            text = "6 x 40 offline biometric vault"
             setTextColor(COLOR_MUTED)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(0, dp(4f), 0, 0)
+            isSingleLine = true
+            ellipsize = TextUtils.TruncateAt.END
         }
-        row.addView(detail, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        textBox.addView(detail, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        row.addView(textBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val chevron = TextView(this).apply {
+            text = ">"
+            setTextColor(COLOR_MUTED)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+        }
+        row.addView(chevron, LinearLayout.LayoutParams(dp(24f), dp(42f)))
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, dp(8f))
             addView(row, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT)
         }
+    }
+
+    private fun enterpriseInitials(name: String): String {
+        return name.trim().take(2).ifBlank { "E" }.uppercase(Locale.US)
+    }
+
+    private fun enterpriseColor(id: String): Int {
+        val colors = intArrayOf(
+            Color.rgb(124, 58, 237),
+            Color.rgb(14, 116, 144),
+            Color.rgb(22, 163, 74),
+            Color.rgb(194, 65, 12),
+            Color.rgb(71, 85, 105)
+        )
+        return colors[(id.hashCode() and Int.MAX_VALUE) % colors.size]
     }
 
     private fun requestEnterpriseName() {
@@ -936,16 +997,16 @@ class MainActivity : Activity() {
         private val CELL_WIDTHS_DP = intArrayOf(96, 156, 138, 138, 214, 74)
         private val columnLabels = listOf("Slot", "Password", "ID", "Name", "Memo", "Reset")
 
-        private val COLOR_BG = Color.rgb(246, 248, 251)
-        private val COLOR_PANEL = Color.rgb(255, 255, 255)
-        private val COLOR_HEADER = Color.rgb(15, 23, 42)
-        private val COLOR_HEADER_TEXT = Color.rgb(248, 250, 252)
-        private val COLOR_BORDER = Color.rgb(226, 232, 240)
-        private val COLOR_PASSWORD = Color.rgb(232, 240, 254)
-        private val COLOR_PASSWORD_REVEALED = Color.rgb(220, 252, 231)
-        private val COLOR_RESET = Color.rgb(241, 245, 249)
-        private val COLOR_TEXT = Color.rgb(30, 41, 59)
-        private val COLOR_MUTED = Color.rgb(100, 116, 139)
-        private val COLOR_ACCENT = Color.rgb(37, 99, 235)
+        private val COLOR_BG = Color.rgb(7, 7, 14)
+        private val COLOR_PANEL = Color.rgb(17, 16, 29)
+        private val COLOR_HEADER = Color.rgb(245, 247, 250)
+        private val COLOR_HEADER_TEXT = Color.rgb(245, 247, 250)
+        private val COLOR_BORDER = Color.rgb(33, 32, 49)
+        private val COLOR_PASSWORD = Color.rgb(20, 26, 46)
+        private val COLOR_PASSWORD_REVEALED = Color.rgb(18, 66, 48)
+        private val COLOR_RESET = Color.rgb(22, 22, 34)
+        private val COLOR_TEXT = Color.rgb(235, 238, 245)
+        private val COLOR_MUTED = Color.rgb(125, 132, 150)
+        private val COLOR_ACCENT = Color.rgb(83, 91, 242)
     }
 }
