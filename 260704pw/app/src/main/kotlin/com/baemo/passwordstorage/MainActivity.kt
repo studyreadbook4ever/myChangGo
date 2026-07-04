@@ -30,6 +30,7 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -41,9 +42,11 @@ import android.widget.TableRow
 import android.widget.TextView
 import android.widget.Toast
 import java.io.IOException
+import java.text.SimpleDateFormat
 import java.nio.charset.StandardCharsets
 import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
 import javax.crypto.Cipher
@@ -56,6 +59,7 @@ class MainActivity : Activity() {
     private val mainExecutor = Executor { command -> handler.post(command) }
     private val passwordCells = arrayOfNulls<TextView>(ENTRY_COUNT)
     private val editableCells = Array(EDITABLE_COLUMN_COUNT) { arrayOfNulls<EditText>(ENTRY_COUNT) }
+    private val lastCheckedCells = arrayOfNulls<TextView>(ENTRY_COUNT)
     private val hideTasks = mutableMapOf<Int, Runnable>()
 
     private lateinit var enterpriseStore: EnterpriseStore
@@ -221,7 +225,7 @@ class MainActivity : Activity() {
             background = rounded(COLOR_PANEL, COLOR_BORDER, 8)
             setPadding(dp(12f), 0, dp(12f), 0)
             filterTouchesWhenObscured = true
-            setOnClickListener { openEnterprise(enterprise.id) }
+            setOnClickListener { authenticateEnterpriseEntry(enterprise.id) }
         }
 
         val avatar = TextView(this).apply {
@@ -250,7 +254,7 @@ class MainActivity : Activity() {
         textBox.addView(name, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         val detail = TextView(this).apply {
-            text = "6 x 40 offline biometric vault"
+            text = "7 x 40 offline biometric vault"
             setTextColor(COLOR_MUTED)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             isSingleLine = true
@@ -324,12 +328,42 @@ class MainActivity : Activity() {
                 }
                 val enterprise = enterpriseStore.addEnterprise(name)
                 dialog.dismiss()
-                openEnterprise(enterprise.id)
+                authenticateEnterpriseEntry(enterprise.id)
             }
         }
         dialog.show()
         dialog.window?.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         input.requestFocus()
+    }
+
+    private fun authenticateEnterpriseEntry(enterpriseId: String) {
+        val enterpriseName = enterpriseStore.nameOf(enterpriseId)
+        val cancellationSignal = CancellationSignal()
+        val prompt = BiometricPrompt.Builder(this)
+            .setTitle("엔터프라이즈 열기")
+            .setSubtitle(enterpriseName)
+            .setNegativeButton("취소", mainExecutor, DialogInterface.OnClickListener { _, _ ->
+                cancellationSignal.cancel()
+            })
+            .build()
+
+        prompt.authenticate(
+            cancellationSignal,
+            mainExecutor,
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    Toast.makeText(this@MainActivity, errString, Toast.LENGTH_SHORT).show()
+                }
+
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    openEnterprise(enterpriseId)
+                }
+
+                override fun onAuthenticationFailed() {
+                    Toast.makeText(this@MainActivity, "인증 실패", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 
     private fun createVaultContent(enterpriseId: String): View {
@@ -370,7 +404,7 @@ class MainActivity : Activity() {
             ellipsize = TextUtils.TruncateAt.END
         }
         val subtitle = TextView(this).apply {
-            text = "Slot / Password / ID / Name / Memo / Reset"
+            text = "Slot / ID / Password / Name / COMMENT / Last Checked / Reset"
             setTextColor(COLOR_MUTED)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             isSingleLine = true
@@ -381,7 +415,7 @@ class MainActivity : Activity() {
         header.addView(titleBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         val shape = TextView(this).apply {
-            text = "6 x 40"
+            text = "7 x 40"
             setTextColor(COLOR_MUTED)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             gravity = Gravity.CENTER
@@ -498,6 +532,8 @@ class MainActivity : Activity() {
                 contentDescription = "${slotName(row)} fixed slot"
             }
 
+            ID_COLUMN -> idCell(enterpriseId, row)
+
             PASSWORD_COLUMN -> baseTextCell().apply {
                 text = MASK
                 setTextColor(COLOR_TEXT)
@@ -510,7 +546,8 @@ class MainActivity : Activity() {
                 passwordCells[row] = this
             }
 
-            ID_COLUMN, NAME_COLUMN, MEMO_COLUMN -> editableCell(enterpriseId, row, column - ID_COLUMN)
+            NAME_COLUMN, COMMENT_COLUMN -> editableCell(enterpriseId, row, column - NAME_COLUMN)
+            LAST_CHECKED_COLUMN -> lastCheckedCell(enterpriseId, row)
             else -> resetCell(enterpriseId, row)
         }
     }
@@ -525,6 +562,85 @@ class MainActivity : Activity() {
             setPadding(dp(10f), 0, dp(10f), 0)
             setTextIsSelectable(false)
             isLongClickable = false
+        }
+    }
+
+    private fun idCell(enterpriseId: String, row: Int): View {
+        val storedId = cellPrefs.getString(idKey(enterpriseId, row), "").orEmpty()
+        val locked = cellPrefs.getBoolean(idLockedKey(enterpriseId, row), false) && storedId.isNotBlank()
+        if (locked) {
+            return baseTextCell().apply {
+                text = storedId
+                setTextColor(COLOR_TEXT)
+                typeface = Typeface.DEFAULT_BOLD
+                background = rounded(COLOR_RESET, COLOR_BORDER, 8)
+                contentDescription = "${slotName(row)} locked id"
+            }
+        }
+
+        return NoCopyEditText(this).apply {
+            setSingleLine(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextColor(COLOR_TEXT)
+            setHintTextColor(COLOR_MUTED)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setPadding(dp(10f), 0, dp(10f), 0)
+            background = rounded(COLOR_PANEL, COLOR_BORDER, 8)
+            hint = "ID"
+            inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+                    InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            privateImeOptions = "com.google.android.inputmethod.latin.noMicrophoneKey;noPersonalizedLearning"
+            filterTouchesWhenObscured = true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+            }
+            setText(storedId)
+            setOnFocusChangeListener { view, hasFocus ->
+                if (!hasFocus) {
+                    lockIdIfReady(view as EditText, enterpriseId, row)
+                }
+            }
+            setOnEditorActionListener { view, actionId, _ ->
+                if (actionId == EditorInfo.IME_ACTION_DONE) {
+                    lockIdIfReady(view as EditText, enterpriseId, row)
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    private fun lockIdIfReady(cell: EditText, enterpriseId: String, row: Int) {
+        val value = cell.text?.toString()?.trim().orEmpty()
+        if (value.isBlank()) {
+            return
+        }
+        cellPrefs.edit()
+            .putString(idKey(enterpriseId, row), value)
+            .putBoolean(idLockedKey(enterpriseId, row), true)
+            .apply()
+        cell.setText(value)
+        cell.isEnabled = false
+        cell.alpha = 1f
+        cell.clearFocus()
+        cell.setTextColor(COLOR_TEXT)
+        cell.typeface = Typeface.DEFAULT_BOLD
+        cell.background = rounded(COLOR_RESET, COLOR_BORDER, 8)
+        Toast.makeText(this, "ID 고정됨", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun lastCheckedCell(enterpriseId: String, row: Int): TextView {
+        return baseTextCell().apply {
+            text = cellPrefs.getString(lastCheckedKey(enterpriseId, row), "Never")
+            setTextColor(COLOR_MUTED)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            background = rounded(COLOR_PANEL, COLOR_BORDER, 8)
+            contentDescription = "${slotName(row)} last checked time"
+            lastCheckedCells[row] = this
         }
     }
 
@@ -588,7 +704,7 @@ class MainActivity : Activity() {
             val cipher = vault.createDecryptCipher(enterpriseId, row)
             authenticateWithCipher("비밀번호 보기", slotName(row), cipher) { authedCipher ->
                 val password = vault.decryptPassword(enterpriseId, row, authedCipher)
-                showPassword(row, password)
+                showPassword(enterpriseId, row, password)
             }
         } catch (exception: Exception) {
             showVaultError(exception)
@@ -598,7 +714,7 @@ class MainActivity : Activity() {
     private fun requestRowReset(enterpriseId: String, row: Int) {
         AlertDialog.Builder(this)
             .setTitle("${slotName(row)} 초기화")
-            .setMessage("ID, Name, Memo를 비우고 비밀번호를 새로 저장하거나 완전히 삭제합니다.")
+            .setMessage("ID 잠금, Name, COMMENT, Last Checked Time을 비우고 비밀번호를 새로 저장하거나 완전히 삭제합니다.")
             .setPositiveButton("새 비밀번호") { _, _ -> requestNewPassword(enterpriseId, row, clearEditableCells = true) }
             .setNeutralButton("완전 삭제") { _, _ -> deleteRow(enterpriseId, row) }
             .setNegativeButton("취소", null)
@@ -661,7 +777,7 @@ class MainActivity : Activity() {
                 if (clearEditableCells) {
                     clearEditableCells(enterpriseId, row)
                 }
-                showPassword(row, password)
+                showPassword(enterpriseId, row, password)
                 clearClipboard()
                 Toast.makeText(this, "저장 완료", Toast.LENGTH_SHORT).show()
             }
@@ -683,6 +799,12 @@ class MainActivity : Activity() {
             editableCells[editableColumn][row]?.setText("")
             cellPrefs.edit().remove(cellKey(enterpriseId, row, editableColumn)).apply()
         }
+        cellPrefs.edit()
+            .remove(idKey(enterpriseId, row))
+            .remove(idLockedKey(enterpriseId, row))
+            .remove(lastCheckedKey(enterpriseId, row))
+            .apply()
+        lastCheckedCells[row]?.text = "Never"
     }
 
     private fun authenticateWithCipher(
@@ -726,9 +848,10 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun showPassword(row: Int, password: String) {
+    private fun showPassword(enterpriseId: String, row: Int, password: String) {
         val cell = passwordCells[row] ?: return
         hideTasks.remove(row)?.let(handler::removeCallbacks)
+        recordLastChecked(enterpriseId, row)
         cell.text = password
         cell.setTextColor(Color.rgb(21, 128, 61))
         cell.typeface = Typeface.MONOSPACE
@@ -738,6 +861,12 @@ class MainActivity : Activity() {
         val hideTask = Runnable { hidePassword(row) }
         hideTasks[row] = hideTask
         handler.postDelayed(hideTask, REVEAL_MS)
+    }
+
+    private fun recordLastChecked(enterpriseId: String, row: Int) {
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        cellPrefs.edit().putString(lastCheckedKey(enterpriseId, row), timestamp).apply()
+        lastCheckedCells[row]?.text = timestamp
     }
 
     private fun hidePassword(row: Int) {
@@ -772,14 +901,25 @@ class MainActivity : Activity() {
 
     private fun editableHint(editableColumn: Int): String {
         return when (editableColumn) {
-            0 -> "ID"
-            1 -> "Name"
-            else -> "Memo"
+            0 -> "Name"
+            else -> "COMMENT"
         }
     }
 
     private fun cellKey(enterpriseId: String, row: Int, editableColumn: Int): String {
         return "e_${enterpriseId}_r${row}_m${editableColumn}"
+    }
+
+    private fun idKey(enterpriseId: String, row: Int): String {
+        return "e_${enterpriseId}_r${row}_id"
+    }
+
+    private fun idLockedKey(enterpriseId: String, row: Int): String {
+        return "e_${enterpriseId}_r${row}_id_locked"
+    }
+
+    private fun lastCheckedKey(enterpriseId: String, row: Int): String {
+        return "e_${enterpriseId}_r${row}_last_checked"
     }
 
     private fun slotName(row: Int) = String.format(Locale.US, "Slot %02d", row + 1)
@@ -981,21 +1121,22 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        private const val TABLE_COLUMN_COUNT = 6
+        private const val TABLE_COLUMN_COUNT = 7
         private const val ENTRY_COUNT = 40
         private const val SLOT_COLUMN = 0
-        private const val PASSWORD_COLUMN = 1
-        private const val ID_COLUMN = 2
+        private const val ID_COLUMN = 1
+        private const val PASSWORD_COLUMN = 2
         private const val NAME_COLUMN = 3
-        private const val MEMO_COLUMN = 4
-        private const val RESET_COLUMN = 5
-        private const val EDITABLE_COLUMN_COUNT = 3
+        private const val COMMENT_COLUMN = 4
+        private const val LAST_CHECKED_COLUMN = 5
+        private const val RESET_COLUMN = 6
+        private const val EDITABLE_COLUMN_COUNT = 2
         private const val CELL_HEIGHT_DP = 58
         private const val REVEAL_MS = 15_000L
         private const val MASK = "----------"
 
-        private val CELL_WIDTHS_DP = intArrayOf(96, 156, 138, 138, 214, 74)
-        private val columnLabels = listOf("Slot", "Password", "ID", "Name", "Memo", "Reset")
+        private val CELL_WIDTHS_DP = intArrayOf(96, 150, 156, 140, 220, 186, 74)
+        private val columnLabels = listOf("Slot", "ID", "Password", "Name", "COMMENT", "Last Checked Time", "RESET")
 
         private val COLOR_BG = Color.rgb(7, 7, 14)
         private val COLOR_PANEL = Color.rgb(17, 16, 29)
