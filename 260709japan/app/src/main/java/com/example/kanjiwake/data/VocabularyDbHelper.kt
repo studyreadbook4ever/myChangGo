@@ -5,9 +5,12 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import java.io.BufferedReader
+import java.io.InputStreamReader
 
 class VocabularyDbHelper(context: Context) :
     SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+    private val appContext = context.applicationContext
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -69,22 +72,53 @@ class VocabularyDbHelper(context: Context) :
     private fun seed(db: SQLiteDatabase) {
         db.beginTransaction()
         try {
-            SeedWords.entries.forEach { word ->
-                val values = ContentValues().apply {
-                    put(COL_TERM, word.term)
-                    put(COL_READING, word.reading)
-                    put(COL_MEANING, word.meaning)
-                    put(COL_DETAIL, word.detail)
-                    put(COL_EXAMPLE, word.example)
-                    put(COL_EXAMPLE_MEANING, word.exampleMeaning)
-                    put(COL_PART_OF_SPEECH, word.partOfSpeech)
-                }
-                db.insertWithOnConflict(TABLE_WORDS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
-            }
+            SeedWords.entries.forEach { word -> insertWord(db, word) }
+            seedFromAsset(db)
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
         }
+    }
+
+    private fun seedFromAsset(db: SQLiteDatabase) {
+        appContext.assets.open(VOCABULARY_ASSET).use { inputStream ->
+            BufferedReader(InputStreamReader(inputStream, Charsets.UTF_8)).useLines { lines ->
+                lines
+                    .filter { it.isNotBlank() }
+                    .filterNot { it.startsWith("term\t") }
+                    .forEach { line ->
+                        val columns = line.split('\t')
+                        check(columns.size == ASSET_COLUMN_COUNT) {
+                            "Invalid vocabulary row: $line"
+                        }
+                        insertWord(
+                            db,
+                            JapaneseWord(
+                                term = columns[0],
+                                reading = columns[1],
+                                meaning = columns[2],
+                                detail = columns[3],
+                                example = columns[4],
+                                exampleMeaning = columns[5],
+                                partOfSpeech = columns[6]
+                            )
+                        )
+                    }
+            }
+        }
+    }
+
+    private fun insertWord(db: SQLiteDatabase, word: JapaneseWord) {
+        val values = ContentValues().apply {
+            put(COL_TERM, word.term)
+            put(COL_READING, word.reading)
+            put(COL_MEANING, word.meaning)
+            put(COL_DETAIL, word.detail)
+            put(COL_EXAMPLE, word.example)
+            put(COL_EXAMPLE_MEANING, word.exampleMeaning)
+            put(COL_PART_OF_SPEECH, word.partOfSpeech)
+        }
+        db.insertWithOnConflict(TABLE_WORDS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
     }
 
     private fun Cursor.toWord(): JapaneseWord {
@@ -102,7 +136,9 @@ class VocabularyDbHelper(context: Context) :
 
     companion object {
         private const val DB_NAME = "kanji_wake_words.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
+        private const val VOCABULARY_ASSET = "vocabulary.tsv"
+        private const val ASSET_COLUMN_COUNT = 7
         private const val TABLE_WORDS = "words"
         private const val COL_ID = "_id"
         private const val COL_TERM = "term"

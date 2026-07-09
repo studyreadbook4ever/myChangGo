@@ -82,7 +82,7 @@ class MainActivity : Activity() {
 
         val count = repository.wordCount()
         val countText = TextView(this).apply {
-            text = "현재 로컬 DB 단어 $count 개 · 명사와 동사구를 같은 확률로 랜덤 출제"
+            text = "현재 로컬 DB 단어 $count 개 · 한자 복합명사와 동사구를 랜덤 출제"
             kwText(sizeSp = 14f, color = KwColor.Plum, bold = true)
             background = rounded(KwColor.Surface, radiusDp = 8, strokeColor = KwColor.Line)
             setPadding(dp(14), dp(10), dp(14), dp(10))
