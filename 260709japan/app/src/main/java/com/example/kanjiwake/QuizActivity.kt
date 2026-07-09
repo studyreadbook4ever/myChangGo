@@ -30,7 +30,6 @@ class QuizActivity : Activity() {
     private lateinit var modeText: TextView
     private lateinit var topActionButton: Button
     private lateinit var termText: TextView
-    private lateinit var readingText: TextView
     private lateinit var promptText: TextView
     private lateinit var choicesContainer: LinearLayout
     private lateinit var feedbackPanel: LinearLayout
@@ -164,12 +163,6 @@ class QuizActivity : Activity() {
         }
         questionPanel.addView(termText)
 
-        readingText = TextView(this).apply {
-            kwText(sizeSp = 17f, color = KwColor.Muted, bold = true)
-            gravity = Gravity.CENTER_HORIZONTAL
-        }
-        questionPanel.addView(readingText)
-
         promptText = TextView(this).apply {
             text = "이 한자 단어의 뜻은?"
             kwText(sizeSp = 16f, color = KwColor.Ink, bold = true)
@@ -253,7 +246,6 @@ class QuizActivity : Activity() {
         lastWordId = question.answer.id
 
         termText.text = question.answer.term
-        readingText.text = "${question.answer.reading} · ${question.answer.partOfSpeech}"
         promptText.text = "이 한자 단어의 뜻은?"
         feedbackPanel.visibility = View.GONE
 
