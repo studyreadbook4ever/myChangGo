@@ -33,7 +33,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Shows a Japanese vocabulary quiz after ACTION_USER_PRESENT when the user enables soft lock monitoring." />
+                android:value="Shows a Japanese vocabulary quiz after the user unlocks the phone when soft lock monitoring is enabled." />
         </service>
 
         <receiver
@@ -42,6 +42,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
     </application>

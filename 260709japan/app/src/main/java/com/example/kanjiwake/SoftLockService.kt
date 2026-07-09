@@ -4,25 +4,66 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.KeyguardManager
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import com.example.kanjiwake.data.VocabularyRepository
 
 class SoftLockService : Service() {
+    private val handler = Handler(Looper.getMainLooper())
     private var receiverRegistered = false
     private var prewarmStarted = false
+    private var waitingForUnlock = false
+    private var unlockPollsRemaining = 0
+    private var pendingUnlockReason = "screen"
+    private var lastLaunchElapsed = 0L
 
     private val unlockReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_USER_PRESENT) {
-                launchLockQuiz()
+            when (intent.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    waitingForUnlock = true
+                    handler.removeCallbacks(unlockPollRunnable)
+                }
+
+                Intent.ACTION_SCREEN_ON -> {
+                    if (waitingForUnlock || isKeyguardLocked()) {
+                        scheduleUnlockCheck("screen-on")
+                    }
+                }
+
+                Intent.ACTION_USER_PRESENT -> {
+                    launchLockQuiz("user-present")
+                }
+            }
+        }
+    }
+
+    private val unlockPollRunnable = object : Runnable {
+        override fun run() {
+            if (!waitingForUnlock && !isKeyguardLocked()) return
+
+            if (!isKeyguardLocked()) {
+                waitingForUnlock = false
+                launchLockQuiz(pendingUnlockReason)
+                return
+            }
+
+            unlockPollsRemaining -= 1
+            if (unlockPollsRemaining > 0) {
+                handler.postDelayed(this, UNLOCK_POLL_INTERVAL_MS)
+            } else {
+                waitingForUnlock = false
             }
         }
     }
@@ -41,6 +82,7 @@ class SoftLockService : Service() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(unlockPollRunnable)
         if (receiverRegistered) {
             unregisterReceiver(unlockReceiver)
             receiverRegistered = false
@@ -52,7 +94,11 @@ class SoftLockService : Service() {
 
     private fun registerUnlockReceiver() {
         if (receiverRegistered) return
-        val filter = IntentFilter(Intent.ACTION_USER_PRESENT)
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(unlockReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
@@ -61,12 +107,36 @@ class SoftLockService : Service() {
         receiverRegistered = true
     }
 
-    private fun launchLockQuiz() {
+    private fun scheduleUnlockCheck(reason: String) {
+        waitingForUnlock = true
+        pendingUnlockReason = reason
+        unlockPollsRemaining = UNLOCK_POLL_ATTEMPTS
+        handler.removeCallbacks(unlockPollRunnable)
+        handler.postDelayed(unlockPollRunnable, UNLOCK_POLL_INITIAL_DELAY_MS)
+    }
+
+    private fun isKeyguardLocked(): Boolean {
+        val keyguardManager = getSystemService(KeyguardManager::class.java)
+        return keyguardManager.isKeyguardLocked
+    }
+
+    private fun launchLockQuiz(reason: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLaunchElapsed < LAUNCH_THROTTLE_MS) return
+        lastLaunchElapsed = now
+        waitingForUnlock = false
+        handler.removeCallbacks(unlockPollRunnable)
+
         val intent = QuizActivity.createIntent(this, QuizActivity.MODE_LOCK).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
-        showUnlockQuizAlert()
+        runCatching {
+            showUnlockQuizAlert()
+        }.onFailure { error ->
+            Log.w(TAG, "Unlock quiz alert failed before direct launch.", error)
+        }
         try {
+            Log.i(TAG, "Launching lock quiz after $reason.")
             startActivity(intent)
         } catch (error: RuntimeException) {
             Log.w(TAG, "Direct quiz launch failed; full-screen notification is available.", error)
@@ -161,9 +231,13 @@ class SoftLockService : Service() {
     companion object {
         private const val TAG = "SoftLockService"
         private const val MONITOR_CHANNEL_ID = "kanji_wake_soft_lock"
-        private const val ALERT_CHANNEL_ID = "kanji_wake_unlock_alerts"
+        private const val ALERT_CHANNEL_ID = "kanji_wake_unlock_alerts_v2"
         private const val NOTIFICATION_ID = 913
         private const val UNLOCK_NOTIFICATION_ID = 914
+        private const val UNLOCK_POLL_INITIAL_DELAY_MS = 350L
+        private const val UNLOCK_POLL_INTERVAL_MS = 500L
+        private const val UNLOCK_POLL_ATTEMPTS = 24
+        private const val LAUNCH_THROTTLE_MS = 5_000L
 
         fun start(context: Context) {
             val intent = Intent(context, SoftLockService::class.java)

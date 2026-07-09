@@ -6,7 +6,9 @@ import android.content.Intent
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        val shouldStart = intent.action == Intent.ACTION_BOOT_COMPLETED ||
+            intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
+        if (!shouldStart) return
 
         val prefs = context.getSharedPreferences(KanjiWakePrefs.NAME, Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean(KanjiWakePrefs.KEY_MONITOR_ENABLED, false)
