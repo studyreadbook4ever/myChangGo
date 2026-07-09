@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Kanji Wake</string>
+    <string name="soft_lock_channel_name">Soft lock monitor</string>
+    <string name="soft_lock_channel_description">Shows a study quiz after the phone is unlocked.</string>
+</resources>
