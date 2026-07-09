@@ -2,13 +2,10 @@ package com.example.kanjiwake
 
 import android.Manifest
 import android.app.Activity
-import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -222,38 +219,12 @@ class MainActivity : Activity() {
         prefs.edit().putBoolean(KanjiWakePrefs.KEY_MONITOR_ENABLED, enabled).apply()
         if (enabled) {
             SoftLockService.start(this)
-            requestFullScreenIntentAccessIfNeeded()
             Toast.makeText(this, "잠금 후 자동 퀴즈를 켰습니다.", Toast.LENGTH_SHORT).show()
         } else {
             SoftLockService.stop(this)
             Toast.makeText(this, "잠금 후 자동 퀴즈를 껐습니다.", Toast.LENGTH_SHORT).show()
         }
         updateMonitorState()
-    }
-
-    private fun requestFullScreenIntentAccessIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
-
-        val manager = getSystemService(NotificationManager::class.java)
-        if (manager.canUseFullScreenIntent()) return
-
-        Toast.makeText(
-            this,
-            "잠금 해제 뒤 퀴즈가 바로 뜨도록 전체 화면 알림을 허용해 주세요.",
-            Toast.LENGTH_LONG
-        ).show()
-
-        val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
-            data = Uri.parse("package:$packageName")
-        }
-        runCatching {
-            startActivity(intent)
-        }.onFailure {
-            val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            startActivity(fallback)
-        }
     }
 
     private fun updateMonitorState() {

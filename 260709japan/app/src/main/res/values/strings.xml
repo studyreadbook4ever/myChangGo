@@ -2,6 +2,4 @@
     <string name="app_name">Kanji Wake</string>
     <string name="soft_lock_channel_name">Soft lock monitor</string>
     <string name="soft_lock_channel_description">Shows a study quiz after the phone is unlocked.</string>
-    <string name="soft_lock_alert_channel_name">Soft lock quiz alerts</string>
-    <string name="soft_lock_alert_channel_description">Opens the Japanese vocabulary quiz after unlock events.</string>
 </resources>

@@ -45,9 +45,6 @@ class QuizActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mode = intent.getStringExtra(EXTRA_MODE) ?: MODE_ENDLESS
-        if (isLockMode()) {
-            SoftLockService.dismissUnlockAlert(this)
-        }
         configureWindow()
         setContentView(buildContent())
         nextQuestion()
