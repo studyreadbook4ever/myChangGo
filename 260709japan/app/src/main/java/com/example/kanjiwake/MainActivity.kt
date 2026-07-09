@@ -4,8 +4,10 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -20,6 +22,7 @@ class MainActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var monitorButton: Button
     private var pendingMonitorEnable = false
+    private var pendingMonitorAfterOverlayPermission = false
     private val prefs by lazy { getSharedPreferences(KanjiWakePrefs.NAME, MODE_PRIVATE) }
     private val repository by lazy { VocabularyRepository(this) }
 
@@ -33,6 +36,10 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (pendingMonitorAfterOverlayPermission && Settings.canDrawOverlays(this)) {
+            pendingMonitorAfterOverlayPermission = false
+            setMonitorEnabled(true)
+        }
         updateMonitorState()
     }
 
@@ -45,7 +52,9 @@ class MainActivity : Activity() {
         if (requestCode == REQUEST_NOTIFICATIONS && pendingMonitorEnable) {
             pendingMonitorEnable = false
             if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-                setMonitorEnabled(true)
+                if (ensureOverlayPermission(enableMonitorAfterGrant = true)) {
+                    setMonitorEnabled(true)
+                }
             } else {
                 Toast.makeText(this, "알림 권한이 없으면 잠금 후 자동 퀴즈가 안정적으로 유지되지 않습니다.", Toast.LENGTH_LONG).show()
                 updateMonitorState()
@@ -118,6 +127,17 @@ class MainActivity : Activity() {
         primaryPanel.addView(secondaryButton("잠금 퀴즈 테스트").apply {
             setOnClickListener {
                 startActivity(QuizActivity.createIntent(this@MainActivity, QuizActivity.MODE_LOCK))
+            }
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(10) })
+
+        primaryPanel.addView(secondaryButton("오버레이 잠금 테스트").apply {
+            setOnClickListener {
+                if (ensureOverlayPermission(enableMonitorAfterGrant = false)) {
+                    SoftLockService.showLockNow(this@MainActivity)
+                }
             }
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -212,7 +232,24 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
             return
         }
+        if (!ensureOverlayPermission(enableMonitorAfterGrant = true)) return
         setMonitorEnabled(true)
+    }
+
+    private fun ensureOverlayPermission(enableMonitorAfterGrant: Boolean): Boolean {
+        if (Settings.canDrawOverlays(this)) return true
+        pendingMonitorAfterOverlayPermission = enableMonitorAfterGrant
+        Toast.makeText(
+            this,
+            "잠금 해제 뒤 문제를 덮어 띄우려면 '다른 앱 위에 표시'를 허용해 주세요.",
+            Toast.LENGTH_LONG
+        ).show()
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName")
+        )
+        startActivity(intent)
+        return false
     }
 
     private fun setMonitorEnabled(enabled: Boolean) {
@@ -231,7 +268,11 @@ class MainActivity : Activity() {
         if (!::statusText.isInitialized || !::monitorButton.isInitialized) return
         val enabled = isMonitorEnabled()
         statusText.text = if (enabled) {
-            "상태: 켜짐. 잠금 해제 뒤 일본어 한자 단어 퀴즈가 뜹니다."
+            if (Settings.canDrawOverlays(this)) {
+                "상태: 켜짐. 잠금 해제 뒤 일본어 한자 단어 퀴즈 오버레이가 뜹니다."
+            } else {
+                "상태: 권한 필요. '다른 앱 위에 표시' 권한을 허용해야 잠금 퀴즈가 뜹니다."
+            }
         } else {
             "상태: 꺼짐. 테스트 버튼으로 퀴즈 잠금 화면을 먼저 확인할 수 있습니다."
         }
