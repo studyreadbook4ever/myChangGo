@@ -1,6 +1,8 @@
 package com.example.kanjiwake
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -25,6 +27,7 @@ class QuizActivity : Activity() {
     private var lastWordId: Long? = null
     private var mode: String = MODE_ENDLESS
     private var solved = false
+    private var wrongAttempts = 0
     private var countdownTimer: CountDownTimer? = null
 
     private lateinit var modeText: TextView
@@ -34,6 +37,7 @@ class QuizActivity : Activity() {
     private lateinit var choicesContainer: LinearLayout
     private lateinit var feedbackPanel: LinearLayout
     private lateinit var feedbackTitle: TextView
+    private lateinit var copyKanjiButton: Button
     private lateinit var feedbackBody: TextView
     private lateinit var feedbackExample: TextView
     private lateinit var feedbackAction: Button
@@ -196,10 +200,32 @@ class QuizActivity : Activity() {
             ).apply { topMargin = dp(14) }
         )
 
+        val feedbackTitleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        feedbackPanel.addView(feedbackTitleRow)
+
         feedbackTitle = TextView(this).apply {
             kwText(sizeSp = 18f, bold = true)
         }
-        feedbackPanel.addView(feedbackTitle)
+        feedbackTitleRow.addView(
+            feedbackTitle,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        copyKanjiButton = Button(this).apply {
+            text = "한자 복사하기"
+            visibility = View.GONE
+            kwButton(fill = KwColor.Surface, textColor = KwColor.Teal, strokeColor = KwColor.Teal, compact = true)
+        }
+        feedbackTitleRow.addView(
+            copyKanjiButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = dp(10) }
+        )
 
         feedbackBody = TextView(this).apply {
             kwText(sizeSp = 15f, color = KwColor.Muted, lineSpacingExtraDp = 4)
@@ -241,6 +267,7 @@ class QuizActivity : Activity() {
 
     private fun nextQuestion() {
         solved = false
+        wrongAttempts = 0
         val question = repository.nextQuestion(excludingId = lastWordId)
         currentQuestion = question
         lastWordId = question.answer.id
@@ -248,6 +275,7 @@ class QuizActivity : Activity() {
         termText.text = question.answer.term
         promptText.text = "이 한자 단어의 뜻은?"
         feedbackPanel.visibility = View.GONE
+        copyKanjiButton.visibility = View.GONE
 
         choicesContainer.removeAllViews()
         choiceButtons.clear()
@@ -283,9 +311,16 @@ class QuizActivity : Activity() {
             }
             showCorrectAnswer(question)
         } else {
+            wrongAttempts += 1
             button.isClickable = false
             button.kwButton(fill = KwColor.Surface, textColor = KwColor.Bad, strokeColor = KwColor.Bad)
-            showWrongHint()
+            if (isLockMode()) {
+                if (wrongAttempts >= LOCK_MODE_MAX_WRONG_ATTEMPTS) {
+                    nextQuestion()
+                }
+            } else {
+                showWrongHint()
+            }
         }
     }
 
@@ -293,6 +328,7 @@ class QuizActivity : Activity() {
         feedbackPanel.visibility = View.VISIBLE
         feedbackTitle.text = "아직 아니에요"
         feedbackTitle.setTextColor(KwColor.Bad)
+        copyKanjiButton.visibility = View.GONE
         feedbackBody.text = "다른 선택지를 골라보세요. 틀린 답은 비활성화됩니다."
         feedbackExample.visibility = View.GONE
         feedbackAction.visibility = View.GONE
@@ -305,6 +341,10 @@ class QuizActivity : Activity() {
         feedbackAction.visibility = View.VISIBLE
         feedbackTitle.text = "정답 · ${answer.meaning}"
         feedbackTitle.setTextColor(KwColor.Good)
+        copyKanjiButton.visibility = View.VISIBLE
+        copyKanjiButton.setOnClickListener {
+            copyKanji(answer.term)
+        }
         feedbackBody.text = "${answer.term} (${answer.reading})\n${answer.detail}"
         feedbackExample.text = "例文: ${answer.example}\n뜻: ${answer.exampleMeaning}"
         feedbackAction.text = if (isLockMode()) "잠금 해제" else "다음 문제"
@@ -353,10 +393,17 @@ class QuizActivity : Activity() {
         }.start()
     }
 
+    private fun copyKanji(term: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("Kanji Wake word", term))
+        Toast.makeText(this, "한자를 복사했습니다.", Toast.LENGTH_SHORT).show()
+    }
+
     private fun isLockMode(): Boolean = mode == MODE_LOCK
 
     companion object {
         private const val EXTRA_MODE = "mode"
+        private const val LOCK_MODE_MAX_WRONG_ATTEMPTS = 2
         const val MODE_ENDLESS = "endless"
         const val MODE_LOCK = "lock"
 
