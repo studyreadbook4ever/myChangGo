@@ -1,6 +1,8 @@
 package com.example.kanjiwake
 
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.CountDownTimer
@@ -35,6 +37,7 @@ class LockQuizOverlay(context: Context) {
     private lateinit var choicesContainer: LinearLayout
     private lateinit var feedbackPanel: LinearLayout
     private lateinit var feedbackTitle: TextView
+    private lateinit var copyKanjiButton: Button
     private lateinit var feedbackBody: TextView
     private lateinit var feedbackExample: TextView
     private lateinit var feedbackAction: Button
@@ -186,10 +189,32 @@ class LockQuizOverlay(context: Context) {
             ).apply { topMargin = appContext.dp(14) }
         )
 
+        val feedbackTitleRow = LinearLayout(appContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        feedbackPanel.addView(feedbackTitleRow)
+
         feedbackTitle = TextView(appContext).apply {
             kwText(sizeSp = 18f, bold = true)
         }
-        feedbackPanel.addView(feedbackTitle)
+        feedbackTitleRow.addView(
+            feedbackTitle,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        copyKanjiButton = Button(appContext).apply {
+            text = "한자 복사하기"
+            visibility = View.GONE
+            kwButton(fill = KwColor.Surface, textColor = KwColor.Teal, strokeColor = KwColor.Teal, compact = true)
+        }
+        feedbackTitleRow.addView(
+            copyKanjiButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = appContext.dp(10) }
+        )
 
         feedbackBody = TextView(appContext).apply {
             kwText(sizeSp = 15f, color = KwColor.Muted, lineSpacingExtraDp = 4)
@@ -238,6 +263,7 @@ class LockQuizOverlay(context: Context) {
         termText.text = question.answer.term
         promptText.text = "이 한자 단어의 뜻은?"
         feedbackPanel.visibility = View.GONE
+        copyKanjiButton.visibility = View.GONE
 
         choicesContainer.removeAllViews()
         choiceButtons.clear()
@@ -283,6 +309,7 @@ class LockQuizOverlay(context: Context) {
         feedbackPanel.visibility = View.VISIBLE
         feedbackTitle.text = "아직 아니에요"
         feedbackTitle.setTextColor(KwColor.Bad)
+        copyKanjiButton.visibility = View.GONE
         feedbackBody.text = "다른 선택지를 골라보세요. 틀린 답은 비활성화됩니다."
         feedbackExample.visibility = View.GONE
         feedbackAction.visibility = View.GONE
@@ -295,6 +322,10 @@ class LockQuizOverlay(context: Context) {
         feedbackAction.visibility = View.VISIBLE
         feedbackTitle.text = "정답 · ${answer.meaning}"
         feedbackTitle.setTextColor(KwColor.Good)
+        copyKanjiButton.visibility = View.VISIBLE
+        copyKanjiButton.setOnClickListener {
+            copyKanji(answer.term)
+        }
         feedbackBody.text = "${answer.term} (${answer.reading})\n${answer.detail}"
         feedbackExample.text = "例文: ${answer.example}\n뜻: ${answer.exampleMeaning}"
         feedbackAction.text = "잠금 해제"
@@ -333,5 +364,11 @@ class LockQuizOverlay(context: Context) {
                 )
             }
         }.start()
+    }
+
+    private fun copyKanji(term: String) {
+        val clipboard = appContext.getSystemService(ClipboardManager::class.java)
+        clipboard.setPrimaryClip(ClipData.newPlainText("Kanji Wake word", term))
+        Toast.makeText(appContext, "한자를 복사했습니다.", Toast.LENGTH_SHORT).show()
     }
 }
