@@ -1,0 +1,54 @@
+{
+  "schema": "chzzk-kirinuki-creator-policy-index/v2",
+  "updatedAt": "2026-07-12T00:00:00+09:00",
+  "policies": [
+    {
+      "id": "stellive",
+      "group": "스텔라이브",
+      "aliases": ["스텔라이브", "STELLIVE"],
+      "artists": ["아야츠노 유니", "사키하네 후야", "네네코 마시로", "아라하시 타비", "아카네 리제", "시라유키 히나", "유즈하 리코", "텐코 시부키", "하나코 나나", "아오쿠모 린"],
+      "sourceUrl": "https://cafe.naver.com/tteokbokk1/709417",
+      "status": "SOURCE_UNREADABLE"
+    },
+    {
+      "id": "charon-universe-w",
+      "group": "카론유니버스W",
+      "aliases": ["카론유니버스W", "카론 유니버스 W", "카론 유니버스", "CHARON UNIVERSE W"],
+      "artists": ["아리사", "에리스", "엘리", "카린", "미하루", "키유"],
+      "sourceUrl": "https://cafe.naver.com/vkpopstar/1174",
+      "status": "SOURCE_RENDERED",
+      "checkedAt": "2026-07-12T00:00:00+09:00",
+      "cache": {
+        "extensionPath": "knowledge/creator-policies/charon-universe-w.md",
+        "jobPath": "policy-cache/charon-universe-w.md",
+        "capturedAt": "2026-07-12T00:00:00+09:00",
+        "sourceBodySha256": "763eefedc5d456cc8b671e1613e5c39e12e117c2c690c562994f140acf13c262",
+        "authority": "FALLBACK_ONLY"
+      }
+    },
+    {
+      "id": "project-i",
+      "group": "프로젝트아이",
+      "aliases": ["프로젝트아이", "프로젝트 아이", "PROJECT I"],
+      "artists": ["허니츄러스", "담유이", "디디디용", "망내", "아야", "오화요", "비올레타 모네", "블레어 로즈", "류시호", "포포포포", "하시요"],
+      "sourceUrl": "https://cafe.naver.com/projectiofficial/2",
+      "status": "SOURCE_UNREADABLE"
+    },
+    {
+      "id": "over-the-wall",
+      "group": "오버더월",
+      "aliases": ["오버더월", "오버 더 월", "OVER THE WALL"],
+      "artists": ["쿠레나이 나츠키", "테리 눈나", "양메이", "유리리", "빙하유", "온하루", "하네", "김아테"],
+      "sourceUrl": "https://cafe.naver.com/otwoffical/6121",
+      "status": "SOURCE_UNREADABLE"
+    },
+    {
+      "id": "listella",
+      "group": "리스텔라",
+      "aliases": ["리스텔라", "LISTELLA"],
+      "artists": ["야토", "오단밍", "햄쿠비", "아미하 유네", "쇼코코 도리", "하쿠텐 후와"],
+      "sourceUrl": "https://cafe.naver.com/listellaofficial/3",
+      "status": "SOURCE_UNREADABLE"
+    }
+  ]
+}
