@@ -1,0 +1,6 @@
+.beta-tools/
+beta-runs/
+scripts/__pycache__/
+__pycache__/
+*.py[cod]
+.DS_Store

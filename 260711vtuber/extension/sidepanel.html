@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>치지직 키리누키 프롬프트</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-mark" aria-hidden="true">
+        <span></span><span></span>
+      </div>
+      <div class="brand-copy">
+        <p class="eyebrow">CHZZK EDIT BRIEF</p>
+        <h1>키리누키 프롬프트</h1>
+      </div>
+      <span id="connection-badge" class="badge badge-muted">확인 중</span>
+    </header>
+
+    <main>
+      <section class="card source-card" aria-labelledby="source-title">
+        <div class="section-heading">
+          <div>
+            <p class="step-label">SOURCE</p>
+            <h2 id="source-title">현재 치지직 방송</h2>
+          </div>
+          <button id="refresh-source" class="icon-button" type="button" title="현재 탭 다시 읽기" aria-label="현재 탭 다시 읽기">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+          </button>
+        </div>
+
+        <div id="source-empty" class="empty-state">
+          치지직 방송 탭을 열고 확장 프로그램을 다시 확인해 주세요.
+        </div>
+
+        <div id="source-details" class="source-details" hidden>
+          <div class="source-row">
+            <span id="source-type" class="badge badge-live">LIVE</span>
+            <span id="player-position" class="player-position">--:--:--</span>
+            <span id="player-status" class="subtle">플레이어 확인 중</span>
+          </div>
+          <label class="field compact-field">
+            <span>방송인/채널명</span>
+            <input id="streamer-name" type="text" autocomplete="off" placeholder="자동 인식이 안 되면 입력">
+          </label>
+          <label class="field compact-field">
+            <span>방송 제목</span>
+            <input id="broadcast-title" type="text" autocomplete="off" placeholder="방송 제목">
+          </label>
+          <a id="source-link" class="source-link" href="#" target="_blank" rel="noreferrer">원본 페이지 열기</a>
+        </div>
+      </section>
+
+      <details class="card settings-card">
+        <summary>
+          <span>
+            <span class="step-label">PROJECT</span>
+            프로젝트 공통 설정
+          </span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+        </summary>
+        <div class="details-body">
+          <label class="field">
+            <span>프로젝트명</span>
+            <input id="project-name" type="text" autocomplete="off" placeholder="예: 7월 11일 저녁 방송 하이라이트">
+          </label>
+          <label class="field">
+            <span>방송 전체 편집 지시 <em>선택</em></span>
+            <textarea id="global-instruction" rows="3" placeholder="예: 쇼츠용으로 빠르게, 리액션을 우선하고 욕설은 순화"></textarea>
+          </label>
+        </div>
+      </details>
+
+      <section id="capture-card" class="card capture-card" aria-labelledby="capture-title">
+        <div class="section-heading">
+          <div>
+            <p class="step-label">CAPTURE</p>
+            <h2 id="capture-title">관심 구간 입력</h2>
+          </div>
+          <span id="editing-badge" class="badge badge-accent" hidden>수정 중</span>
+        </div>
+
+        <div class="capture-flow" aria-hidden="true">
+          <span class="flow-step active">1 시작</span>
+          <span class="flow-line"></span>
+          <span class="flow-step">2 끝</span>
+          <span class="flow-line"></span>
+          <span class="flow-step">3 설명</span>
+        </div>
+
+        <div class="timestamp-grid">
+          <label class="field timestamp-field">
+            <span>시작 스탬프</span>
+            <div class="input-action-row">
+              <input id="start-time" type="text" inputmode="decimal" autocomplete="off" placeholder="00:00:00" aria-describedby="timestamp-help">
+              <button id="capture-start" class="capture-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
+                지금
+              </button>
+            </div>
+          </label>
+
+          <label class="field timestamp-field">
+            <span>끝 스탬프</span>
+            <div class="input-action-row">
+              <input id="end-time" type="text" inputmode="decimal" autocomplete="off" placeholder="00:00:00" aria-describedby="timestamp-help">
+              <button id="capture-end" class="capture-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
+                지금
+              </button>
+            </div>
+          </label>
+        </div>
+        <p id="timestamp-help" class="help-text">직접 수정할 수 있습니다. 형식: HH:MM:SS, MM:SS 또는 초</p>
+
+        <label class="field description-field">
+          <span>이 구간의 특징과 원하는 편집 <strong>필수</strong></span>
+          <textarea id="segment-description" rows="5" placeholder="예: 스트리머가 실수를 깨닫고 당황한 뒤 채팅이 폭발하는 장면. 실수 전의 짧은 설정과 반응이 끝나는 지점까지 살려줘."></textarea>
+          <span class="character-count"><span id="description-count">0</span>자</span>
+        </label>
+
+        <div class="button-row">
+          <button id="cancel-edit" class="button button-ghost" type="button" hidden>수정 취소</button>
+          <button id="save-segment" class="button button-primary" type="button">구간 저장</button>
+        </div>
+      </section>
+
+      <section class="card segments-card" aria-labelledby="segments-title">
+        <div class="section-heading">
+          <div>
+            <p class="step-label">SESSIONS</p>
+            <h2 id="segments-title">저장된 구간</h2>
+          </div>
+          <span id="segment-count" class="count-badge">0</span>
+        </div>
+        <div id="segments-empty" class="empty-state small">
+          아직 저장된 구간이 없습니다.
+        </div>
+        <div id="segments-list" class="segments-list"></div>
+      </section>
+
+      <section class="card output-card" aria-labelledby="output-title">
+        <div class="section-heading">
+          <div>
+            <p class="step-label">OUTPUT</p>
+            <h2 id="output-title">Codex 작업 넘기기</h2>
+          </div>
+          <span id="policy-match-badge" class="badge badge-policy">정책 확인 중</span>
+        </div>
+        <p class="section-description">프롬프트만 확인하거나, 정책·작업 규칙까지 포함한 폴더를 만들어 나중에 풀영상 하나만 넣고 Codex에서 바로 시작할 수 있습니다.</p>
+        <div class="output-actions">
+          <button id="create-codex-job" class="button button-primary button-wide" type="button">
+            Codex 작업폴더 만들기
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M12 12v5m-2.5-2.5h5"/></svg>
+          </button>
+          <button id="generate-prompt" class="button button-secondary button-wide" type="button">
+            프롬프트만 미리보기
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+        </div>
+        <p class="pipeline-note">새 하위 폴더에 작업 요청서, 방송인↔정책 링크 인덱스, 안전 규칙과 시작 안내를 저장합니다. 선택 캐시는 별도 폴더에 두며 영상은 저장하지 않습니다.</p>
+
+        <div id="prompt-result" class="prompt-result" hidden>
+          <div class="prompt-meta">
+            <span><span id="prompt-character-count">0</span>자</span>
+            <span>Markdown</span>
+          </div>
+          <textarea id="prompt-preview" rows="14" readonly aria-label="생성된 프롬프트"></textarea>
+          <div class="button-row three-buttons">
+            <button id="copy-prompt" class="button button-secondary" type="button">복사</button>
+            <button id="download-prompt" class="button button-secondary" type="button">MD 다운로드</button>
+            <button id="close-preview" class="button button-ghost" type="button">접기</button>
+          </div>
+        </div>
+      </section>
+
+      <button id="reset-project" class="reset-button" type="button">현재 프로젝트 초기화</button>
+    </main>
+
+    <div id="status-bar" class="status-bar" role="status" aria-live="polite" hidden></div>
+
+    <template id="segment-template">
+      <article class="segment-item">
+        <div class="segment-topline">
+          <span class="segment-number"></span>
+          <span class="segment-time"></span>
+          <span class="segment-duration"></span>
+        </div>
+        <p class="segment-description"></p>
+        <p class="segment-origin"></p>
+        <div class="segment-actions">
+          <button type="button" data-action="up" title="위로" aria-label="위로 이동">↑</button>
+          <button type="button" data-action="down" title="아래로" aria-label="아래로 이동">↓</button>
+          <button type="button" data-action="edit">수정</button>
+          <button type="button" data-action="delete" class="danger">삭제</button>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
