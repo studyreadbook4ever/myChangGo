@@ -1,0 +1,75 @@
+:root {
+  color-scheme: light dark;
+  --background: #f7f8fc;
+  --surface: #ffffff;
+  --text: #182033;
+  --muted: #5d667a;
+  --accent: #3557d6;
+  --accent-soft: #e9edff;
+  --border: #dce1ee;
+  --code: #111827;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #10131b;
+    --surface: #181d29;
+    --text: #edf1ff;
+    --muted: #aeb7ca;
+    --accent: #9bacff;
+    --accent-soft: #252e54;
+    --border: #30394b;
+    --code: #0a0d14;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Noto Sans KR", sans-serif;
+  line-height: 1.72;
+}
+
+.concept-page {
+  width: min(880px, calc(100% - 2rem));
+  margin: 2rem auto;
+  padding: clamp(1.25rem, 4vw, 3rem);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1.25rem;
+}
+
+.concept-title { margin: 0 0 .75rem; line-height: 1.2; }
+.concept-summary { margin: 0 0 1.5rem; color: var(--muted); font-size: 1.08rem; }
+
+.concept-children {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: .75rem;
+  margin: 1.5rem 0 2rem;
+}
+
+.concept-child-link {
+  display: block;
+  padding: .9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: .8rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.concept-child-link:hover { border-color: var(--accent); transform: translateY(-1px); }
+.concept-body h2 { margin-top: 2rem; }
+.concept-body h3 { margin-top: 1.5rem; }
+.concept-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.concept-body th, .concept-body td { padding: .55rem .7rem; border: 1px solid var(--border); }
+.concept-body pre { overflow-x: auto; padding: 1rem; border-radius: .7rem; background: var(--code); color: #f8fafc; }
+.concept-body code { font-family: "D2Coding", "SFMono-Regular", Consolas, monospace; }
+.concept-references { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.concept-references a { overflow-wrap: anywhere; }
+.math.block { display: block; overflow-x: auto; padding: .75rem 0; }
