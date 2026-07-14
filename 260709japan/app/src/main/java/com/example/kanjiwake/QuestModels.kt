@@ -1,9 +1,9 @@
 package com.example.kanjiwake
 
 enum class AiProvider(val storageValue: String, val displayName: String) {
-    GEMINI("gemini", "Google AI Studio"),
-    LOCAL_SERVER("local_server", "로컬 PC"),
-    OPENAI_COMPATIBLE("openai_compatible", "기타 AI 서버");
+    GEMINI("gemini", "Google로 간단히 시작"),
+    LOCAL_SERVER("local_server", "내 PC의 AI 사용"),
+    OPENAI_COMPATIBLE("openai_compatible", "고급 서버 연결");
 
     companion object {
         fun fromStorage(value: String?): AiProvider =

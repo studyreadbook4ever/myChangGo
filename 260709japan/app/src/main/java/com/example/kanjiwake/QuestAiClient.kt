@@ -178,7 +178,7 @@ object QuestAiClient {
                     .put("response_format", JSONObject().put("type", "json_object"))
                     .toString()
             )
-        } catch (error: HttpFailure) {
+        } catch (error: QuestHttpFailure) {
             if (error.status !in setOf(400, 404, 422)) throw error
             request(url, "POST", headers, baseBody.toString())
         }
@@ -273,7 +273,7 @@ object QuestAiClient {
                 BufferedReader(InputStreamReader(it, Charsets.UTF_8)).use(BufferedReader::readText)
             }.orEmpty()
             if (status !in 200..299) {
-                throw HttpFailure(status, readableError(response, status))
+                throw QuestHttpFailure(status, readableError(response, status))
             }
             return response
         } finally {
@@ -310,14 +310,14 @@ object QuestAiClient {
             ?.let { mapOf("Authorization" to "Bearer $it") }
             ?: emptyMap()
 
-    private class HttpFailure(val status: Int, message: String) : RuntimeException(message)
-
     private const val SYSTEM_INSTRUCTION =
         "당신은 Per-Open Quest의 4지선다 문제 생성기입니다. 사용자의 출제 의도와 언어를 따르되 " +
             "매 요청마다 새롭고 사실적으로 정확한 문제 한 개만 만드세요. 선택지는 서로 달라야 하며 " +
             "answer는 choices 안의 문자열 하나와 글자까지 정확히 같아야 합니다. explanation에는 정답의 " +
             "근거를 이해하기 쉽게 설명하세요. 출력은 question, choices, answer, explanation 필드만 가진 JSON 객체여야 합니다."
 }
+
+internal class QuestHttpFailure(val status: Int, message: String) : RuntimeException(message)
 
 internal object QuestJsonParser {
     fun parse(raw: String): GeneratedQuest {

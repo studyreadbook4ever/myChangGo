@@ -3,6 +3,9 @@ package com.example.kanjiwake
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
@@ -10,7 +13,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -32,8 +37,15 @@ class MainActivity : Activity() {
     private val drafts = mutableMapOf<AiProvider, QuestSettings>()
 
     private lateinit var providerSpinner: Spinner
+    private lateinit var connectionGuide: TextView
+    private lateinit var runnerGroup: LinearLayout
+    private lateinit var runnerSpinner: Spinner
     private lateinit var endpointGroup: LinearLayout
+    private lateinit var endpointLabel: TextView
     private lateinit var endpointInput: EditText
+    private lateinit var endpointHelpButton: Button
+    private lateinit var endpointHint: TextView
+    private lateinit var apiKeyGroup: LinearLayout
     private lateinit var apiKeyInput: EditText
     private lateinit var apiKeyAction: Button
     private lateinit var modelInput: EditText
@@ -44,7 +56,10 @@ class MainActivity : Activity() {
     private lateinit var monitorButton: Button
 
     private var currentProvider = AiProvider.GEMINI
+    private var currentRunner = LocalRunner.OLLAMA
     private var suppressProviderSelection = true
+    private var suppressRunnerSelection = true
+    private var populatingForm = false
     private var backgroundTask: Future<*>? = null
     private var pendingMonitorEnable = false
     private var pendingMonitorAfterOverlayPermission = false
@@ -57,6 +72,7 @@ class MainActivity : Activity() {
         run { window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR }
 
         currentProvider = settingsStore.activeProvider()
+        currentRunner = settingsStore.localRunner()
         removeLegacyVocabularyDatabase()
         AiProvider.entries.forEach { drafts[it] = settingsStore.load(it) }
         setContentView(buildContent())
@@ -129,7 +145,7 @@ class MainActivity : Activity() {
 
         val aiPanel = panel()
         root.addView(aiPanel, matchWidth(top = 20))
-        aiPanel.addView(sectionTitle("AI 연결"))
+        aiPanel.addView(sectionTitle("1. AI 연결"))
 
         providerSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(
@@ -138,71 +154,146 @@ class MainActivity : Activity() {
                 AiProvider.entries.map { it.displayName }
             )
         }
-        aiPanel.addView(labeledField("연결 방식", providerSpinner))
+        aiPanel.addView(labeledField("AI가 어디에서 실행되나요?", providerSpinner))
 
+        connectionGuide = TextView(this).apply {
+            kwText(sizeSp = 14f, color = KwColor.Muted, lineSpacingExtraDp = 2)
+            setPadding(0, dp(10), 0, 0)
+        }
+        aiPanel.addView(connectionGuide)
+
+        runnerSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                LocalRunner.entries.map { it.displayName }
+            )
+        }
+        val runnerSetupButton = Button(this).apply {
+            text = "PC 준비 방법"
+            kwButton(
+                fill = KwColor.Surface,
+                textColor = KwColor.Teal,
+                strokeColor = KwColor.Teal,
+                compact = true
+            )
+            setOnClickListener { showLocalSetupGuide() }
+        }
+        val runnerRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(runnerSpinner, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(
+                runnerSetupButton,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { leftMargin = dp(8) }
+            )
+        }
+        runnerGroup = labeledField("PC에서 사용할 프로그램", runnerRow)
+        aiPanel.addView(runnerGroup, matchWidth(top = 14))
+
+        endpointLabel = fieldLabel("PC 주소")
+        endpointHelpButton = Button(this).apply {
+            text = "주소 찾는 법"
+            kwButton(
+                fill = KwColor.Surface,
+                textColor = KwColor.Teal,
+                strokeColor = KwColor.Teal,
+                compact = true
+            )
+            setOnClickListener { showPcAddressGuide() }
+        }
+        val endpointHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(endpointLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(endpointHelpButton)
+        }
         endpointInput = input(
-            hint = "http://PC-IP:11434/v1",
+            hint = "예: 192.168.0.10",
             inputTypeValue = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         )
-        endpointGroup = labeledField("서버 주소", endpointInput)
-        aiPanel.addView(endpointGroup, matchWidth(top = 12))
+        endpointHint = TextView(this).apply {
+            text = "포트와 API 경로는 앱이 자동으로 채웁니다."
+            kwText(sizeSp = 12f, color = KwColor.Muted)
+            setPadding(0, dp(5), 0, 0)
+        }
+        endpointGroup = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(endpointHeader)
+            addView(endpointInput, matchWidth(top = 6))
+            addView(endpointHint)
+        }
+        aiPanel.addView(endpointGroup, matchWidth(top = 14))
 
         val apiKeyHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        apiKeyHeader.addView(fieldLabel("API 키"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        apiKeyHeader.addView(
+            fieldLabel("나만의 연결 키"),
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
         apiKeyAction = Button(this).apply {
-            text = "키 만들기"
-            kwButton(fill = KwColor.Surface, textColor = KwColor.Teal, strokeColor = KwColor.Teal, compact = true)
-            setOnClickListener {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(AI_STUDIO_KEY_URL)))
-            }
+            text = "개인 키 만들기"
+            kwButton(
+                fill = KwColor.Surface,
+                textColor = KwColor.Teal,
+                strokeColor = KwColor.Teal,
+                compact = true
+            )
+            setOnClickListener { openUrl(AI_STUDIO_KEY_URL) }
         }
         apiKeyHeader.addView(apiKeyAction)
         apiKeyInput = input(
-            hint = "Google AI Studio API 키",
+            hint = "만든 키를 여기에 붙여 넣기",
             inputTypeValue = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         )
-        val apiKeyGroup = LinearLayout(this).apply {
+        apiKeyGroup = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(apiKeyHeader)
             addView(apiKeyInput, matchWidth(top = 6))
         }
-        aiPanel.addView(apiKeyGroup, matchWidth(top = 12))
+        aiPanel.addView(apiKeyGroup, matchWidth(top = 14))
 
-        modelInput = input("모델 이름", InputType.TYPE_CLASS_TEXT)
-        val modelRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(modelInput, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        }
+        modelInput = input("연결 확인 후 자동으로 선택됩니다", InputType.TYPE_CLASS_TEXT)
+        aiPanel.addView(labeledField("사용할 AI 모델", modelInput), matchWidth(top = 14))
+
         findModelsButton = Button(this).apply {
-            text = "모델 찾기"
-            kwButton(fill = KwColor.Plum, textColor = KwColor.Surface, compact = true)
+            text = "연결 확인하고 모델 고르기"
+            kwButton(fill = KwColor.Plum, textColor = KwColor.Surface)
             setOnClickListener { findModels() }
         }
-        modelRow.addView(
-            findModelsButton,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply { leftMargin = dp(8) }
-        )
-        aiPanel.addView(labeledField("모델", modelRow), matchWidth(top = 12))
+        aiPanel.addView(findModelsButton, matchWidth(top = 12))
 
         connectionStatus = TextView(this).apply {
-            text = "설정을 확인한 뒤 모델을 불러오세요."
-            kwText(sizeSp = 13f, color = KwColor.Muted)
-            setPadding(0, dp(10), 0, 0)
+            kwText(sizeSp = 13f, color = KwColor.Muted, bold = true, lineSpacingExtraDp = 2)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
         }
-        aiPanel.addView(connectionStatus)
+        aiPanel.addView(connectionStatus, matchWidth(top = 10))
 
         val promptPanel = panel()
         root.addView(promptPanel, matchWidth(top = 14))
-        promptPanel.addView(sectionTitle("출제 프롬프트"))
+        val promptHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(sectionTitle("2. 문제 내용"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(Button(this@MainActivity).apply {
+                text = "예시에서 고르기"
+                kwButton(
+                    fill = KwColor.Surface,
+                    textColor = KwColor.Teal,
+                    strokeColor = KwColor.Teal,
+                    compact = true
+                )
+                setOnClickListener { showPromptExamples() }
+            })
+        }
+        promptPanel.addView(promptHeader)
         promptInput = input(
-            hint = "어떤 문제를 낼지 자연어로 입력",
+            hint = "예: 일본어 중상급 한자 어휘를 한국어 4지선다로 내줘",
             inputTypeValue = InputType.TYPE_CLASS_TEXT or
                 InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                 InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
@@ -214,7 +305,7 @@ class MainActivity : Activity() {
         promptPanel.addView(promptInput)
 
         val saveButton = Button(this).apply {
-            text = "설정 저장"
+            text = "이 설정 사용하기"
             kwButton(fill = KwColor.Teal, textColor = KwColor.Surface)
             setOnClickListener { saveCurrentSettings(showConfirmation = true) }
         }
@@ -222,7 +313,7 @@ class MainActivity : Activity() {
 
         val playPanel = panel()
         root.addView(playPanel, matchWidth(top = 14))
-        playPanel.addView(sectionTitle("퀘스트"))
+        playPanel.addView(sectionTitle("3. 퀘스트 실행"))
         playPanel.addView(primaryButton("Endless Mode") {
             launchQuiz(QuizActivity.MODE_ENDLESS)
         })
@@ -264,6 +355,28 @@ class MainActivity : Activity() {
             populateForm(next)
         }
 
+        runnerSpinner.onItemSelectedListener = SimpleItemSelectedListener { position ->
+            if (suppressRunnerSelection) return@SimpleItemSelectedListener
+            val selected = LocalRunner.entries[position]
+            if (selected == currentRunner) return@SimpleItemSelectedListener
+            val oldRunner = currentRunner
+            currentRunner = selected
+            if (currentProvider == AiProvider.LOCAL_SERVER) {
+                val currentModel = modelInput.text.toString().trim()
+                if (currentModel.isBlank() || currentModel == oldRunner.defaultModel) {
+                    modelInput.setText(selected.defaultModel)
+                }
+                markConnectionUnchecked()
+                updateProviderPresentation()
+            }
+        }
+
+        val connectionWatcher = SimpleTextWatcher {
+            if (!populatingForm) markConnectionUnchecked()
+        }
+        endpointInput.addTextChangedListener(connectionWatcher)
+        apiKeyInput.addTextChangedListener(connectionWatcher)
+
         return scrollView
     }
 
@@ -275,33 +388,93 @@ class MainActivity : Activity() {
     }
 
     private fun populateForm(settings: QuestSettings) {
-        endpointInput.setText(settings.endpoint)
+        populatingForm = true
+        if (settings.provider == AiProvider.LOCAL_SERVER) {
+            suppressRunnerSelection = true
+            runnerSpinner.setSelection(LocalRunner.entries.indexOf(currentRunner))
+            suppressRunnerSelection = false
+            endpointInput.setText(ConnectionGuide.friendlyLocalAddress(settings.endpoint, currentRunner))
+        } else {
+            endpointInput.setText(settings.endpoint)
+        }
         apiKeyInput.setText(settings.apiKey)
         modelInput.setText(settings.model)
         promptInput.setText(settings.questPrompt)
-        endpointGroup.visibility = if (settings.provider == AiProvider.GEMINI) View.GONE else View.VISIBLE
-        apiKeyAction.visibility = if (settings.provider == AiProvider.GEMINI) View.VISIBLE else View.GONE
-        apiKeyInput.hint = if (settings.provider == AiProvider.GEMINI) {
-            "Google AI Studio API 키"
-        } else {
-            "API 키 (없으면 비워 두기)"
-        }
-        connectionStatus.text = when (settings.provider) {
-            AiProvider.GEMINI -> "Google AI Studio의 Gemini 모델을 사용합니다."
-            AiProvider.LOCAL_SERVER -> "같은 네트워크의 Ollama 또는 LM Studio를 사용합니다."
-            AiProvider.OPENAI_COMPATIBLE -> "OpenAI 호환 API 서버를 사용합니다."
+        populatingForm = false
+        updateProviderPresentation()
+        markConnectionUnchecked()
+    }
+
+    private fun updateProviderPresentation() {
+        runnerGroup.visibility = if (currentProvider == AiProvider.LOCAL_SERVER) View.VISIBLE else View.GONE
+        endpointGroup.visibility = if (currentProvider == AiProvider.GEMINI) View.GONE else View.VISIBLE
+        apiKeyGroup.visibility = if (currentProvider == AiProvider.LOCAL_SERVER) View.GONE else View.VISIBLE
+        apiKeyAction.visibility = if (currentProvider == AiProvider.GEMINI) View.VISIBLE else View.GONE
+        endpointHelpButton.visibility = if (currentProvider == AiProvider.LOCAL_SERVER) View.VISIBLE else View.GONE
+
+        when (currentProvider) {
+            AiProvider.GEMINI -> {
+                connectionGuide.text =
+                    "설치 없이 시작하는 방식입니다. 개인 키를 만든 뒤 연결 확인을 누르세요."
+                apiKeyInput.hint = "만든 키를 여기에 붙여 넣기"
+                modelInput.hint = "연결 확인 후 자동으로 선택됩니다"
+            }
+            AiProvider.LOCAL_SERVER -> {
+                connectionGuide.text =
+                    "문제는 PC 안에서 생성됩니다. 휴대폰과 PC를 같은 Wi-Fi에 연결하세요."
+                endpointLabel.text = "PC의 Wi-Fi 주소"
+                endpointInput.hint = "예: 192.168.0.10"
+                endpointHint.text = when (currentRunner) {
+                    LocalRunner.OLLAMA -> "Ollama의 11434 포트와 /v1은 앱이 자동으로 채웁니다."
+                    LocalRunner.LM_STUDIO -> "LM Studio의 1234 포트와 /v1은 앱이 자동으로 채웁니다."
+                }
+                modelInput.hint = if (currentRunner == LocalRunner.OLLAMA) {
+                    "예: gemma3:4b"
+                } else {
+                    "연결 확인 후 설치된 모델을 고르세요"
+                }
+            }
+            AiProvider.OPENAI_COMPATIBLE -> {
+                connectionGuide.text =
+                    "서버 운영자에게 받은 주소, 키, 모델을 입력하는 고급 방식입니다."
+                endpointLabel.text = "OpenAI 호환 서버 주소"
+                endpointInput.hint = "예: https://example.com/v1"
+                endpointHint.text = "서버 주소에 /v1이 없어도 앱이 자동으로 붙입니다."
+                apiKeyInput.hint = "API 키가 없으면 비워 두기"
+                modelInput.hint = "서버에서 사용할 모델 이름"
+            }
         }
     }
 
-    private fun readForm(provider: AiProvider = currentProvider): QuestSettings = QuestSettings(
-        provider = provider,
-        endpoint = endpointInput.text.toString().trim(),
-        model = modelInput.text.toString().trim(),
-        apiKey = apiKeyInput.text.toString().trim(),
-        questPrompt = promptInput.text.toString().trim()
-    )
+    private fun readForm(provider: AiProvider = currentProvider): QuestSettings {
+        val rawEndpoint = endpointInput.text.toString().trim()
+        val endpoint = if (provider == AiProvider.LOCAL_SERVER) {
+            runCatching { ConnectionGuide.normalizeLocalEndpoint(rawEndpoint, currentRunner) }
+                .getOrDefault(rawEndpoint)
+        } else {
+            rawEndpoint
+        }
+        return QuestSettings(
+            provider = provider,
+            endpoint = endpoint,
+            model = modelInput.text.toString().trim(),
+            apiKey = apiKeyInput.text.toString().trim(),
+            questPrompt = promptInput.text.toString().trim()
+        )
+    }
 
     private fun saveCurrentSettings(showConfirmation: Boolean): Boolean {
+        val inputError = ConnectionGuide.connectionInputError(
+            provider = currentProvider,
+            rawEndpoint = endpointInput.text.toString(),
+            apiKey = apiKeyInput.text.toString(),
+            runner = currentRunner
+        )
+        if (inputError != null) {
+            showConnectionInputError(inputError)
+            return false
+        }
+
         val settings = readForm()
         settings.validationError()?.let {
             Toast.makeText(this, it, Toast.LENGTH_LONG).show()
@@ -309,53 +482,241 @@ class MainActivity : Activity() {
         }
         drafts[currentProvider] = settings
         settingsStore.save(settings)
+        if (currentProvider == AiProvider.LOCAL_SERVER) {
+            settingsStore.saveLocalRunner(currentRunner)
+        }
         if (showConfirmation) {
-            Toast.makeText(this, "AI 퀘스트 설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "이제 이 설정으로 문제를 만듭니다.", Toast.LENGTH_SHORT).show()
         }
         updateMonitorState()
         return true
     }
 
     private fun findModels() {
-        val settings = readForm()
-        val connectionError = when {
-            settings.provider == AiProvider.GEMINI && settings.apiKey.isBlank() ->
-                "Google AI Studio API 키를 입력해 주세요."
-            settings.provider != AiProvider.GEMINI && settings.endpoint.isBlank() ->
-                "AI 서버 주소를 입력해 주세요."
-            else -> null
-        }
-        if (connectionError != null) {
-            Toast.makeText(this, connectionError, Toast.LENGTH_LONG).show()
+        val inputError = ConnectionGuide.connectionInputError(
+            provider = currentProvider,
+            rawEndpoint = endpointInput.text.toString(),
+            apiKey = apiKeyInput.text.toString(),
+            runner = currentRunner
+        )
+        if (inputError != null) {
+            showConnectionInputError(inputError)
             return
         }
 
+        val settings = readForm()
         backgroundTask?.cancel(true)
         findModelsButton.isEnabled = false
-        connectionStatus.text = "모델 목록을 불러오는 중..."
+        findModelsButton.text = "연결 확인 중..."
+        setConnectionStatus(ConnectionState.CHECKING, checkingMessage())
         backgroundTask = QuestRuntime.submit(
             block = { QuestAiClient.listModels(settings) },
             callback = { result ->
                 if (isDestroyed) return@submit
                 findModelsButton.isEnabled = true
+                findModelsButton.text = "연결 확인하고 모델 고르기"
                 result.onSuccess { models ->
                     if (models.isEmpty()) {
-                        connectionStatus.text = "사용 가능한 모델을 찾지 못했습니다."
+                        val message = ConnectionGuide.emptyModelMessage(currentProvider, currentRunner)
+                        setConnectionStatus(ConnectionState.WARNING, message)
+                        showNoModelsDialog(message)
                         return@onSuccess
                     }
-                    connectionStatus.text = "연결됨 · 모델 ${models.size}개"
-                    AlertDialog.Builder(this)
-                        .setTitle("모델 선택")
-                        .setItems(models.toTypedArray()) { _, which ->
-                            modelInput.setText(models[which])
-                        }
-                        .setNegativeButton("닫기", null)
-                        .show()
+                    chooseModel(models)
                 }.onFailure { error ->
-                    connectionStatus.text = error.message ?: "AI 서버 연결에 실패했습니다."
+                    val message = ConnectionGuide.explainFailure(currentProvider, currentRunner, error)
+                    setConnectionStatus(ConnectionState.FAILURE, message)
+                    showConnectionFailure(message)
                 }
             }
         )
+    }
+
+    private fun chooseModel(models: List<String>) {
+        val current = modelInput.text.toString().trim()
+        val suggested = when {
+            current in models -> current
+            currentRunner.defaultModel in models -> currentRunner.defaultModel
+            currentProvider == AiProvider.GEMINI ->
+                models.firstOrNull { it == "gemini-2.5-flash" }
+                    ?: models.firstOrNull { "flash" in it }
+                    ?: models.first()
+            else -> models.first()
+        }
+        modelInput.setText(suggested)
+        setConnectionStatus(ConnectionState.SUCCESS, "연결 성공 · $suggested")
+        if (models.size == 1) return
+
+        val labels = models.map { model ->
+            if (model == suggested) "$model · 권장" else model
+        }
+        AlertDialog.Builder(this)
+            .setTitle("사용할 AI 모델 고르기")
+            .setItems(labels.toTypedArray()) { _, which ->
+                val selected = models[which]
+                modelInput.setText(selected)
+                setConnectionStatus(ConnectionState.SUCCESS, "연결 성공 · $selected")
+            }
+            .setNegativeButton("권장 모델 사용", null)
+            .show()
+    }
+
+    private fun checkingMessage(): String = when (currentProvider) {
+        AiProvider.GEMINI -> "Google에서 사용할 수 있는 AI를 찾는 중입니다."
+        AiProvider.LOCAL_SERVER -> "PC의 ${runnerShortName()}를 찾는 중입니다."
+        AiProvider.OPENAI_COMPATIBLE -> "입력한 AI 서버에 연결하는 중입니다."
+    }
+
+    private fun markConnectionUnchecked() {
+        val message = when (currentProvider) {
+            AiProvider.GEMINI -> "키를 입력한 뒤 연결 확인을 눌러 주세요."
+            AiProvider.LOCAL_SERVER -> "PC 준비가 끝났다면 연결 확인을 눌러 주세요."
+            AiProvider.OPENAI_COMPATIBLE -> "서버 정보를 입력한 뒤 연결 확인을 눌러 주세요."
+        }
+        setConnectionStatus(ConnectionState.UNCHECKED, message)
+    }
+
+    private fun setConnectionStatus(state: ConnectionState, message: String) {
+        val (fill, textColor) = when (state) {
+            ConnectionState.UNCHECKED -> KwColor.Input to KwColor.Muted
+            ConnectionState.CHECKING -> KwColor.WarningSurface to KwColor.Ink
+            ConnectionState.SUCCESS -> KwColor.GoodSurface to KwColor.Good
+            ConnectionState.WARNING -> KwColor.WarningSurface to KwColor.Ink
+            ConnectionState.FAILURE -> KwColor.BadSurface to KwColor.Bad
+        }
+        connectionStatus.text = message
+        connectionStatus.setTextColor(textColor)
+        connectionStatus.background = rounded(fill, radiusDp = 6)
+    }
+
+    private fun showConnectionInputError(message: String) {
+        setConnectionStatus(ConnectionState.FAILURE, message)
+        val builder = AlertDialog.Builder(this)
+            .setTitle("한 가지만 확인해 주세요")
+            .setMessage(message)
+            .setNegativeButton("닫기", null)
+        when (currentProvider) {
+            AiProvider.GEMINI -> builder.setPositiveButton("개인 키 만들기") { _, _ ->
+                openUrl(AI_STUDIO_KEY_URL)
+            }
+            AiProvider.LOCAL_SERVER -> builder.setPositiveButton("PC 준비 방법") { _, _ ->
+                showLocalSetupGuide()
+            }
+            AiProvider.OPENAI_COMPATIBLE -> Unit
+        }
+        builder.show()
+    }
+
+    private fun showConnectionFailure(message: String) {
+        val builder = AlertDialog.Builder(this)
+            .setTitle("아직 연결되지 않았습니다")
+            .setMessage(message)
+            .setNegativeButton("닫기", null)
+        when (currentProvider) {
+            AiProvider.GEMINI -> builder.setPositiveButton("키 다시 확인") { _, _ ->
+                openUrl(AI_STUDIO_KEY_URL)
+            }
+            AiProvider.LOCAL_SERVER -> builder.setPositiveButton("PC 준비 방법") { _, _ ->
+                showLocalSetupGuide()
+            }
+            AiProvider.OPENAI_COMPATIBLE -> Unit
+        }
+        builder.show()
+    }
+
+    private fun showNoModelsDialog(message: String) {
+        val builder = AlertDialog.Builder(this)
+            .setTitle("연결됐지만 모델이 없습니다")
+            .setMessage(message)
+            .setNegativeButton("닫기", null)
+        if (currentProvider == AiProvider.LOCAL_SERVER) {
+            builder.setPositiveButton("PC 준비 방법") { _, _ -> showLocalSetupGuide() }
+        }
+        builder.show()
+    }
+
+    private fun showLocalSetupGuide() {
+        when (currentRunner) {
+            LocalRunner.OLLAMA -> AlertDialog.Builder(this)
+                .setTitle("PC에서 Ollama 준비하기")
+                .setMessage(
+                    "1. PC에 Ollama를 설치합니다.\n\n" +
+                        "2. PC의 명령창에서 모델을 받습니다.\n" +
+                        "가볍게 시작: ollama pull gemma3:4b\n" +
+                        "고성능 PC: ollama pull gemma3:27b\n\n" +
+                        "3. 다른 기기의 연결을 허용합니다.\n" +
+                        "Windows: Windows 검색에서 '환경 변수' > '계정의 환경 변수 편집' > '새로 만들기'를 누르고, 이름은 OLLAMA_HOST, 값은 0.0.0.0:11434로 입력\n" +
+                        "macOS: launchctl setenv OLLAMA_HOST \"0.0.0.0:11434\" 실행\n" +
+                        "Linux: Ollama 서비스에 OLLAMA_HOST=0.0.0.0:11434 설정\n\n" +
+                        "4. Ollama를 다시 시작하고 휴대폰과 PC를 같은 Wi-Fi에 연결합니다."
+                )
+                .setNeutralButton("모델 명령 복사") { _, _ ->
+                    copyText("Ollama 모델 설치 명령", "ollama pull gemma3:4b")
+                }
+                .setPositiveButton("Ollama 설치") { _, _ -> openUrl(currentRunner.setupUrl) }
+                .setNegativeButton("닫기", null)
+                .show()
+
+            LocalRunner.LM_STUDIO -> AlertDialog.Builder(this)
+                .setTitle("PC에서 LM Studio 준비하기")
+                .setMessage(
+                    "1. PC에 LM Studio를 설치하고 원하는 모델을 내려받습니다.\n\n" +
+                        "2. 왼쪽 Developer 화면에서 Start Server를 켭니다.\n\n" +
+                        "3. Server Settings에서 Serve on Local Network를 켭니다.\n\n" +
+                        "4. 휴대폰과 PC를 같은 Wi-Fi에 연결합니다."
+                )
+                .setNeutralButton("공식 연결 안내") { _, _ -> openUrl(LM_STUDIO_NETWORK_URL) }
+                .setPositiveButton("LM Studio 설치") { _, _ -> openUrl(currentRunner.setupUrl) }
+                .setNegativeButton("닫기", null)
+                .show()
+        }
+    }
+
+    private fun showPcAddressGuide() {
+        AlertDialog.Builder(this)
+            .setTitle("PC의 Wi-Fi 주소 찾기")
+            .setMessage(
+                "Windows\n설정 > 네트워크 및 인터넷 > Wi-Fi > 연결된 네트워크 > IPv4 주소\n\n" +
+                    "macOS\n시스템 설정 > 네트워크 > Wi-Fi > 세부사항 > TCP/IP > IP 주소\n\n" +
+                    "Linux\n네트워크 설정의 연결 정보에서 IPv4 주소 확인\n\n" +
+                    "192.168 또는 10으로 시작하는 숫자를 앱에 입력하세요. localhost와 0.0.0.0은 입력하지 않습니다."
+            )
+            .setPositiveButton("확인", null)
+            .show()
+    }
+
+    private fun showPromptExamples() {
+        val examples = listOf(
+            "일본어 한자 어휘" to PerOpenQuestPrefs.DEFAULT_QUEST_PROMPT,
+            "영어 단어" to
+                "영어 중급 학습자를 위한 어휘 뜻 문제를 한국어 4지선다로 출제해 주세요. 정답 해설에 짧은 영어 예문을 포함해 주세요.",
+            "한국사" to
+                "한국사 주요 사건과 인물을 묻는 4지선다 문제를 출제해 주세요. 시대가 골고루 나오게 하고 해설에는 연도를 포함해 주세요.",
+            "컴퓨터 기초" to
+                "컴퓨터와 인터넷의 기본 원리를 비전공자 수준의 한국어 4지선다 문제로 출제해 주세요. 전문 용어는 해설에서 쉽게 풀어 주세요."
+        )
+        AlertDialog.Builder(this)
+            .setTitle("문제 예시 고르기")
+            .setItems(examples.map { it.first }.toTypedArray()) { _, which ->
+                promptInput.setText(examples[which].second)
+            }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
+    private fun copyText(label: String, value: String) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+        Toast.makeText(this, "명령을 복사했습니다.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun openUrl(url: String) {
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+
+    private fun runnerShortName(): String = when (currentRunner) {
+        LocalRunner.OLLAMA -> "Ollama"
+        LocalRunner.LM_STUDIO -> "LM Studio"
     }
 
     private fun launchQuiz(mode: String) {
@@ -487,9 +848,19 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_NOTIFICATIONS = 5001
         private const val AI_STUDIO_KEY_URL = "https://aistudio.google.com/app/apikey"
+        private const val LM_STUDIO_NETWORK_URL =
+            "https://lmstudio.ai/docs/developer/core/server/serve-on-network"
         private const val LEGACY_DB_NAME = "kanji_wake_words.db"
         private const val KEY_LEGACY_DB_REMOVED = "legacy_vocabulary_db_removed"
     }
+}
+
+private enum class ConnectionState {
+    UNCHECKED,
+    CHECKING,
+    SUCCESS,
+    WARNING,
+    FAILURE
 }
 
 private class SimpleItemSelectedListener(
@@ -503,4 +874,12 @@ private class SimpleItemSelectedListener(
     ) = onSelected(position)
 
     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+}
+
+private class SimpleTextWatcher(
+    private val onChanged: () -> Unit
+) : TextWatcher {
+    override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+    override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = onChanged()
+    override fun afterTextChanged(value: Editable?) = Unit
 }

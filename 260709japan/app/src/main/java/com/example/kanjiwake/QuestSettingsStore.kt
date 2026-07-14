@@ -28,6 +28,16 @@ class QuestSettingsStore(context: Context) {
 
     fun loadActive(): QuestSettings = load(activeProvider())
 
+    fun localRunner(): LocalRunner {
+        val stored = prefs.getString(KEY_LOCAL_RUNNER, null)
+        if (stored != null) return LocalRunner.fromStorage(stored)
+        val endpoint = prefs.getString(
+            "${AiProvider.LOCAL_SERVER.storageValue}_endpoint",
+            ""
+        ).orEmpty()
+        return LocalRunner.fromEndpoint(endpoint)
+    }
+
     fun load(provider: AiProvider): QuestSettings {
         val prefix = provider.storageValue
         return QuestSettings(
@@ -53,20 +63,25 @@ class QuestSettingsStore(context: Context) {
         secrets.write("${prefix}_api_key", settings.apiKey.trim())
     }
 
+    fun saveLocalRunner(runner: LocalRunner) {
+        prefs.edit().putString(KEY_LOCAL_RUNNER, runner.storageValue).apply()
+    }
+
     companion object {
         private const val KEY_PROVIDER = "ai_provider"
         private const val KEY_QUEST_PROMPT = "quest_prompt"
         private const val KEY_LAST_QUESTION = "last_generated_question"
+        private const val KEY_LOCAL_RUNNER = "local_runner"
 
         fun defaultEndpoint(provider: AiProvider): String = when (provider) {
             AiProvider.GEMINI -> "https://generativelanguage.googleapis.com/v1beta"
-            AiProvider.LOCAL_SERVER -> "http://192.168.0.2:11434/v1"
+            AiProvider.LOCAL_SERVER -> ""
             AiProvider.OPENAI_COMPATIBLE -> ""
         }
 
         fun defaultModel(provider: AiProvider): String = when (provider) {
             AiProvider.GEMINI -> "gemini-2.5-flash"
-            AiProvider.LOCAL_SERVER -> "gemma3:27b"
+            AiProvider.LOCAL_SERVER -> LocalRunner.OLLAMA.defaultModel
             AiProvider.OPENAI_COMPATIBLE -> ""
         }
     }

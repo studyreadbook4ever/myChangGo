@@ -22,6 +22,9 @@ object KwColor {
     val Plum: Int = Color.rgb(122, 48, 80)
     val Bad: Int = Color.rgb(176, 47, 53)
     val Good: Int = Color.rgb(26, 126, 76)
+    val GoodSurface: Int = Color.rgb(232, 246, 238)
+    val WarningSurface: Int = Color.rgb(255, 246, 220)
+    val BadSurface: Int = Color.rgb(252, 235, 236)
 }
 
 fun Context.dp(value: Int): Int =
