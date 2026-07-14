@@ -13,9 +13,10 @@ import android.widget.TextView
 object KwColor {
     val Ink: Int = Color.rgb(23, 33, 38)
     val Muted: Int = Color.rgb(91, 102, 103)
-    val Paper: Int = Color.rgb(247, 244, 236)
+    val Paper: Int = Color.rgb(244, 247, 246)
     val Surface: Int = Color.WHITE
-    val Line: Int = Color.rgb(217, 211, 196)
+    val Input: Int = Color.rgb(249, 250, 250)
+    val Line: Int = Color.rgb(211, 219, 216)
     val Teal: Int = Color.rgb(20, 125, 114)
     val Saffron: Int = Color.rgb(224, 161, 27)
     val Plum: Int = Color.rgb(122, 48, 80)

@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "KanjiWake"
+rootProject.name = "PerOpenQuest"
 include(":app")

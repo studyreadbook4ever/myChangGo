@@ -18,12 +18,10 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
-import com.example.kanjiwake.data.VocabularyRepository
 
 class SoftLockService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var receiverRegistered = false
-    private var prewarmStarted = false
     private var waitingForUnlock = false
     private var unlockCycle = 0L
     private var shownCycle = -1L
@@ -71,7 +69,6 @@ class SoftLockService : Service() {
         super.onCreate()
         createNotificationChannel()
         registerUnlockReceiver()
-        prewarmVocabulary()
         if (isKeyguardLocked()) {
             waitingForUnlock = true
             scheduleUnlockPoll()
@@ -80,7 +77,6 @@ class SoftLockService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
-        prewarmVocabulary()
         if (intent?.action == ACTION_SHOW_LOCK_NOW) {
             unlockCycle += 1L
             waitingForUnlock = true
@@ -138,7 +134,7 @@ class SoftLockService : Service() {
                 launchLockQuizActivity()
             }
         } else {
-            Toast.makeText(this, "Kanji Wake에 다른 앱 위에 표시 권한을 허용해 주세요.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Per-Open Quest에 다른 앱 위에 표시 권한을 허용해 주세요.", Toast.LENGTH_LONG).show()
             launchLockQuizActivity()
         }
     }
@@ -165,18 +161,6 @@ class SoftLockService : Service() {
         return powerManager.isInteractive
     }
 
-    private fun prewarmVocabulary() {
-        if (prewarmStarted) return
-        prewarmStarted = true
-        Thread {
-            runCatching {
-                VocabularyRepository(this).wordCount()
-            }.onFailure { error ->
-                Log.w(TAG, "Vocabulary prewarm failed.", error)
-            }
-        }.start()
-    }
-
     private fun buildNotification(): Notification {
         val openQuizIntent = QuizActivity.createIntent(this, QuizActivity.MODE_LOCK).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -190,8 +174,8 @@ class SoftLockService : Service() {
 
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-            .setContentTitle("Kanji Wake 소프트 잠금")
-            .setContentText("잠금 해제 뒤 일본어 한자 단어 퀴즈를 띄웁니다.")
+            .setContentTitle("Per-Open Quest")
+            .setContentText("잠금 해제 뒤 AI가 새 퀘스트를 만듭니다.")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
@@ -211,7 +195,7 @@ class SoftLockService : Service() {
     }
 
     companion object {
-        private const val TAG = "SoftLockService"
+        private const val TAG = "PerOpenQuestService"
         private const val CHANNEL_ID = "kanji_wake_soft_lock"
         private const val NOTIFICATION_ID = 913
         private const val ACTION_SHOW_LOCK_NOW = "com.example.kanjiwake.SHOW_LOCK_NOW"

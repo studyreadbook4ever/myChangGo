@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.KanjiWake" parent="@android:style/Theme.Material.Light.NoActionBar">
+    <style name="Theme.PerOpenQuest" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
@@ -9,6 +9,6 @@
         <item name="android:windowLightStatusBar">true</item>
     </style>
 
-    <style name="Theme.KanjiWake.Lock" parent="Theme.KanjiWake">
+    <style name="Theme.PerOpenQuest.Lock" parent="Theme.PerOpenQuest">
     </style>
 </resources>

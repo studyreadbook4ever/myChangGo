@@ -10,8 +10,8 @@ class BootReceiver : BroadcastReceiver() {
             intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
         if (!shouldStart) return
 
-        val prefs = context.getSharedPreferences(KanjiWakePrefs.NAME, Context.MODE_PRIVATE)
-        val enabled = prefs.getBoolean(KanjiWakePrefs.KEY_MONITOR_ENABLED, false)
+        val prefs = context.getSharedPreferences(PerOpenQuestPrefs.NAME, Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean(PerOpenQuestPrefs.KEY_MONITOR_ENABLED, false)
         if (enabled) {
             SoftLockService.start(context)
         }
