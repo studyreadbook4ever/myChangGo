@@ -28,16 +28,6 @@ class QuestSettingsStore(context: Context) {
 
     fun loadActive(): QuestSettings = load(activeProvider())
 
-    fun localRunner(): LocalRunner {
-        val stored = prefs.getString(KEY_LOCAL_RUNNER, null)
-        if (stored != null) return LocalRunner.fromStorage(stored)
-        val endpoint = prefs.getString(
-            "${AiProvider.LOCAL_SERVER.storageValue}_endpoint",
-            ""
-        ).orEmpty()
-        return LocalRunner.fromEndpoint(endpoint)
-    }
-
     fun load(provider: AiProvider): QuestSettings {
         val prefix = provider.storageValue
         return QuestSettings(
@@ -48,7 +38,11 @@ class QuestSettingsStore(context: Context) {
             questPrompt = prefs.getString(
                 KEY_QUEST_PROMPT,
                 PerOpenQuestPrefs.DEFAULT_QUEST_PROMPT
-            ).orEmpty()
+            ).orEmpty(),
+            onDeviceModelPath = prefs.getString(KEY_ON_DEVICE_MODEL_PATH, "").orEmpty(),
+            onDeviceAcceleration = OnDeviceAcceleration.fromStorage(
+                prefs.getString(KEY_ON_DEVICE_ACCELERATION, null)
+            )
         )
     }
 
@@ -59,29 +53,31 @@ class QuestSettingsStore(context: Context) {
             .putString("${prefix}_endpoint", settings.endpoint.trim())
             .putString("${prefix}_model", settings.model.trim())
             .putString(KEY_QUEST_PROMPT, settings.questPrompt.trim())
+            .putString(KEY_ON_DEVICE_MODEL_PATH, settings.onDeviceModelPath.trim())
+            .putString(
+                KEY_ON_DEVICE_ACCELERATION,
+                settings.onDeviceAcceleration.storageValue
+            )
             .apply()
         secrets.write("${prefix}_api_key", settings.apiKey.trim())
-    }
-
-    fun saveLocalRunner(runner: LocalRunner) {
-        prefs.edit().putString(KEY_LOCAL_RUNNER, runner.storageValue).apply()
     }
 
     companion object {
         private const val KEY_PROVIDER = "ai_provider"
         private const val KEY_QUEST_PROMPT = "quest_prompt"
         private const val KEY_LAST_QUESTION = "last_generated_question"
-        private const val KEY_LOCAL_RUNNER = "local_runner"
+        private const val KEY_ON_DEVICE_MODEL_PATH = "on_device_model_path"
+        private const val KEY_ON_DEVICE_ACCELERATION = "on_device_acceleration"
 
         fun defaultEndpoint(provider: AiProvider): String = when (provider) {
             AiProvider.GEMINI -> "https://generativelanguage.googleapis.com/v1beta"
-            AiProvider.LOCAL_SERVER -> ""
+            AiProvider.ON_DEVICE -> ""
             AiProvider.OPENAI_COMPATIBLE -> ""
         }
 
         fun defaultModel(provider: AiProvider): String = when (provider) {
             AiProvider.GEMINI -> "gemini-2.5-flash"
-            AiProvider.LOCAL_SERVER -> LocalRunner.OLLAMA.defaultModel
+            AiProvider.ON_DEVICE -> ""
             AiProvider.OPENAI_COMPATIBLE -> ""
         }
     }

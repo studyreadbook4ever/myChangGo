@@ -3,9 +3,6 @@ package com.example.kanjiwake
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
@@ -38,27 +35,29 @@ class MainActivity : Activity() {
 
     private lateinit var providerSpinner: Spinner
     private lateinit var connectionGuide: TextView
-    private lateinit var runnerGroup: LinearLayout
-    private lateinit var runnerSpinner: Spinner
+    private lateinit var onDeviceGroup: LinearLayout
+    private lateinit var deviceProfileText: TextView
+    private lateinit var modelFileText: TextView
+    private lateinit var accelerationSpinner: Spinner
+    private lateinit var importModelButton: Button
     private lateinit var endpointGroup: LinearLayout
-    private lateinit var endpointLabel: TextView
     private lateinit var endpointInput: EditText
-    private lateinit var endpointHelpButton: Button
-    private lateinit var endpointHint: TextView
     private lateinit var apiKeyGroup: LinearLayout
     private lateinit var apiKeyInput: EditText
     private lateinit var apiKeyAction: Button
+    private lateinit var networkModelGroup: LinearLayout
     private lateinit var modelInput: EditText
     private lateinit var promptInput: EditText
     private lateinit var connectionStatus: TextView
-    private lateinit var findModelsButton: Button
+    private lateinit var checkModelButton: Button
     private lateinit var monitorStatus: TextView
     private lateinit var monitorButton: Button
 
     private var currentProvider = AiProvider.GEMINI
-    private var currentRunner = LocalRunner.OLLAMA
+    private var currentModelPath = ""
+    private var currentAcceleration = OnDeviceAcceleration.AUTO
     private var suppressProviderSelection = true
-    private var suppressRunnerSelection = true
+    private var suppressAccelerationSelection = true
     private var populatingForm = false
     private var backgroundTask: Future<*>? = null
     private var pendingMonitorEnable = false
@@ -72,7 +71,6 @@ class MainActivity : Activity() {
         run { window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR }
 
         currentProvider = settingsStore.activeProvider()
-        currentRunner = settingsStore.localRunner()
         removeLegacyVocabularyDatabase()
         AiProvider.entries.forEach { drafts[it] = settingsStore.load(it) }
         setContentView(buildContent())
@@ -91,6 +89,20 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         backgroundTask?.cancel(true)
         super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Android")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_MODEL_FILE || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        importOnDeviceModel(uri)
     }
 
     override fun onRequestPermissionsResult(
@@ -162,80 +174,24 @@ class MainActivity : Activity() {
         }
         aiPanel.addView(connectionGuide)
 
-        runnerSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                LocalRunner.entries.map { it.displayName }
-            )
-        }
-        val runnerSetupButton = Button(this).apply {
-            text = "PC 준비 방법"
-            kwButton(
-                fill = KwColor.Surface,
-                textColor = KwColor.Teal,
-                strokeColor = KwColor.Teal,
-                compact = true
-            )
-            setOnClickListener { showLocalSetupGuide() }
-        }
-        val runnerRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(runnerSpinner, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(
-                runnerSetupButton,
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { leftMargin = dp(8) }
-            )
-        }
-        runnerGroup = labeledField("PC에서 사용할 프로그램", runnerRow)
-        aiPanel.addView(runnerGroup, matchWidth(top = 14))
+        onDeviceGroup = buildOnDeviceGroup()
+        aiPanel.addView(onDeviceGroup, matchWidth(top = 14))
 
-        endpointLabel = fieldLabel("PC 주소")
-        endpointHelpButton = Button(this).apply {
-            text = "주소 찾는 법"
-            kwButton(
-                fill = KwColor.Surface,
-                textColor = KwColor.Teal,
-                strokeColor = KwColor.Teal,
-                compact = true
-            )
-            setOnClickListener { showPcAddressGuide() }
-        }
-        val endpointHeader = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(endpointLabel, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(endpointHelpButton)
-        }
         endpointInput = input(
-            hint = "예: 192.168.0.10",
+            hint = "예: https://example.com/v1",
             inputTypeValue = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         )
-        endpointHint = TextView(this).apply {
-            text = "포트와 API 경로는 앱이 자동으로 채웁니다."
-            kwText(sizeSp = 12f, color = KwColor.Muted)
-            setPadding(0, dp(5), 0, 0)
-        }
-        endpointGroup = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(endpointHeader)
-            addView(endpointInput, matchWidth(top = 6))
-            addView(endpointHint)
-        }
+        endpointGroup = labeledField("OpenAI 호환 서버 주소", endpointInput)
         aiPanel.addView(endpointGroup, matchWidth(top = 14))
 
         val apiKeyHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            addView(
+                fieldLabel("나만의 연결 키"),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            )
         }
-        apiKeyHeader.addView(
-            fieldLabel("나만의 연결 키"),
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        )
         apiKeyAction = Button(this).apply {
             text = "개인 키 만들기"
             kwButton(
@@ -259,14 +215,14 @@ class MainActivity : Activity() {
         aiPanel.addView(apiKeyGroup, matchWidth(top = 14))
 
         modelInput = input("연결 확인 후 자동으로 선택됩니다", InputType.TYPE_CLASS_TEXT)
-        aiPanel.addView(labeledField("사용할 AI 모델", modelInput), matchWidth(top = 14))
+        networkModelGroup = labeledField("사용할 AI 모델", modelInput)
+        aiPanel.addView(networkModelGroup, matchWidth(top = 14))
 
-        findModelsButton = Button(this).apply {
-            text = "연결 확인하고 모델 고르기"
+        checkModelButton = Button(this).apply {
             kwButton(fill = KwColor.Plum, textColor = KwColor.Surface)
-            setOnClickListener { findModels() }
+            setOnClickListener { checkCurrentAi() }
         }
-        aiPanel.addView(findModelsButton, matchWidth(top = 12))
+        aiPanel.addView(checkModelButton, matchWidth(top = 12))
 
         connectionStatus = TextView(this).apply {
             kwText(sizeSp = 13f, color = KwColor.Muted, bold = true, lineSpacingExtraDp = 2)
@@ -279,7 +235,10 @@ class MainActivity : Activity() {
         val promptHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(sectionTitle("2. 문제 내용"), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(
+                sectionTitle("2. 문제 내용"),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            )
             addView(Button(this@MainActivity).apply {
                 text = "예시에서 고르기"
                 kwButton(
@@ -348,6 +307,7 @@ class MainActivity : Activity() {
             val selected = AiProvider.entries[position]
             if (selected == currentProvider) return@SimpleItemSelectedListener
             drafts[currentProvider] = readForm(currentProvider)
+            if (currentProvider == AiProvider.ON_DEVICE) OnDeviceQuestClient.release()
             currentProvider = selected
             val sharedPrompt = promptInput.text.toString()
             val next = drafts.getValue(selected).copy(questPrompt = sharedPrompt)
@@ -355,20 +315,13 @@ class MainActivity : Activity() {
             populateForm(next)
         }
 
-        runnerSpinner.onItemSelectedListener = SimpleItemSelectedListener { position ->
-            if (suppressRunnerSelection) return@SimpleItemSelectedListener
-            val selected = LocalRunner.entries[position]
-            if (selected == currentRunner) return@SimpleItemSelectedListener
-            val oldRunner = currentRunner
-            currentRunner = selected
-            if (currentProvider == AiProvider.LOCAL_SERVER) {
-                val currentModel = modelInput.text.toString().trim()
-                if (currentModel.isBlank() || currentModel == oldRunner.defaultModel) {
-                    modelInput.setText(selected.defaultModel)
-                }
-                markConnectionUnchecked()
-                updateProviderPresentation()
-            }
+        accelerationSpinner.onItemSelectedListener = SimpleItemSelectedListener { position ->
+            if (suppressAccelerationSelection) return@SimpleItemSelectedListener
+            val selected = OnDeviceAcceleration.entries[position]
+            if (selected == currentAcceleration) return@SimpleItemSelectedListener
+            currentAcceleration = selected
+            OnDeviceQuestClient.release()
+            markConnectionUnchecked()
         }
 
         val connectionWatcher = SimpleTextWatcher {
@@ -380,6 +333,49 @@ class MainActivity : Activity() {
         return scrollView
     }
 
+    private fun buildOnDeviceGroup(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+
+        deviceProfileText = TextView(this@MainActivity).apply {
+            kwText(sizeSp = 13f, color = KwColor.Ink, lineSpacingExtraDp = 3)
+            setTextIsSelectable(true)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(KwColor.Input, radiusDp = 6)
+        }
+        addView(deviceProfileText)
+
+        val sourceButton = Button(this@MainActivity).apply {
+            text = "추천 모델 받기"
+            kwButton(fill = KwColor.Surface, textColor = KwColor.Teal, strokeColor = KwColor.Teal)
+            setOnClickListener { showModelSources() }
+        }
+        addView(sourceButton, matchWidth(top = 10))
+
+        importModelButton = Button(this@MainActivity).apply {
+            text = "다운로드한 .litertlm 가져오기"
+            kwButton(fill = KwColor.Teal, textColor = KwColor.Surface)
+            setOnClickListener { pickModelFile() }
+        }
+        addView(importModelButton, matchWidth(top = 8))
+
+        modelFileText = TextView(this@MainActivity).apply {
+            kwText(sizeSp = 13f, color = KwColor.Muted, lineSpacingExtraDp = 2)
+            setTextIsSelectable(true)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = rounded(KwColor.Input, radiusDp = 6, strokeColor = KwColor.Line)
+        }
+        addView(modelFileText, matchWidth(top = 10))
+
+        accelerationSpinner = Spinner(this@MainActivity).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                OnDeviceAcceleration.entries.map { it.displayName }
+            )
+        }
+        addView(labeledField("가속 방식", accelerationSpinner), matchWidth(top = 12))
+    }
+
     private fun selectProvider(provider: AiProvider) {
         suppressProviderSelection = true
         providerSpinner.setSelection(AiProvider.entries.indexOf(provider))
@@ -389,28 +385,27 @@ class MainActivity : Activity() {
 
     private fun populateForm(settings: QuestSettings) {
         populatingForm = true
-        if (settings.provider == AiProvider.LOCAL_SERVER) {
-            suppressRunnerSelection = true
-            runnerSpinner.setSelection(LocalRunner.entries.indexOf(currentRunner))
-            suppressRunnerSelection = false
-            endpointInput.setText(ConnectionGuide.friendlyLocalAddress(settings.endpoint, currentRunner))
-        } else {
-            endpointInput.setText(settings.endpoint)
-        }
+        endpointInput.setText(settings.endpoint)
         apiKeyInput.setText(settings.apiKey)
         modelInput.setText(settings.model)
         promptInput.setText(settings.questPrompt)
+        currentModelPath = settings.onDeviceModelPath
+        currentAcceleration = settings.onDeviceAcceleration
+        suppressAccelerationSelection = true
+        accelerationSpinner.setSelection(OnDeviceAcceleration.entries.indexOf(currentAcceleration))
+        suppressAccelerationSelection = false
         populatingForm = false
         updateProviderPresentation()
+        updateOnDeviceModelDisplay()
         markConnectionUnchecked()
     }
 
     private fun updateProviderPresentation() {
-        runnerGroup.visibility = if (currentProvider == AiProvider.LOCAL_SERVER) View.VISIBLE else View.GONE
-        endpointGroup.visibility = if (currentProvider == AiProvider.GEMINI) View.GONE else View.VISIBLE
-        apiKeyGroup.visibility = if (currentProvider == AiProvider.LOCAL_SERVER) View.GONE else View.VISIBLE
+        onDeviceGroup.visibility = if (currentProvider == AiProvider.ON_DEVICE) View.VISIBLE else View.GONE
+        endpointGroup.visibility = if (currentProvider == AiProvider.OPENAI_COMPATIBLE) View.VISIBLE else View.GONE
+        apiKeyGroup.visibility = if (currentProvider == AiProvider.ON_DEVICE) View.GONE else View.VISIBLE
         apiKeyAction.visibility = if (currentProvider == AiProvider.GEMINI) View.VISIBLE else View.GONE
-        endpointHelpButton.visibility = if (currentProvider == AiProvider.LOCAL_SERVER) View.VISIBLE else View.GONE
+        networkModelGroup.visibility = if (currentProvider == AiProvider.ON_DEVICE) View.GONE else View.VISIBLE
 
         when (currentProvider) {
             AiProvider.GEMINI -> {
@@ -418,73 +413,87 @@ class MainActivity : Activity() {
                     "설치 없이 시작하는 방식입니다. 개인 키를 만든 뒤 연결 확인을 누르세요."
                 apiKeyInput.hint = "만든 키를 여기에 붙여 넣기"
                 modelInput.hint = "연결 확인 후 자동으로 선택됩니다"
+                checkModelButton.text = "연결 확인하고 모델 고르기"
             }
-            AiProvider.LOCAL_SERVER -> {
+            AiProvider.ON_DEVICE -> {
                 connectionGuide.text =
-                    "문제는 PC 안에서 생성됩니다. 휴대폰과 PC를 같은 Wi-Fi에 연결하세요."
-                endpointLabel.text = "PC의 Wi-Fi 주소"
-                endpointInput.hint = "예: 192.168.0.10"
-                endpointHint.text = when (currentRunner) {
-                    LocalRunner.OLLAMA -> "Ollama의 11434 포트와 /v1은 앱이 자동으로 채웁니다."
-                    LocalRunner.LM_STUDIO -> "LM Studio의 1234 포트와 /v1은 앱이 자동으로 채웁니다."
-                }
-                modelInput.hint = if (currentRunner == LocalRunner.OLLAMA) {
-                    "예: gemma3:4b"
-                } else {
-                    "연결 확인 후 설치된 모델을 고르세요"
-                }
+                    "모델과 문제 데이터가 휴대폰 밖으로 나가지 않습니다. 모델 파일을 한 번 가져온 뒤 NPU부터 실행을 시험합니다."
+                deviceProfileText.text = OnDeviceCompatibility.deviceGuide(
+                    OnDeviceCompatibility.currentProfile()
+                )
+                checkModelButton.text = "모델과 가속기 확인"
             }
             AiProvider.OPENAI_COMPATIBLE -> {
                 connectionGuide.text =
                     "서버 운영자에게 받은 주소, 키, 모델을 입력하는 고급 방식입니다."
-                endpointLabel.text = "OpenAI 호환 서버 주소"
-                endpointInput.hint = "예: https://example.com/v1"
-                endpointHint.text = "서버 주소에 /v1이 없어도 앱이 자동으로 붙입니다."
                 apiKeyInput.hint = "API 키가 없으면 비워 두기"
                 modelInput.hint = "서버에서 사용할 모델 이름"
+                checkModelButton.text = "연결 확인하고 모델 고르기"
             }
         }
     }
 
-    private fun readForm(provider: AiProvider = currentProvider): QuestSettings {
-        val rawEndpoint = endpointInput.text.toString().trim()
-        val endpoint = if (provider == AiProvider.LOCAL_SERVER) {
-            runCatching { ConnectionGuide.normalizeLocalEndpoint(rawEndpoint, currentRunner) }
-                .getOrDefault(rawEndpoint)
+    private fun updateOnDeviceModelDisplay() {
+        val file = OnDeviceModelStore.existingFile(this, currentModelPath)
+        modelFileText.text = if (file == null) {
+            "가져온 모델 없음"
         } else {
-            rawEndpoint
+            val name = OnDeviceModelStore.fileLabel(file.absolutePath)
+            "$name\n${OnDeviceModelStore.formatSize(file.length())} · 앱 내부에 저장됨"
         }
+    }
+
+    private fun readForm(provider: AiProvider = currentProvider): QuestSettings {
+        val modelFile = OnDeviceModelStore.existingFile(this, currentModelPath)
         return QuestSettings(
             provider = provider,
-            endpoint = endpoint,
-            model = modelInput.text.toString().trim(),
-            apiKey = apiKeyInput.text.toString().trim(),
-            questPrompt = promptInput.text.toString().trim()
+            endpoint = endpointInput.text.toString().trim(),
+            model = if (provider == AiProvider.ON_DEVICE) {
+                modelFile?.let { OnDeviceModelStore.fileLabel(it.absolutePath) }.orEmpty()
+            } else {
+                modelInput.text.toString().trim()
+            },
+            apiKey = if (provider == AiProvider.ON_DEVICE) "" else apiKeyInput.text.toString().trim(),
+            questPrompt = promptInput.text.toString().trim(),
+            onDeviceModelPath = currentModelPath,
+            onDeviceAcceleration = currentAcceleration
         )
     }
 
     private fun saveCurrentSettings(showConfirmation: Boolean): Boolean {
-        val inputError = ConnectionGuide.connectionInputError(
-            provider = currentProvider,
-            rawEndpoint = endpointInput.text.toString(),
-            apiKey = apiKeyInput.text.toString(),
-            runner = currentRunner
-        )
-        if (inputError != null) {
-            showConnectionInputError(inputError)
-            return false
+        if (currentProvider != AiProvider.ON_DEVICE) {
+            val inputError = ConnectionGuide.connectionInputError(
+                provider = currentProvider,
+                rawEndpoint = endpointInput.text.toString(),
+                apiKey = apiKeyInput.text.toString()
+            )
+            if (inputError != null) {
+                showConnectionInputError(inputError)
+                return false
+            }
         }
 
         val settings = readForm()
+        if (currentProvider == AiProvider.ON_DEVICE) {
+            val file = OnDeviceModelStore.existingFile(this, settings.onDeviceModelPath)
+            if (file == null) {
+                showOnDeviceFailure("다운로드한 .litertlm 모델을 먼저 가져와 주세요.")
+                return false
+            }
+            OnDeviceCompatibility.compatibilityError(
+                OnDeviceModelStore.fileLabel(file.absolutePath),
+                OnDeviceCompatibility.currentProfile()
+            )?.let {
+                showOnDeviceFailure(it)
+                return false
+            }
+        }
         settings.validationError()?.let {
             Toast.makeText(this, it, Toast.LENGTH_LONG).show()
             return false
         }
         drafts[currentProvider] = settings
         settingsStore.save(settings)
-        if (currentProvider == AiProvider.LOCAL_SERVER) {
-            settingsStore.saveLocalRunner(currentRunner)
-        }
         if (showConfirmation) {
             Toast.makeText(this, "이제 이 설정으로 문제를 만듭니다.", Toast.LENGTH_SHORT).show()
         }
@@ -492,12 +501,62 @@ class MainActivity : Activity() {
         return true
     }
 
-    private fun findModels() {
+    private fun checkCurrentAi() {
+        if (currentProvider == AiProvider.ON_DEVICE) {
+            prepareOnDeviceModel()
+        } else {
+            findNetworkModels()
+        }
+    }
+
+    private fun prepareOnDeviceModel() {
+        val settings = readForm()
+        val file = OnDeviceModelStore.existingFile(this, settings.onDeviceModelPath)
+        if (file == null) {
+            showOnDeviceFailure("다운로드한 .litertlm 모델을 먼저 가져와 주세요.")
+            return
+        }
+        OnDeviceCompatibility.compatibilityError(
+            OnDeviceModelStore.fileLabel(file.absolutePath),
+            OnDeviceCompatibility.currentProfile()
+        )?.let {
+            showOnDeviceFailure(it)
+            return
+        }
+
+        backgroundTask?.cancel(true)
+        providerSpinner.isEnabled = false
+        checkModelButton.isEnabled = false
+        importModelButton.isEnabled = false
+        checkModelButton.text = "가속기 확인 중..."
+        setConnectionStatus(
+            ConnectionState.CHECKING,
+            "모델을 여는 중입니다. 첫 실행은 10초 이상 걸릴 수 있습니다."
+        )
+        backgroundTask = QuestRuntime.submit(
+            block = { OnDeviceQuestClient.prepare(applicationContext, settings) },
+            callback = { result ->
+                if (isDestroyed) return@submit
+                providerSpinner.isEnabled = true
+                checkModelButton.isEnabled = true
+                importModelButton.isEnabled = true
+                checkModelButton.text = "모델과 가속기 확인"
+                result.onSuccess { prepared ->
+                    setConnectionStatus(ConnectionState.SUCCESS, prepared.statusText())
+                }.onFailure { error ->
+                    showOnDeviceFailure(
+                        error.message ?: "이 모델을 휴대폰에서 열지 못했습니다."
+                    )
+                }
+            }
+        )
+    }
+
+    private fun findNetworkModels() {
         val inputError = ConnectionGuide.connectionInputError(
             provider = currentProvider,
             rawEndpoint = endpointInput.text.toString(),
-            apiKey = apiKeyInput.text.toString(),
-            runner = currentRunner
+            apiKey = apiKeyInput.text.toString()
         )
         if (inputError != null) {
             showConnectionInputError(inputError)
@@ -506,25 +565,27 @@ class MainActivity : Activity() {
 
         val settings = readForm()
         backgroundTask?.cancel(true)
-        findModelsButton.isEnabled = false
-        findModelsButton.text = "연결 확인 중..."
+        providerSpinner.isEnabled = false
+        checkModelButton.isEnabled = false
+        checkModelButton.text = "연결 확인 중..."
         setConnectionStatus(ConnectionState.CHECKING, checkingMessage())
         backgroundTask = QuestRuntime.submit(
             block = { QuestAiClient.listModels(settings) },
             callback = { result ->
                 if (isDestroyed) return@submit
-                findModelsButton.isEnabled = true
-                findModelsButton.text = "연결 확인하고 모델 고르기"
+                providerSpinner.isEnabled = true
+                checkModelButton.isEnabled = true
+                checkModelButton.text = "연결 확인하고 모델 고르기"
                 result.onSuccess { models ->
                     if (models.isEmpty()) {
-                        val message = ConnectionGuide.emptyModelMessage(currentProvider, currentRunner)
+                        val message = ConnectionGuide.emptyModelMessage(currentProvider)
                         setConnectionStatus(ConnectionState.WARNING, message)
                         showNoModelsDialog(message)
                         return@onSuccess
                     }
                     chooseModel(models)
                 }.onFailure { error ->
-                    val message = ConnectionGuide.explainFailure(currentProvider, currentRunner, error)
+                    val message = ConnectionGuide.explainFailure(currentProvider, error)
                     setConnectionStatus(ConnectionState.FAILURE, message)
                     showConnectionFailure(message)
                 }
@@ -536,7 +597,6 @@ class MainActivity : Activity() {
         val current = modelInput.text.toString().trim()
         val suggested = when {
             current in models -> current
-            currentRunner.defaultModel in models -> currentRunner.defaultModel
             currentProvider == AiProvider.GEMINI ->
                 models.firstOrNull { it == "gemini-2.5-flash" }
                     ?: models.firstOrNull { "flash" in it }
@@ -563,14 +623,18 @@ class MainActivity : Activity() {
 
     private fun checkingMessage(): String = when (currentProvider) {
         AiProvider.GEMINI -> "Google에서 사용할 수 있는 AI를 찾는 중입니다."
-        AiProvider.LOCAL_SERVER -> "PC의 ${runnerShortName()}를 찾는 중입니다."
         AiProvider.OPENAI_COMPATIBLE -> "입력한 AI 서버에 연결하는 중입니다."
+        AiProvider.ON_DEVICE -> "휴대폰 모델을 준비하는 중입니다."
     }
 
     private fun markConnectionUnchecked() {
         val message = when (currentProvider) {
             AiProvider.GEMINI -> "키를 입력한 뒤 연결 확인을 눌러 주세요."
-            AiProvider.LOCAL_SERVER -> "PC 준비가 끝났다면 연결 확인을 눌러 주세요."
+            AiProvider.ON_DEVICE -> if (OnDeviceModelStore.existingFile(this, currentModelPath) == null) {
+                "추천 모델을 받은 뒤 .litertlm 파일을 가져와 주세요."
+            } else {
+                "모델 파일 준비됨 · 모델과 가속기 확인을 눌러 주세요."
+            }
             AiProvider.OPENAI_COMPATIBLE -> "서버 정보를 입력한 뒤 연결 확인을 눌러 주세요."
         }
         setConnectionStatus(ConnectionState.UNCHECKED, message)
@@ -589,20 +653,138 @@ class MainActivity : Activity() {
         connectionStatus.background = rounded(fill, radiusDp = 6)
     }
 
+    private fun pickModelFile() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        @Suppress("DEPRECATION")
+        startActivityForResult(intent, REQUEST_MODEL_FILE)
+    }
+
+    private fun importOnDeviceModel(uri: Uri) {
+        OnDeviceQuestClient.release()
+        backgroundTask?.cancel(true)
+        providerSpinner.isEnabled = false
+        importModelButton.isEnabled = false
+        checkModelButton.isEnabled = false
+        setConnectionStatus(
+            ConnectionState.CHECKING,
+            "모델을 앱 안으로 가져오는 중입니다. 큰 파일은 시간이 걸릴 수 있습니다."
+        )
+        val profile = OnDeviceCompatibility.currentProfile()
+        backgroundTask = QuestRuntime.submit(
+            block = {
+                OnDeviceModelStore.importModel(
+                    applicationContext,
+                    uri,
+                    currentModelPath
+                ) { fileName ->
+                    OnDeviceCompatibility.compatibilityError(fileName, profile)
+                }
+            },
+            callback = { result ->
+                if (isDestroyed) return@submit
+                providerSpinner.isEnabled = true
+                importModelButton.isEnabled = true
+                checkModelButton.isEnabled = true
+                result.onSuccess { imported ->
+                    currentModelPath = imported.path
+                    modelInput.setText(imported.displayName)
+                    updateOnDeviceModelDisplay()
+                    val settings = readForm(AiProvider.ON_DEVICE)
+                    drafts[AiProvider.ON_DEVICE] = settings
+                    settingsStore.save(settings)
+                    setConnectionStatus(
+                        ConnectionState.WARNING,
+                        "${imported.displayName} 가져오기 완료 · 가속기를 확인합니다."
+                    )
+                    prepareOnDeviceModel()
+                }.onFailure { error ->
+                    showOnDeviceFailure(
+                        error.message ?: "모델 파일을 가져오지 못했습니다."
+                    )
+                }
+            }
+        )
+    }
+
+    private fun showModelSources() {
+        val profile = OnDeviceCompatibility.currentProfile()
+        val oneBLabel = if (profile.recommendedNpuFile != null) {
+            "Gemma 3 1B · NPU용 파일 있음 (권장)"
+        } else {
+            "Gemma 3 1B · 일반 int4 (권장)"
+        }
+        val choices = arrayOf(
+            oneBLabel,
+            "Gemma 3 270M · 가장 가벼움, 정확도 낮음",
+            "LiteRT-LM 전체 모델 보기"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("휴대폰용 모델 받기")
+            .setItems(choices) { _, which ->
+                when (which) {
+                    0 -> showModelDownloadGuide(
+                        title = "Gemma 3 1B 받기",
+                        fileName = profile.recommendedNpuFile
+                            ?: "gemma3-1b-it-int4.litertlm",
+                        sizeGuide = "약 0.6GB",
+                        url = GEMMA_1B_MODEL_URL
+                    )
+                    1 -> showModelDownloadGuide(
+                        title = "Gemma 3 270M 받기",
+                        fileName = OnDeviceCompatibility.recommendedGemma270MFile(profile),
+                        sizeGuide = "약 0.3GB · 1B보다 문제 품질이 낮을 수 있음",
+                        url = GEMMA_270M_MODEL_URL
+                    )
+                    else -> openUrl(LITERT_MODEL_CATALOG_URL)
+                }
+            }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
+    private fun showModelDownloadGuide(
+        title: String,
+        fileName: String,
+        sizeGuide: String,
+        url: String
+    ) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(
+                "권장 파일\n$fileName\n$sizeGuide\n\n" +
+                    "1. Hugging Face에 로그인하고 모델 이용 조건에 동의합니다.\n" +
+                    "2. Files and versions에서 위 파일 이름을 찾습니다.\n" +
+                    "3. 파일 다운로드가 끝나면 앱으로 돌아옵니다.\n" +
+                    "4. '다운로드한 .litertlm 가져오기'를 누릅니다."
+            )
+            .setPositiveButton("모델 페이지 열기") { _, _ -> openUrl(url) }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
+    private fun showOnDeviceFailure(message: String) {
+        setConnectionStatus(ConnectionState.FAILURE, message)
+        AlertDialog.Builder(this)
+            .setTitle("휴대폰 모델을 준비하지 못했습니다")
+            .setMessage(message)
+            .setPositiveButton("다른 모델 가져오기") { _, _ -> pickModelFile() }
+            .setNeutralButton("추천 모델 받기") { _, _ -> showModelSources() }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
     private fun showConnectionInputError(message: String) {
         setConnectionStatus(ConnectionState.FAILURE, message)
         val builder = AlertDialog.Builder(this)
             .setTitle("한 가지만 확인해 주세요")
             .setMessage(message)
             .setNegativeButton("닫기", null)
-        when (currentProvider) {
-            AiProvider.GEMINI -> builder.setPositiveButton("개인 키 만들기") { _, _ ->
-                openUrl(AI_STUDIO_KEY_URL)
-            }
-            AiProvider.LOCAL_SERVER -> builder.setPositiveButton("PC 준비 방법") { _, _ ->
-                showLocalSetupGuide()
-            }
-            AiProvider.OPENAI_COMPATIBLE -> Unit
+        if (currentProvider == AiProvider.GEMINI) {
+            builder.setPositiveButton("개인 키 만들기") { _, _ -> openUrl(AI_STUDIO_KEY_URL) }
         }
         builder.show()
     }
@@ -612,76 +794,17 @@ class MainActivity : Activity() {
             .setTitle("아직 연결되지 않았습니다")
             .setMessage(message)
             .setNegativeButton("닫기", null)
-        when (currentProvider) {
-            AiProvider.GEMINI -> builder.setPositiveButton("키 다시 확인") { _, _ ->
-                openUrl(AI_STUDIO_KEY_URL)
-            }
-            AiProvider.LOCAL_SERVER -> builder.setPositiveButton("PC 준비 방법") { _, _ ->
-                showLocalSetupGuide()
-            }
-            AiProvider.OPENAI_COMPATIBLE -> Unit
+        if (currentProvider == AiProvider.GEMINI) {
+            builder.setPositiveButton("키 다시 확인") { _, _ -> openUrl(AI_STUDIO_KEY_URL) }
         }
         builder.show()
     }
 
     private fun showNoModelsDialog(message: String) {
-        val builder = AlertDialog.Builder(this)
+        AlertDialog.Builder(this)
             .setTitle("연결됐지만 모델이 없습니다")
             .setMessage(message)
             .setNegativeButton("닫기", null)
-        if (currentProvider == AiProvider.LOCAL_SERVER) {
-            builder.setPositiveButton("PC 준비 방법") { _, _ -> showLocalSetupGuide() }
-        }
-        builder.show()
-    }
-
-    private fun showLocalSetupGuide() {
-        when (currentRunner) {
-            LocalRunner.OLLAMA -> AlertDialog.Builder(this)
-                .setTitle("PC에서 Ollama 준비하기")
-                .setMessage(
-                    "1. PC에 Ollama를 설치합니다.\n\n" +
-                        "2. PC의 명령창에서 모델을 받습니다.\n" +
-                        "가볍게 시작: ollama pull gemma3:4b\n" +
-                        "고성능 PC: ollama pull gemma3:27b\n\n" +
-                        "3. 다른 기기의 연결을 허용합니다.\n" +
-                        "Windows: Windows 검색에서 '환경 변수' > '계정의 환경 변수 편집' > '새로 만들기'를 누르고, 이름은 OLLAMA_HOST, 값은 0.0.0.0:11434로 입력\n" +
-                        "macOS: launchctl setenv OLLAMA_HOST \"0.0.0.0:11434\" 실행\n" +
-                        "Linux: Ollama 서비스에 OLLAMA_HOST=0.0.0.0:11434 설정\n\n" +
-                        "4. Ollama를 다시 시작하고 휴대폰과 PC를 같은 Wi-Fi에 연결합니다."
-                )
-                .setNeutralButton("모델 명령 복사") { _, _ ->
-                    copyText("Ollama 모델 설치 명령", "ollama pull gemma3:4b")
-                }
-                .setPositiveButton("Ollama 설치") { _, _ -> openUrl(currentRunner.setupUrl) }
-                .setNegativeButton("닫기", null)
-                .show()
-
-            LocalRunner.LM_STUDIO -> AlertDialog.Builder(this)
-                .setTitle("PC에서 LM Studio 준비하기")
-                .setMessage(
-                    "1. PC에 LM Studio를 설치하고 원하는 모델을 내려받습니다.\n\n" +
-                        "2. 왼쪽 Developer 화면에서 Start Server를 켭니다.\n\n" +
-                        "3. Server Settings에서 Serve on Local Network를 켭니다.\n\n" +
-                        "4. 휴대폰과 PC를 같은 Wi-Fi에 연결합니다."
-                )
-                .setNeutralButton("공식 연결 안내") { _, _ -> openUrl(LM_STUDIO_NETWORK_URL) }
-                .setPositiveButton("LM Studio 설치") { _, _ -> openUrl(currentRunner.setupUrl) }
-                .setNegativeButton("닫기", null)
-                .show()
-        }
-    }
-
-    private fun showPcAddressGuide() {
-        AlertDialog.Builder(this)
-            .setTitle("PC의 Wi-Fi 주소 찾기")
-            .setMessage(
-                "Windows\n설정 > 네트워크 및 인터넷 > Wi-Fi > 연결된 네트워크 > IPv4 주소\n\n" +
-                    "macOS\n시스템 설정 > 네트워크 > Wi-Fi > 세부사항 > TCP/IP > IP 주소\n\n" +
-                    "Linux\n네트워크 설정의 연결 정보에서 IPv4 주소 확인\n\n" +
-                    "192.168 또는 10으로 시작하는 숫자를 앱에 입력하세요. localhost와 0.0.0.0은 입력하지 않습니다."
-            )
-            .setPositiveButton("확인", null)
             .show()
     }
 
@@ -704,19 +827,8 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun copyText(label: String, value: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
-        Toast.makeText(this, "명령을 복사했습니다.", Toast.LENGTH_SHORT).show()
-    }
-
     private fun openUrl(url: String) {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-    }
-
-    private fun runnerShortName(): String = when (currentRunner) {
-        LocalRunner.OLLAMA -> "Ollama"
-        LocalRunner.LM_STUDIO -> "LM Studio"
     }
 
     private fun launchQuiz(mode: String) {
@@ -847,9 +959,14 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_NOTIFICATIONS = 5001
+        private const val REQUEST_MODEL_FILE = 5002
         private const val AI_STUDIO_KEY_URL = "https://aistudio.google.com/app/apikey"
-        private const val LM_STUDIO_NETWORK_URL =
-            "https://lmstudio.ai/docs/developer/core/server/serve-on-network"
+        private const val GEMMA_1B_MODEL_URL =
+            "https://huggingface.co/litert-community/Gemma3-1B-IT/tree/main"
+        private const val GEMMA_270M_MODEL_URL =
+            "https://huggingface.co/litert-community/gemma-3-270m-it/tree/main"
+        private const val LITERT_MODEL_CATALOG_URL =
+            "https://huggingface.co/models?library=litert-lm"
         private const val LEGACY_DB_NAME = "kanji_wake_words.db"
         private const val KEY_LEGACY_DB_REMOVED = "legacy_vocabulary_db_removed"
     }

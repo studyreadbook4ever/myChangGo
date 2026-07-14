@@ -43,7 +43,7 @@ class QuestAiClientTest {
     }
 
     private fun settings() = QuestSettings(
-        provider = AiProvider.LOCAL_SERVER,
+        provider = AiProvider.OPENAI_COMPATIBLE,
         endpoint = "http://127.0.0.1:${server.port}",
         model = "gemma3:27b",
         apiKey = "",

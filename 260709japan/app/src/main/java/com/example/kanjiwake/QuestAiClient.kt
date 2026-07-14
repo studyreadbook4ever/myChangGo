@@ -11,8 +11,8 @@ import kotlin.random.Random
 object QuestAiClient {
     fun listModels(settings: QuestSettings): List<String> = when (settings.provider) {
         AiProvider.GEMINI -> listGeminiModels(settings)
-        AiProvider.LOCAL_SERVER,
         AiProvider.OPENAI_COMPATIBLE -> listOpenAiModels(settings)
+        AiProvider.ON_DEVICE -> error("온디바이스 모델은 파일 선택 화면에서 준비해 주세요.")
     }
 
     fun generate(settings: QuestSettings, previousQuestion: String?): GeneratedQuest {
@@ -22,9 +22,9 @@ object QuestAiClient {
         repeat(2) { attempt ->
             val raw = when (settings.provider) {
                 AiProvider.GEMINI -> generateWithGemini(settings, previousQuestion, attempt > 0)
-                AiProvider.LOCAL_SERVER,
                 AiProvider.OPENAI_COMPATIBLE ->
                     generateWithOpenAi(settings, previousQuestion, attempt > 0)
+                AiProvider.ON_DEVICE -> error("온디바이스 생성에는 Android 컨텍스트가 필요합니다.")
             }
             try {
                 return QuestJsonParser.parse(raw)
@@ -89,7 +89,9 @@ object QuestAiClient {
                 "systemInstruction",
                 JSONObject().put(
                     "parts",
-                    JSONArray().put(JSONObject().put("text", SYSTEM_INSTRUCTION))
+                    JSONArray().put(
+                        JSONObject().put("text", QuestPromptContract.SYSTEM_INSTRUCTION)
+                    )
                 )
             )
             .put(
@@ -102,7 +104,11 @@ object QuestAiClient {
                             JSONArray().put(
                                 JSONObject().put(
                                     "text",
-                                    generationPrompt(settings.questPrompt, previousQuestion, strictRetry)
+                                    QuestPromptContract.generationPrompt(
+                                        settings.questPrompt,
+                                        previousQuestion,
+                                        strictRetry
+                                    )
                                 )
                             )
                         )
@@ -156,13 +162,21 @@ object QuestAiClient {
             .put(
                 "messages",
                 JSONArray()
-                    .put(JSONObject().put("role", "system").put("content", SYSTEM_INSTRUCTION))
+                    .put(
+                        JSONObject()
+                            .put("role", "system")
+                            .put("content", QuestPromptContract.SYSTEM_INSTRUCTION)
+                    )
                     .put(
                         JSONObject()
                             .put("role", "user")
                             .put(
                                 "content",
-                                generationPrompt(settings.questPrompt, previousQuestion, strictRetry)
+                                QuestPromptContract.generationPrompt(
+                                    settings.questPrompt,
+                                    previousQuestion,
+                                    strictRetry
+                                )
                             )
                     )
             )
@@ -199,24 +213,6 @@ object QuestAiClient {
             }
             else -> ""
         }.ifBlank { error("모델이 빈 응답을 반환했습니다.") }
-    }
-
-    private fun generationPrompt(
-        userPrompt: String,
-        previousQuestion: String?,
-        strictRetry: Boolean
-    ): String = buildString {
-        appendLine("[사용자의 출제 프롬프트]")
-        appendLine(userPrompt.trim())
-        appendLine()
-        appendLine("위 지시에 맞는 새로운 문제를 정확히 한 개 생성하세요.")
-        appendLine("생성 식별자: ${System.currentTimeMillis()}-${Random.nextLong()}")
-        previousQuestion?.takeIf { it.isNotBlank() }?.let {
-            appendLine("직전 문제와 겹치지 마세요: $it")
-        }
-        if (strictRetry) {
-            appendLine("이전 응답의 형식이 잘못되었습니다. 이번에는 네 선택지와 정확히 일치하는 정답을 포함하세요.")
-        }
     }
 
     private fun questSchema(): JSONObject = JSONObject()
@@ -310,11 +306,6 @@ object QuestAiClient {
             ?.let { mapOf("Authorization" to "Bearer $it") }
             ?: emptyMap()
 
-    private const val SYSTEM_INSTRUCTION =
-        "당신은 Per-Open Quest의 4지선다 문제 생성기입니다. 사용자의 출제 의도와 언어를 따르되 " +
-            "매 요청마다 새롭고 사실적으로 정확한 문제 한 개만 만드세요. 선택지는 서로 달라야 하며 " +
-            "answer는 choices 안의 문자열 하나와 글자까지 정확히 같아야 합니다. explanation에는 정답의 " +
-            "근거를 이해하기 쉽게 설명하세요. 출력은 question, choices, answer, explanation 필드만 가진 JSON 객체여야 합니다."
 }
 
 internal class QuestHttpFailure(val status: Int, message: String) : RuntimeException(message)

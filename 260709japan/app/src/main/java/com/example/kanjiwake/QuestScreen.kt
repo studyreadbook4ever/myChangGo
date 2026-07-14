@@ -223,7 +223,13 @@ class QuestScreen(
         generationStatus.text = "${settings.provider.displayName} · ${settings.model}"
 
         generationTask = QuestRuntime.submit(
-            block = { QuestAiClient.generate(settings, previousQuestion) },
+            block = {
+                if (settings.provider == AiProvider.ON_DEVICE) {
+                    OnDeviceQuestClient.generate(context, settings, previousQuestion)
+                } else {
+                    QuestAiClient.generate(settings, previousQuestion)
+                }
+            },
             callback = { result ->
                 if (disposed || requestId != generationId) return@submit
                 result.onSuccess(::showQuest).onFailure {
