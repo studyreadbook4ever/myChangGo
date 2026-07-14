@@ -145,6 +145,31 @@ def test_html_only_output_copies_user_css_without_markdown(config_factory, tmp_p
     assert not (output / "markdown").exists()
 
 
+def test_staging_validation_failure_preserves_the_published_site(config_factory, monkeypatch) -> None:
+    config = config_factory(
+        depth=0,
+        output_format="both",
+        web_enabled=False,
+        allow_ungrounded=True,
+        overwrite=True,
+    )
+    output, orchestrator, *_ = _run(config)
+    sentinel = output / "published-before-failure.txt"
+    sentinel.write_text("keep me", encoding="utf-8")
+    renderer = SiteRenderer(config)
+
+    def fail_validation(*_args) -> None:
+        raise ValueError("의도한 staging 검증 실패")
+
+    monkeypatch.setattr(renderer, "_validate_tree", fail_validation)
+
+    with pytest.raises(ValueError, match="staging 검증 실패"):
+        renderer.render_and_publish(orchestrator.store.state)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep me"
+    assert not list(output.parent.glob(f".{output.name}.staging-*"))
+
+
 class EmptyEvidenceSearch:
     def preflight(self) -> None:
         return None

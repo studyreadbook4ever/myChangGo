@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 from dataclasses import asdict
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,15 @@ class WorkStore:
         return NodeDraft.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def save_duplicate_raw(self, parent_id: str, candidate_name: str, existing_id: str, raw_text: str) -> None:
-        key = f"{slugify(candidate_name)}--{existing_id[:8]}"
-        path = self.node_dir(parent_id) / "dedupe" / f"{key}.txt"
+        identity_hash = sha256(normalize_name(candidate_name).encode("utf-8")).hexdigest()[:8]
+        key = f"{slugify(candidate_name)}-{identity_hash}--{existing_id[:8]}"
+        directory = self.node_dir(parent_id) / "dedupe"
+        attempts: list[int] = []
+        for existing_path in directory.glob(f"{key}-*.txt"):
+            try:
+                attempts.append(int(existing_path.stem.rsplit("-", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+        attempt = max(attempts, default=0) + 1
+        path = directory / f"{key}-{attempt:03d}.txt"
         atomic_write_text(path, raw_text)

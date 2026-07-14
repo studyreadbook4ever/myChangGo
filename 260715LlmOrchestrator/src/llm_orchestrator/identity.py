@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import re
 import unicodedata
 from collections.abc import Iterable
+from functools import lru_cache
 
 from .models import ConceptNode
 
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 
 
+@lru_cache(maxsize=65_536)
 def normalize_name(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold().strip()
     result: list[str] = []
@@ -38,20 +41,22 @@ def node_filename(node: ConceptNode) -> str:
     return f"{slugify(node.name)}-{node.node_id[:8]}"
 
 
-def _ngrams(value: str, size: int = 2) -> set[str]:
+@lru_cache(maxsize=65_536)
+def _ngrams(value: str, size: int = 2) -> frozenset[str]:
     if len(value) <= size:
-        return {value} if value else set()
-    return {value[index : index + size] for index in range(len(value) - size + 1)}
+        return frozenset({value}) if value else frozenset()
+    return frozenset(value[index : index + size] for index in range(len(value) - size + 1))
 
 
-def _jaccard(left: set[str], right: set[str]) -> float:
+def _jaccard(left: frozenset[str], right: frozenset[str]) -> float:
     if not left or not right:
         return 0.0
     return len(left & right) / len(left | right)
 
 
-def _words(value: str) -> set[str]:
-    return {word.casefold() for word in _WORD_RE.findall(unicodedata.normalize("NFKC", value))}
+@lru_cache(maxsize=65_536)
+def _words(value: str) -> frozenset[str]:
+    return frozenset(word.casefold() for word in _WORD_RE.findall(unicodedata.normalize("NFKC", value)))
 
 
 def identity_similarity(node: ConceptNode, candidate_name: str, candidate_definition: str) -> float:
@@ -75,11 +80,11 @@ def shortlist_candidates(
     limit: int = 5,
     minimum_score: float = 0.18,
 ) -> list[tuple[ConceptNode, float]]:
-    scored = [
-        (node, identity_similarity(node, candidate_name, candidate_definition))
-        for node in nodes
-        if node.status.value != "failed"
-    ]
-    scored = [item for item in scored if item[1] >= minimum_score]
-    scored.sort(key=lambda item: (-item[1], item[0].depth, item[0].name))
-    return scored[:limit]
+    scored: list[tuple[ConceptNode, float]] = []
+    for node in nodes:
+        if node.status.value == "failed":
+            continue
+        score = identity_similarity(node, candidate_name, candidate_definition)
+        if score >= minimum_score:
+            scored.append((node, score))
+    return heapq.nsmallest(limit, scored, key=lambda item: (-item[1], item[0].depth, item[0].name))

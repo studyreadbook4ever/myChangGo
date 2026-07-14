@@ -13,6 +13,7 @@ from .identity import normalize_name, shortlist_candidates, stable_node_id
 from .models import (
     ChildProposal,
     ConceptNode,
+    DuplicateDecision,
     DuplicateRelation,
     NodeDraft,
     NodeStatus,
@@ -61,6 +62,9 @@ class EagerOrchestrator:
         self.fetcher = fetcher or WebPageFetcher(timeout=min(config.timeout, 30.0), source_chars=config.source_chars)
         self.progress = progress or (lambda _: None)
         self.store: WorkStore | None = None
+        self._identity_nodes: list[ConceptNode] = []
+        self._nodes_by_normalized_name: dict[str, ConceptNode] = {}
+        self._identity_index_ready = False
 
     def run(self) -> Path:
         self.config.validate()
@@ -75,6 +79,7 @@ class EagerOrchestrator:
             self.search.preflight()
         self.store = WorkStore.open(self.config)
         state = self.store.state
+        self._rebuild_identity_index()
         self.progress(f"작업 {state.run_id}: 최대 {self.config.theoretical_nodes:,}개 노드")
 
         if not state.finished:
@@ -92,7 +97,10 @@ class EagerOrchestrator:
         assert self.store is not None
         state = self.store.state
         while True:
-            pending = [node for node in state.nodes.values() if node.status is NodeStatus.STUB]
+            pending = sorted(
+                (node for node in state.nodes.values() if node.status is NodeStatus.STUB),
+                key=lambda node: (node.depth, node.sequence, node.node_id),
+            )
             if not pending:
                 break
             current_depth = min(node.depth for node in pending)
@@ -185,6 +193,7 @@ class EagerOrchestrator:
             max_chars=self.config.max_chars,
             summary_max_chars=self.config.summary_max_chars,
             sources=sources,
+            source_chars=self.config.source_chars,
         )
         recovered = self._recover_draft(node, base_context, grounded)
         if recovered is not None:
@@ -234,6 +243,7 @@ class EagerOrchestrator:
     def _recover_draft(self, node: ConceptNode, context: GenerationContext, grounded: bool) -> NodeDraft | None:
         assert self.store is not None
         draft = self.store.load_draft(node.node_id)
+        persisted_approved_draft = draft is not None
         if draft is None:
             raw = self.store.latest_raw(node.node_id, "generation")
             if raw:
@@ -246,6 +256,8 @@ class EagerOrchestrator:
         draft = sanitize_draft(draft, context)
         if validate_draft(draft, context, grounded=grounded):
             return None
+        if persisted_approved_draft:
+            return draft
         if self.config.review_mode == "strict":
             attempt = self.store.next_attempt(node.node_id, "review")
             self.store.save_prompt(
@@ -315,33 +327,39 @@ class EagerOrchestrator:
 
     def _resolve_child(self, parent: ConceptNode, proposal: ChildProposal) -> ConceptNode | None:
         assert self.store is not None
+        if not self._identity_index_ready:
+            self._rebuild_identity_index()
         state = self.store.state
         normalized = normalize_name(proposal.name)
-        existing_nodes = [node for node in state.nodes.values() if node.status is not NodeStatus.FAILED]
-        for existing in existing_nodes:
-            if existing.normalized_name == normalized:
-                if self._would_create_cycle(parent, existing):
-                    self.store.record_event(
-                        "cycle_link_skipped",
-                        {"parent_id": parent.node_id, "candidate": proposal.name, "existing_id": existing.node_id},
-                    )
-                    return None
-                if proposal.name != existing.name and proposal.name not in existing.aliases:
-                    existing.aliases.append(proposal.name)
-                return existing
+        existing = self._nodes_by_normalized_name.get(normalized)
+        if existing is not None:
+            if self._would_create_cycle(parent, existing):
+                self.store.record_event(
+                    "cycle_link_skipped",
+                    {"parent_id": parent.node_id, "candidate": proposal.name, "existing_id": existing.node_id},
+                )
+                return None
+            self._register_identity_alias(existing, proposal.name)
+            return existing
 
-        for existing, score in shortlist_candidates(existing_nodes, proposal.name, proposal.definition):
+        shortlist = shortlist_candidates(self._identity_nodes, proposal.name, proposal.definition)
+        decisions: dict[str, DuplicateDecision] = {}
+        if shortlist:
             try:
-                decision, result = self.llm.judge_duplicate(
-                    existing,
+                decisions, result = self.llm.judge_duplicates(
+                    [existing for existing, _ in shortlist],
                     proposal.name,
                     proposal.definition,
                     parent.primary_path,
                 )
-                self.store.save_duplicate_raw(parent.node_id, proposal.name, existing.node_id, result.raw_text)
+                self.store.save_duplicate_raw(parent.node_id, proposal.name, "batch", result.raw_text)
             except Exception as exc:
                 if isinstance(exc, LLMResponseError):
-                    self.store.save_duplicate_raw(parent.node_id, proposal.name, existing.node_id, exc.raw_text)
+                    self.store.save_duplicate_raw(parent.node_id, proposal.name, "batch", exc.raw_text)
+                decisions = {}
+        for existing, score in shortlist:
+            decision = decisions.get(existing.node_id)
+            if decision is None:
                 continue
             if decision.relation is DuplicateRelation.SAME and decision.confidence >= self.config.duplicate_threshold:
                 if self._would_create_cycle(parent, existing):
@@ -350,8 +368,7 @@ class EagerOrchestrator:
                         {"parent_id": parent.node_id, "candidate": proposal.name, "existing_id": existing.node_id},
                     )
                     return None
-                if proposal.name != existing.name and proposal.name not in existing.aliases:
-                    existing.aliases.append(proposal.name)
+                self._register_identity_alias(existing, proposal.name)
                 self.store.record_event(
                     "concept_merged",
                     {
@@ -382,7 +399,39 @@ class EagerOrchestrator:
             parent_ids=[parent.node_id],
         )
         state.nodes[node_id] = child
+        self._register_identity_node(child)
         return child
+
+    def _rebuild_identity_index(self) -> None:
+        assert self.store is not None
+        self._identity_nodes = sorted(
+            self.store.state.nodes.values(),
+            key=lambda node: (node.sequence, node.node_id),
+        )
+        self._nodes_by_normalized_name = {}
+        for node in self._identity_nodes:
+            if node.status is not NodeStatus.FAILED:
+                self._index_identity_name(node, node.name)
+                for alias in node.aliases:
+                    self._index_identity_name(node, alias)
+        self._identity_index_ready = True
+
+    def _register_identity_node(self, node: ConceptNode) -> None:
+        self._identity_nodes.append(node)
+        if node.status is not NodeStatus.FAILED:
+            self._index_identity_name(node, node.name)
+            for alias in node.aliases:
+                self._index_identity_name(node, alias)
+
+    def _index_identity_name(self, node: ConceptNode, name: str) -> None:
+        normalized = normalize_name(name)
+        if normalized:
+            self._nodes_by_normalized_name.setdefault(normalized, node)
+
+    def _register_identity_alias(self, node: ConceptNode, alias: str) -> None:
+        if alias != node.name and alias not in node.aliases:
+            node.aliases.append(alias)
+        self._index_identity_name(node, alias)
 
     def _would_create_cycle(self, parent: ConceptNode, child: ConceptNode) -> bool:
         """parent -> child 간선을 추가했을 때 기존 DAG에 순환이 생기는지 확인한다."""
@@ -409,6 +458,10 @@ class EagerOrchestrator:
         assert self.store is not None
         node.status = NodeStatus.FAILED
         node.failure_reason = reason
+        for identity_name in (node.name, *node.aliases):
+            normalized = normalize_name(identity_name)
+            if self._nodes_by_normalized_name.get(normalized) is node:
+                self._nodes_by_normalized_name.pop(normalized, None)
         for parent_id in list(node.parent_ids):
             parent = self.store.state.nodes.get(parent_id)
             if parent and node.node_id in parent.child_ids:

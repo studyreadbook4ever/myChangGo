@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from .models import ConceptNode, NodeDraft, Source
 
-PROMPT_VERSION = "2026-07-15.2"
+PROMPT_VERSION = "2026-07-15.3"
 
 
 SYSTEM_PROMPT = """당신은 한국어 교육 문서를 작성하는 신중한 편집자입니다.
@@ -26,6 +26,7 @@ class GenerationContext:
     max_chars: int
     summary_max_chars: int
     sources: list[Source]
+    source_chars: int = 4_000
     validation_feedback: tuple[str, ...] = ()
 
     @property
@@ -34,7 +35,9 @@ class GenerationContext:
 
 
 def generation_prompt(context: GenerationContext) -> str:
-    source_text = "\n\n--- SOURCE BOUNDARY ---\n\n".join(source.prompt_text() for source in context.sources)
+    source_text = "\n\n--- SOURCE BOUNDARY ---\n\n".join(
+        source.prompt_text(max_chars=context.source_chars) for source in context.sources
+    )
     if not source_text:
         source_text = "제공된 웹 근거 없음. 허용된 경우에만 일반 지식을 사용하고 출처를 만들지 마십시오."
 
@@ -67,8 +70,9 @@ def generation_prompt(context: GenerationContext) -> str:
 3. body_markdown은 짧은 개요, 핵심 원리, 단계적 설명을 2~5개의 H2 절로 구성하십시오.
 4. 핵심 주장 뒤에는 제공된 출처 ID를 [S1]처럼 표시하십시오. 사용할 수 있는 ID: {source_ids}
 5. 입력에 없는 출처 ID나 URL을 만들지 마십시오.
-6. 직접 인용을 최소화하고 근거를 독자적인 한국어 설명으로 요약하십시오.
-7. {child_rule}
+6. body_markdown에는 링크나 이미지 Markdown을 넣지 말고, 인용은 링크 없는 [S1] 토큰으로만 표시하십시오.
+7. 직접 인용을 최소화하고 근거를 독자적인 한국어 설명으로 요약하십시오.
+8. {child_rule}
 {feedback}
 
 다음 JSON 모양으로만 반환하십시오:
@@ -115,8 +119,54 @@ JSON 객체만 반환하십시오:
 }}"""
 
 
+def duplicate_batch_prompt(
+    existing_nodes: list[ConceptNode],
+    candidate_name: str,
+    candidate_definition: str,
+    parent_path: list[str],
+) -> str:
+    candidates = "\n\n".join(
+        f"""기존 후보 ID: {node.node_id}
+- 이름: {node.name}
+- 별칭: {", ".join(node.aliases) or "없음"}
+- 정의: {node.seed_definition or node.summary}
+- 경로: {" > ".join(node.primary_path)}"""
+        for node in existing_nodes
+    )
+    expected_ids = ", ".join(node.node_id for node in existing_nodes)
+    return f"""새 한국어 학술·기술 개념 하나와 기존 후보들의 관계를 각각 판정하십시오.
+이름만 보고 합치지 말고 정의, 적용 범위, 문맥을 함께 보십시오.
+
+새 후보:
+- 이름: {candidate_name}
+- 정의: {candidate_definition}
+- 경로: {" > ".join(parent_path + [candidate_name])}
+
+비교할 기존 후보:
+{candidates}
+
+relation은 same, broader, narrower, related, distinct, uncertain 중 하나입니다.
+완전히 같은 개념·통용되는 동의어일 때만 same을 사용하십시오.
+상하위 개념, 관련 개념, 동음이의어는 same이 아닙니다.
+각 기존 후보 ID를 정확히 한 번씩 반환하고 다른 ID를 만들지 마십시오. 기대 ID: {expected_ids}
+
+JSON 객체만 반환하십시오:
+{{
+  "candidate_name": "{candidate_name}",
+  "decisions": [
+    {{
+      "existing_id": "기존 후보 ID",
+      "relation": "same|broader|narrower|related|distinct|uncertain",
+      "confidence": 0.0,
+      "reason": "짧은 근거",
+      "canonical_name": "권장 대표명"
+    }}
+  ]
+}}"""
+
+
 def review_prompt(draft: NodeDraft, context: GenerationContext) -> str:
-    source_text = "\n\n".join(source.prompt_text(max_chars=4_000) for source in context.sources)
+    source_text = "\n\n".join(source.prompt_text(max_chars=context.source_chars) for source in context.sources)
     children = "\n".join(f"- {child.name}: {child.definition}" for child in draft.children) or "없음"
     return f"""아래 한국어 문서 초안을 근거와 대조해 검수하십시오.
 제공되지 않은 출처, 근거가 뒷받침하지 않는 단정, 현재 개념과 무관한 내용,

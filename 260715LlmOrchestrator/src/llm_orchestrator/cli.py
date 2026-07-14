@@ -162,7 +162,7 @@ def _make_search(config: BuildConfig):
         return BraveSearchProvider(config.brave_api_key_env, config.timeout)
     if provider == "searxng":
         return SearXNGSearchProvider(config.searxng_url, config.timeout)
-    return DDGSSearchProvider()
+    return DDGSSearchProvider(config.timeout)
 
 
 def _print_dry_run(config: BuildConfig) -> None:
@@ -182,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     config = _config_from_args(args)
+    llm = None
+    search = None
     try:
         config.validate(check_providers=not args.dry_run)
         if args.dry_run:
@@ -189,7 +191,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if config.html_enabled and not config.site_url:
             print("주의: --site-url이 없어 sitemap.txt는 로컬 상대경로 목록으로 생성됩니다.", file=sys.stderr)
-        orchestrator = EagerOrchestrator(config, _make_llm(config), _make_search(config), progress=print)
+        llm = _make_llm(config)
+        search = _make_search(config)
+        orchestrator = EagerOrchestrator(config, llm, search, progress=print)
         orchestrator.run()
         return 0
     except KeyboardInterrupt:
@@ -205,6 +209,15 @@ def main(argv: list[str] | None = None) -> int:
 
             traceback.print_exc()
         return 1
+    finally:
+        for provider in (search, llm):
+            close = getattr(provider, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    if args.verbose:
+                        print(f"주의: {type(provider).__name__} 연결 정리에 실패했습니다.", file=sys.stderr)
 
 
 if __name__ == "__main__":

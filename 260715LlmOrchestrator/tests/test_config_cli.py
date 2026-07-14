@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from llm_orchestrator.cli import _config_from_args, build_parser, main
+from llm_orchestrator.cli import _config_from_args, _make_search, build_parser, main
 from llm_orchestrator.config import BuildConfig
+from llm_orchestrator.providers import DDGSSearchProvider
 
 
 @pytest.mark.parametrize(
@@ -28,6 +29,13 @@ def test_cli_defaults_match_product_contract() -> None:
     assert config.target_chars == 2_000
     assert config.max_chars == 5_000
     assert config.web_enabled is True
+
+
+def test_default_ddgs_search_receives_the_cli_timeout(config_factory) -> None:
+    provider = _make_search(config_factory(search_provider="ddgs", timeout=12.25))
+
+    assert isinstance(provider, DDGSSearchProvider)
+    assert provider.timeout == 12.25
 
 
 def test_cli_requires_root_concept() -> None:

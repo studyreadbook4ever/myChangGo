@@ -16,7 +16,6 @@ from mdit_py_plugins.dollarmath import dollarmath_plugin
 from .config import BuildConfig
 from .identity import node_filename
 from .models import ConceptNode, NodeStatus, RunState, Source
-from .workspace import atomic_write_bytes, atomic_write_text
 
 _CITATION_RE = re.compile(r"\[(S\d+)\]")
 
@@ -113,6 +112,17 @@ def _sitemap_url(base_url: str, route: str) -> str:
     ).geturl()
 
 
+def _write_staging_bytes(path: Path, data: bytes) -> None:
+    """미공개 staging 파일은 최종 디렉터리 rename으로 보호되므로 개별 fsync를 생략한다."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def _write_staging_text(path: Path, value: str) -> None:
+    _write_staging_bytes(path, value.encode("utf-8"))
+
+
 class SiteRenderer:
     def __init__(self, config: BuildConfig) -> None:
         self.config = config
@@ -156,15 +166,15 @@ class SiteRenderer:
                 if self.config.css_file
                 else files("llm_orchestrator").joinpath("assets/demo.css").read_bytes()
             )
-            atomic_write_bytes(staging / "assets/site.css", css_bytes)
+            _write_staging_bytes(staging / "assets/site.css", css_bytes)
         for node in nodes:
             children = [by_id[child_id] for child_id in node.child_ids if child_id in by_id]
             if self.config.html_enabled:
                 route = _html_route(node, state.root_id)
-                atomic_write_text(staging / route, self._render_html(node, children, route, state.root_id))
+                _write_staging_text(staging / route, self._render_html(node, children, route, state.root_id))
             if self.config.markdown_enabled:
                 route = _markdown_route(node, state.root_id)
-                atomic_write_text(staging / route, self._render_markdown(node, children, route, state.root_id))
+                _write_staging_text(staging / route, self._render_markdown(node, children, route, state.root_id))
         if self.config.html_enabled:
             self._write_sitemap(nodes, state.root_id, staging)
 
@@ -254,23 +264,24 @@ class SiteRenderer:
             if self.config.site_url:
                 route = _sitemap_url(self.config.site_url, route)
             lines.append(route)
-        atomic_write_text(staging / "sitemap.txt", "\n".join(lines) + "\n")
+        _write_staging_text(staging / "sitemap.txt", "\n".join(lines) + "\n")
 
     def _validate_tree(self, state: RunState, staging: Path) -> None:
         nodes = _complete_nodes(state)
-        expected_html = {_html_route(node, state.root_id) for node in nodes} if self.config.html_enabled else set()
-        expected_md = (
-            {_markdown_route(node, state.root_id) for node in nodes} if self.config.markdown_enabled else set()
+        complete_ids = {node.node_id for node in nodes}
+        html_nodes = {_html_route(node, state.root_id): node for node in nodes} if self.config.html_enabled else {}
+        markdown_nodes = (
+            {_markdown_route(node, state.root_id): node for node in nodes} if self.config.markdown_enabled else {}
         )
+        expected_html = set(html_nodes)
+        expected_md = set(markdown_nodes)
         for path in expected_html | expected_md:
             if not (staging / path).is_file():
                 raise ValueError(f"생성되어야 할 문서가 없습니다: {path}")
         for path in expected_html:
             document = (staging / path).read_text(encoding="utf-8")
-            node = next(node for node in nodes if _html_route(node, state.root_id) == path)
-            complete_children = [
-                child_id for child_id in node.child_ids if child_id in {item.node_id for item in nodes}
-            ]
+            node = html_nodes[path]
+            complete_children = [child_id for child_id in node.child_ids if child_id in complete_ids]
             has_container = 'class="concept-children"' in document
             if bool(complete_children) != has_container:
                 raise ValueError(f"하위개념 링크 영역 검증에 실패했습니다: {path}")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin
 
@@ -19,7 +19,14 @@ from ..models import (
     NodeDraft,
     ReviewResult,
 )
-from ..prompts import SYSTEM_PROMPT, GenerationContext, duplicate_prompt, generation_prompt, review_prompt
+from ..prompts import (
+    SYSTEM_PROMPT,
+    GenerationContext,
+    duplicate_batch_prompt,
+    duplicate_prompt,
+    generation_prompt,
+    review_prompt,
+)
 
 
 class LLMResponseError(ValueError):
@@ -40,6 +47,7 @@ def extract_json(text: str) -> dict[str, Any]:
     schema_keys = (
         {"name", "summary", "body_markdown"},
         {"relation", "confidence"},
+        {"candidate_name", "decisions"},
         {"approved", "issues"},
     )
     for index, char in enumerate(stripped):
@@ -67,6 +75,17 @@ class OpenAICompatibleProvider:
     timeout: float = 60.0
     temperature: float = 0.2
     max_tokens: int = 4_096
+    client: httpx.Client | None = field(default=None, repr=False)
+    _owns_client: bool = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._owns_client = self.client is None
+        if self.client is None:
+            self.client = httpx.Client(timeout=self.timeout, follow_redirects=True)
+
+    def close(self) -> None:
+        if self._owns_client and self.client is not None:
+            self.client.close()
 
     def _complete(self, system: str, user: str) -> LLMResult:
         endpoint = urljoin(self.base_url.rstrip("/") + "/", "chat/completions")
@@ -83,7 +102,8 @@ class OpenAICompatibleProvider:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
-        response = httpx.post(endpoint, headers=headers, json=payload, timeout=self.timeout, follow_redirects=True)
+        assert self.client is not None
+        response = self.client.post(endpoint, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
         try:
@@ -127,6 +147,33 @@ class OpenAICompatibleProvider:
             raise LLMResponseError(f"중복 판정 응답 스키마가 올바르지 않습니다: {exc}", result.raw_text) from exc
         return decision, result
 
+    def judge_duplicates(
+        self,
+        existing_nodes: list[ConceptNode],
+        candidate_name: str,
+        candidate_definition: str,
+        parent_path: list[str],
+    ) -> tuple[dict[str, DuplicateDecision], LLMResult]:
+        result = self._complete(
+            SYSTEM_PROMPT,
+            duplicate_batch_prompt(existing_nodes, candidate_name, candidate_definition, parent_path),
+        )
+        raw_decisions = result.payload.get("decisions")
+        if not isinstance(raw_decisions, list):
+            raise LLMResponseError("중복 batch 응답에 decisions 배열이 없습니다.", result.raw_text)
+        expected_ids = {node.node_id for node in existing_nodes}
+        decisions: dict[str, DuplicateDecision] = {}
+        for item in raw_decisions:
+            if not isinstance(item, dict):
+                raise LLMResponseError("중복 batch decisions 항목이 JSON 객체가 아닙니다.", result.raw_text)
+            existing_id = str(item.get("existing_id", "")).strip()
+            if existing_id not in expected_ids or existing_id in decisions:
+                raise LLMResponseError("중복 batch 응답의 existing_id가 누락·중복·변조됐습니다.", result.raw_text)
+            decisions[existing_id] = DuplicateDecision.from_dict(item)
+        if set(decisions) != expected_ids:
+            raise LLMResponseError("중복 batch 응답이 모든 기존 후보를 판정하지 않았습니다.", result.raw_text)
+        return decisions, result
+
     def review_node(self, draft: NodeDraft, context: GenerationContext) -> tuple[ReviewResult, LLMResult]:
         result = self._complete(SYSTEM_PROMPT, review_prompt(draft, context))
         try:
@@ -142,6 +189,7 @@ class MockLLMProvider:
     def __init__(self) -> None:
         self.generation_calls: list[str] = []
         self.duplicate_calls: list[tuple[str, str]] = []
+        self.duplicate_batch_calls: list[tuple[str, int]] = []
         self.review_calls: list[str] = []
 
     def generate_node(self, context: GenerationContext) -> tuple[NodeDraft, LLMResult]:
@@ -197,6 +245,36 @@ class MockLLMProvider:
         return DuplicateDecision.from_dict(payload), LLMResult(
             payload=payload, raw_text=json.dumps(payload, ensure_ascii=False)
         )
+
+    def judge_duplicates(
+        self,
+        existing_nodes: list[ConceptNode],
+        candidate_name: str,
+        candidate_definition: str,
+        parent_path: list[str],
+    ) -> tuple[dict[str, DuplicateDecision], LLMResult]:
+        self.duplicate_batch_calls.append((candidate_name, len(existing_nodes)))
+        decisions: dict[str, DuplicateDecision] = {}
+        items: list[dict[str, Any]] = []
+        for existing in existing_nodes:
+            decision, _ = self.judge_duplicate(
+                existing,
+                candidate_name,
+                candidate_definition,
+                parent_path,
+            )
+            decisions[existing.node_id] = decision
+            items.append(
+                {
+                    "existing_id": existing.node_id,
+                    "relation": decision.relation.value,
+                    "confidence": decision.confidence,
+                    "reason": decision.reason,
+                    "canonical_name": decision.canonical_name,
+                }
+            )
+        payload = {"candidate_name": candidate_name, "decisions": items}
+        return decisions, LLMResult(payload=payload, raw_text=json.dumps(payload, ensure_ascii=False))
 
     def review_node(self, draft: NodeDraft, context: GenerationContext) -> tuple[ReviewResult, LLMResult]:
         self.review_calls.append(draft.name)

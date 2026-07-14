@@ -52,6 +52,24 @@ def test_resume_preserves_raw_output_and_recovers_generating_state(config_factor
     assert not list(resumed.root.rglob("*.tmp"))
 
 
+def test_duplicate_raw_keeps_retries_and_slug_collisions(config_factory) -> None:
+    config = config_factory(web_enabled=False, allow_ungrounded=True)
+    store = WorkStore.open(config)
+    parent_id = store.state.root_id
+
+    store.save_duplicate_raw(parent_id, "C++", "batch", "first C++ decision")
+    store.save_duplicate_raw(parent_id, "C++", "batch", "second C++ decision")
+    store.save_duplicate_raw(parent_id, "C#", "batch", "C# decision")
+
+    paths = sorted((store.node_dir(parent_id) / "dedupe").glob("*.txt"))
+    assert len(paths) == 3
+    assert {path.read_text(encoding="utf-8") for path in paths} == {
+        "first C++ decision",
+        "second C++ decision",
+        "C# decision",
+    }
+
+
 class MalformedOnceLLM(MockLLMProvider):
     def __init__(self) -> None:
         super().__init__()
@@ -133,3 +151,72 @@ def test_keyboard_interrupt_is_not_converted_to_node_failure(config_factory) -> 
     assert saved["nodes"][saved["root_id"]]["status"] == "complete"
     assert sum(node["status"] == "generating" for node in saved["nodes"].values()) == 4
     assert llm.calls == 2
+
+
+class InterruptAfterPersistedChild(MockLLMProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def generate_node(self, context):
+        self.calls += 1
+        if self.calls == 3:
+            raise KeyboardInterrupt
+        return super().generate_node(context)
+
+
+def test_resume_reuses_approved_draft_and_preserves_deterministic_graph(config_factory, tmp_path: Path) -> None:
+    baseline_config = config_factory(
+        depth=2,
+        jobs=1,
+        web_enabled=False,
+        allow_ungrounded=True,
+        output_format="md",
+        review_mode="strict",
+        output_dir=tmp_path / "baseline-site",
+        work_dir=tmp_path / "baseline-work",
+    )
+    baseline = EagerOrchestrator(baseline_config, MockLLMProvider(), None)
+    baseline.run()
+    assert baseline.store is not None
+
+    interrupted_config = replace(
+        baseline_config,
+        output_dir=tmp_path / "resumed-site",
+        work_dir=tmp_path / "resumed-work",
+    )
+    interrupted = EagerOrchestrator(interrupted_config, InterruptAfterPersistedChild(), None)
+    with pytest.raises(KeyboardInterrupt):
+        interrupted.run()
+    assert interrupted.store is not None
+    persisted_child = min(
+        (node for node in interrupted.store.state.nodes.values() if node.depth == 1),
+        key=lambda node: node.sequence,
+    )
+    assert interrupted.store.load_draft(persisted_child.node_id) is not None
+
+    resume_llm = MockLLMProvider()
+    resumed = EagerOrchestrator(replace(interrupted_config, resume=True), resume_llm, None)
+    resumed.run()
+    assert resumed.store is not None
+
+    assert persisted_child.name not in resume_llm.generation_calls
+    assert persisted_child.name not in resume_llm.review_calls
+    assert len(resume_llm.generation_calls) == 19
+    assert len(resume_llm.review_calls) == 19
+
+    def graph(orchestrator: EagerOrchestrator):
+        assert orchestrator.store is not None
+        return [
+            (
+                node.sequence,
+                node.node_id,
+                node.name,
+                node.child_ids,
+                node.parent_ids,
+                node.status.value,
+            )
+            for node in sorted(orchestrator.store.state.nodes.values(), key=lambda item: item.sequence)
+        ]
+
+    assert graph(resumed) == graph(baseline)

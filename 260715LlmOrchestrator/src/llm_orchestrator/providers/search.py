@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from math import ceil
 from typing import Any
 from urllib.parse import urlparse
 
@@ -33,12 +34,22 @@ def _sources_from_rows(rows: list[dict[str, Any]], limit: int) -> list[Source]:
     return sources
 
 
+@dataclass(slots=True)
 class DDGSSearchProvider:
+    timeout: float = 30.0
+
     def preflight(self) -> None:
         return None
 
     def search(self, query: str, limit: int) -> list[Source]:
-        rows = list(DDGS().text(query, region="kr-kr", safesearch="moderate", max_results=limit))
+        rows = list(
+            DDGS(timeout=max(1, ceil(self.timeout))).text(
+                query,
+                region="kr-kr",
+                safesearch="moderate",
+                max_results=limit,
+            )
+        )
         return _sources_from_rows(rows, limit)
 
 
@@ -46,6 +57,17 @@ class DDGSSearchProvider:
 class SearXNGSearchProvider:
     base_url: str
     timeout: float = 30.0
+    client: httpx.Client | None = field(default=None, repr=False)
+    _owns_client: bool = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._owns_client = self.client is None
+        if self.client is None:
+            self.client = httpx.Client(timeout=self.timeout, follow_redirects=True)
+
+    def close(self) -> None:
+        if self._owns_client and self.client is not None:
+            self.client.close()
 
     def preflight(self) -> None:
         if not self.base_url:
@@ -53,11 +75,10 @@ class SearXNGSearchProvider:
 
     def search(self, query: str, limit: int) -> list[Source]:
         endpoint = self.base_url.rstrip("/") + "/search"
-        response = httpx.get(
+        assert self.client is not None
+        response = self.client.get(
             endpoint,
             params={"q": query, "format": "json", "language": "ko-KR", "safesearch": 1},
-            timeout=self.timeout,
-            follow_redirects=True,
         )
         response.raise_for_status()
         rows = response.json().get("results", [])
@@ -68,6 +89,17 @@ class SearXNGSearchProvider:
 class BraveSearchProvider:
     api_key_env: str = "BRAVE_SEARCH_API_KEY"
     timeout: float = 30.0
+    client: httpx.Client | None = field(default=None, repr=False)
+    _owns_client: bool = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._owns_client = self.client is None
+        if self.client is None:
+            self.client = httpx.Client(timeout=self.timeout, follow_redirects=True)
+
+    def close(self) -> None:
+        if self._owns_client and self.client is not None:
+            self.client.close()
 
     def preflight(self) -> None:
         if not os.environ.get(self.api_key_env):
@@ -75,12 +107,11 @@ class BraveSearchProvider:
 
     def search(self, query: str, limit: int) -> list[Source]:
         api_key = os.environ.get(self.api_key_env, "")
-        response = httpx.get(
+        assert self.client is not None
+        response = self.client.get(
             "https://api.search.brave.com/res/v1/web/search",
             params={"q": query, "count": limit, "search_lang": "ko", "country": "KR"},
             headers={"Accept": "application/json", "X-Subscription-Token": api_key},
-            timeout=self.timeout,
-            follow_redirects=True,
         )
         response.raise_for_status()
         rows = response.json().get("web", {}).get("results", [])

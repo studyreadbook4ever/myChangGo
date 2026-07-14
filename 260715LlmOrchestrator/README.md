@@ -234,7 +234,9 @@ generated-site/
 - `--format md`: `markdown/`의 Markdown만 생성하며 `sitemap.txt`는 만들지 않음
 - `--format both`: 두 형식을 모두 생성
 
-Markdown은 YAML front matter, raw HTML 태그, 내부 실행 JSON이 없는 독립 문서입니다. 제목, 요약, 하위개념 상대 링크, 본문, 참고 자료만 포함합니다. LLM이 별도 HTML 문서를 만들거나 HTML에서 Markdown을 역변환하지 않습니다.
+Markdown은 YAML front matter, raw HTML 태그, 내부 실행 JSON이 없는 독립 문서입니다. 제목, 요약, 생성기가 만든 하위개념 상대 링크, 본문, 참고 자료만 포함합니다. LLM이 별도 HTML 문서를 만들거나 HTML에서 Markdown을 역변환하지 않습니다.
+
+LLM이 작성한 본문의 Markdown 링크와 이미지는 외부 추적, 위험한 URL, 깨진 내부 경로를 막기 위해 검증 단계에서 거부합니다. 출처 링크와 하위개념 링크는 검증된 구조화 데이터로 생성기가 별도 추가하며, 모델은 본문에서 링크 없는 `[S1]` 인용 토큰만 사용합니다.
 
 본문의 fenced code 안에 든 HTML 예시는 코드 그대로 보존하지만, 일반 문단의 raw HTML은 여러 줄 태그를 포함해 검증 단계에서 거부합니다. 제목·요약·출처명처럼 생성기가 Markdown에 덧붙이는 외부 문자열도 escape합니다.
 
@@ -281,7 +283,7 @@ LLM이 반환한 제목·요약은 HTML escape하고, 본문 렌더러는 raw HT
 
 1. 유니코드·대소문자·공백을 정규화한 이름이 같으면 기존 노드를 재사용합니다. 단, `+`, `#`, 식별자 내부의 `.`은 보존해 C/C++, F/F#, .NET/NET을 구분합니다.
 2. 이름과 정의가 비슷한 기존 노드를 값싼 문자열·단어 유사도로 최대 5개 추립니다.
-3. 후보 쌍만 LLM에 보내 `same`, `broader`, `narrower`, `related`, `distinct`, `uncertain` 중 하나로 판정합니다.
+3. 최대 5개 후보를 한 번의 batch LLM 요청으로 보내 각각 `same`, `broader`, `narrower`, `related`, `distinct`, `uncertain` 중 하나로 판정합니다.
 4. 오직 `same`이면서 `--duplicate-threshold` 이상일 때만 병합합니다.
 5. 다른 표기는 canonical 노드의 alias로 기록하고, 새 부모도 같은 문서를 가리킵니다.
 
@@ -433,6 +435,7 @@ MINZKN의 문구, CSS, SVG, HTML/JavaScript, 코드를 복제하지 않습니다
 
 - 웹 검색 결과는 신뢰할 수 없는 입력입니다. 프롬프트는 페이지 안의 지시를 따르지 말라고 명시하지만, prompt injection 방어가 완전하다고 가정하지 마십시오.
 - 웹 페이지 fetch는 DNS 결과가 전역 공개 IP인 HTTP(S) 주소만 허용하고 redirect마다 다시 확인해 기본적인 SSRF 위험을 줄입니다.
+- 웹 검색이 기본 활성화되어 루트 개념, 현재 경로와 개념명으로 만든 질의가 선택한 DDGS·Brave·SearXNG 검색 공급자에 노드마다 전송됩니다. 민감한 주제를 외부 검색에 보내지 않으려면 `--no-web --allow-ungrounded`를 함께 사용하십시오.
 - LLM API에는 최초 개념, 현재 경로, 웹 근거 일부가 전송됩니다. 민감한 주제를 원격 API에 보내기 전 공급자의 보존·학습 정책을 확인하십시오.
 - API 키는 명령행 값이 아니라 환경 변수로 전달하십시오. 셸 기록, 로그, 저장소에 비밀값을 넣지 마십시오.
 - raw 작업 폴더에는 프롬프트, 응답, 출처 본문 일부가 남습니다. 접근 권한과 백업·삭제 정책을 직접 관리하십시오.

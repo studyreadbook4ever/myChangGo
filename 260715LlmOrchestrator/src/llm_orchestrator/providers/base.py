@@ -17,6 +17,14 @@ class LLMProvider(Protocol):
         parent_path: list[str],
     ) -> tuple[DuplicateDecision, LLMResult]: ...
 
+    def judge_duplicates(
+        self,
+        existing_nodes: list[ConceptNode],
+        candidate_name: str,
+        candidate_definition: str,
+        parent_path: list[str],
+    ) -> tuple[dict[str, DuplicateDecision], LLMResult]: ...
+
     def review_node(self, draft: NodeDraft, context: GenerationContext) -> tuple[ReviewResult, LLMResult]: ...
 
 
