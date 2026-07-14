@@ -6,6 +6,7 @@ from urllib.parse import unquote, urlparse
 import pytest
 from conftest import OfflineFetcher
 
+import llm_orchestrator.render as render_module
 from llm_orchestrator.models import NodeStatus, Source
 from llm_orchestrator.orchestrator import BuildFailure, EagerOrchestrator
 from llm_orchestrator.providers import MockLLMProvider, MockSearchProvider
@@ -167,6 +168,34 @@ def test_staging_validation_failure_preserves_the_published_site(config_factory,
         renderer.render_and_publish(orchestrator.store.state)
 
     assert sentinel.read_text(encoding="utf-8") == "keep me"
+    assert not list(output.parent.glob(f".{output.name}.staging-*"))
+
+
+def test_interrupt_after_backup_rename_restores_the_published_site(config_factory, monkeypatch) -> None:
+    config = config_factory(
+        depth=0,
+        output_format="both",
+        web_enabled=False,
+        allow_ungrounded=True,
+        overwrite=True,
+    )
+    output, orchestrator, *_ = _run(config)
+    sentinel = output / "published-before-interrupt.txt"
+    sentinel.write_text("keep me", encoding="utf-8")
+    real_replace = render_module.os.replace
+
+    def interrupt_after_backup(source, destination) -> None:
+        real_replace(source, destination)
+        if Path(source).resolve() == output.resolve() and Path(destination).name.startswith(f".{output.name}.backup-"):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(render_module.os, "replace", interrupt_after_backup)
+
+    with pytest.raises(KeyboardInterrupt):
+        SiteRenderer(config).render_and_publish(orchestrator.store.state)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep me"
+    assert not list(output.parent.glob(f".{output.name}.backup-*"))
     assert not list(output.parent.glob(f".{output.name}.staging-*"))
 
 

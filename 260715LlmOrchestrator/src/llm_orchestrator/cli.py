@@ -148,14 +148,7 @@ def _make_llm(config: BuildConfig):
 def _make_search(config: BuildConfig):
     if not config.web_enabled:
         return None
-    provider = config.search_provider
-    if provider == "auto":
-        if os.environ.get(config.brave_api_key_env):
-            provider = "brave"
-        elif config.searxng_url:
-            provider = "searxng"
-        else:
-            provider = "ddgs"
+    provider = config.effective_search_provider
     if provider == "mock":
         return MockSearchProvider()
     if provider == "brave":
@@ -173,6 +166,7 @@ def _print_dry_run(config: BuildConfig) -> None:
     print(f"이론상 최대 노드: {config.theoretical_nodes:,}")
     print(f"예상 기본 LLM 호출: 최대 {config.theoretical_nodes * review_multiplier:,}회 + 의미 중복 판정")
     print(f"웹 검색: {'기본 활성화' if config.web_enabled else '비활성화'}")
+    print(f"실제 검색 공급자: {config.effective_search_provider}")
     print(f"출력 형식: {config.output_format}")
     print(f"최종 출력: {config.output_dir.resolve()}")
     print(f"작업 폴더: {config.work_dir.resolve()}")

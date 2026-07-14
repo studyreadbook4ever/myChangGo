@@ -141,18 +141,17 @@ class SiteRenderer:
                 if not self.config.overwrite:
                     raise FileExistsError(f"출력 경로가 이미 있습니다: {output}. 교체하려면 --overwrite를 사용하세요.")
                 os.replace(output, backup)
-            try:
-                os.replace(staging, output)
-            except BaseException:
-                if backup.exists() and not output.exists():
-                    os.replace(backup, output)
-                raise
+            os.replace(staging, output)
             if backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
             return output
         except BaseException:
-            if staging.exists():
-                shutil.rmtree(staging, ignore_errors=True)
+            try:
+                if backup.exists() and not output.exists():
+                    os.replace(backup, output)
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
             raise
 
     def _render_tree(self, state: RunState, staging: Path) -> None:

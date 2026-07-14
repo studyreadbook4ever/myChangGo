@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -46,6 +47,20 @@ class BuildConfig:
     resume: bool = False
     keep_raw: bool = True
     verbose: bool = False
+    effective_search_provider: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        provider = self.search_provider
+        if not self.web_enabled:
+            provider = "disabled"
+        elif provider == "auto":
+            if os.environ.get(self.brave_api_key_env):
+                provider = "brave"
+            elif self.searxng_url:
+                provider = "searxng"
+            else:
+                provider = "ddgs"
+        object.__setattr__(self, "effective_search_provider", provider)
 
     @property
     def theoretical_nodes(self) -> int:
@@ -93,20 +108,45 @@ class BuildConfig:
             errors.append("openai-compatible 공급자에는 --model이 필요합니다.")
         if check_providers and self.llm_provider == "openai-compatible" and not self.base_url:
             errors.append("openai-compatible 공급자에는 --base-url이 필요합니다.")
-        elif self.llm_provider == "openai-compatible" and self.base_url:
+        if self.base_url:
             parsed_base = urlparse(self.base_url)
-            if parsed_base.scheme not in {"http", "https"} or not parsed_base.netloc:
-                errors.append("--base-url은 http:// 또는 https://로 시작하는 절대 URL이어야 합니다.")
+            if (
+                parsed_base.scheme not in {"http", "https"}
+                or not parsed_base.netloc
+                or parsed_base.username is not None
+                or parsed_base.password is not None
+            ):
+                errors.append("--base-url은 자격증명 없는 http:// 또는 https:// 절대 URL이어야 합니다.")
+            elif parsed_base.query or parsed_base.fragment:
+                errors.append("--base-url에는 query string이나 fragment를 넣을 수 없습니다.")
+            else:
+                try:
+                    _ = parsed_base.port
+                except ValueError:
+                    errors.append("--base-url의 포트 번호가 올바르지 않습니다.")
         if self.search_provider not in {"auto", "ddgs", "searxng", "brave", "mock"}:
             errors.append("지원하지 않는 검색 공급자입니다.")
         if not self.web_enabled and not self.allow_ungrounded:
             errors.append("웹 검색을 끄려면 --allow-ungrounded도 명시해야 합니다.")
-        if self.web_enabled and self.search_provider == "searxng" and not self.searxng_url:
+        effective_search_provider = self.effective_search_provider
+        if self.web_enabled and effective_search_provider == "searxng" and not self.searxng_url:
             errors.append("SearXNG 검색에는 --searxng-url이 필요합니다.")
-        elif self.web_enabled and self.search_provider == "searxng":
+        if self.searxng_url:
             parsed_searxng = urlparse(self.searxng_url)
-            if parsed_searxng.scheme not in {"http", "https"} or not parsed_searxng.netloc:
-                errors.append("--searxng-url은 http:// 또는 https://로 시작하는 절대 URL이어야 합니다.")
+            if (
+                parsed_searxng.scheme not in {"http", "https"}
+                or not parsed_searxng.netloc
+                or parsed_searxng.username is not None
+                or parsed_searxng.password is not None
+            ):
+                errors.append("--searxng-url은 자격증명 없는 http:// 또는 https:// 절대 URL이어야 합니다.")
+            elif parsed_searxng.query or parsed_searxng.fragment:
+                errors.append("--searxng-url에는 query string이나 fragment를 넣을 수 없습니다.")
+            else:
+                try:
+                    _ = parsed_searxng.port
+                except ValueError:
+                    errors.append("--searxng-url의 포트 번호가 올바르지 않습니다.")
         if self.review_mode not in {"strict", "basic", "off"}:
             errors.append("--review-mode은 strict, basic, off 중 하나여야 합니다.")
         if not 0.5 <= self.duplicate_threshold <= 1.0:
@@ -124,7 +164,12 @@ class BuildConfig:
             )
         if self.site_url:
             parsed = urlparse(self.site_url)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
                 errors.append("--site-url은 http:// 또는 https://로 시작하는 절대 URL이어야 합니다.")
             elif parsed.query or parsed.fragment:
                 errors.append("--site-url에는 query string이나 fragment를 넣을 수 없습니다.")
@@ -149,6 +194,12 @@ class BuildConfig:
         value["output_dir"] = str(self.output_dir.resolve())
         value["work_dir"] = str(self.work_dir.resolve())
         value["css_file"] = str(self.css_file.resolve()) if self.css_file else ""
+        for key in ("base_url", "searxng_url", "site_url"):
+            parsed = urlparse(str(value[key]))
+            if parsed.username is not None or parsed.password is not None:
+                value[key] = "<credentials-redacted>"
+            elif parsed.query or parsed.fragment:
+                value[key] = "<query-fragment-redacted>"
         value["prompt_version"] = PROMPT_VERSION
         return value
 
