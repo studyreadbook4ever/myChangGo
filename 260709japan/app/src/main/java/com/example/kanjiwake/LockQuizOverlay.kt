@@ -30,6 +30,7 @@ class LockQuizOverlay(context: Context) {
     private var lastWordId: Long? = null
     private var solved = false
     private var countdownTimer: CountDownTimer? = null
+    private var choiceRevealTimer: CountDownTimer? = null
 
     private lateinit var topActionButton: Button
     private lateinit var termText: TextView
@@ -58,6 +59,8 @@ class LockQuizOverlay(context: Context) {
     fun dismiss() {
         countdownTimer?.cancel()
         countdownTimer = null
+        choiceRevealTimer?.cancel()
+        choiceRevealTimer = null
         val view = rootView ?: return
         rootView = null
         choiceButtons.clear()
@@ -267,6 +270,45 @@ class LockQuizOverlay(context: Context) {
 
         choicesContainer.removeAllViews()
         choiceButtons.clear()
+        startChoiceCountdown(question)
+    }
+
+    private fun startChoiceCountdown(question: QuizQuestion) {
+        val countdownText = TextView(appContext).apply {
+            text = CHOICE_COUNTDOWN_SECONDS.toString()
+            contentDescription = "선택지 공개까지 ${CHOICE_COUNTDOWN_SECONDS}초"
+            gravity = Gravity.CENTER
+            kwText(sizeSp = 42f, color = KwColor.Plum, bold = true)
+        }
+        choicesContainer.addView(
+            countdownText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                appContext.dp(CHOICE_AREA_HEIGHT_DP)
+            )
+        )
+
+        choiceRevealTimer?.cancel()
+        choiceRevealTimer = object : CountDownTimer(CHOICE_REVEAL_DELAY_MS, 1_000L) {
+            override fun onTick(millisUntilFinished: Long) {
+                val seconds = ((millisUntilFinished + 999L) / 1_000L)
+                    .toInt()
+                    .coerceIn(1, CHOICE_COUNTDOWN_SECONDS)
+                countdownText.text = seconds.toString()
+                countdownText.contentDescription = "선택지 공개까지 ${seconds}초"
+            }
+
+            override fun onFinish() {
+                choiceRevealTimer = null
+                if (solved || currentQuestion?.answer?.id != question.answer.id || rootView == null) return
+                showChoices(question)
+            }
+        }.start()
+    }
+
+    private fun showChoices(question: QuizQuestion) {
+        choicesContainer.removeAllViews()
+        choiceButtons.clear()
         question.choices.forEach { choice ->
             val button = Button(appContext).apply {
                 text = choice
@@ -370,5 +412,11 @@ class LockQuizOverlay(context: Context) {
         val clipboard = appContext.getSystemService(ClipboardManager::class.java)
         clipboard.setPrimaryClip(ClipData.newPlainText("Kanji Wake word", term))
         Toast.makeText(appContext, "한자를 복사했습니다.", Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        private const val CHOICE_COUNTDOWN_SECONDS = 3
+        private const val CHOICE_REVEAL_DELAY_MS = 3_000L
+        private const val CHOICE_AREA_HEIGHT_DP = 256
     }
 }

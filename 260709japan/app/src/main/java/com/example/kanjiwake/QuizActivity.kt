@@ -28,6 +28,7 @@ class QuizActivity : Activity() {
     private var mode: String = MODE_ENDLESS
     private var solved = false
     private var countdownTimer: CountDownTimer? = null
+    private var choiceRevealTimer: CountDownTimer? = null
 
     private lateinit var modeText: TextView
     private lateinit var topActionButton: Button
@@ -54,6 +55,7 @@ class QuizActivity : Activity() {
 
     override fun onDestroy() {
         countdownTimer?.cancel()
+        choiceRevealTimer?.cancel()
         super.onDestroy()
     }
 
@@ -277,6 +279,45 @@ class QuizActivity : Activity() {
 
         choicesContainer.removeAllViews()
         choiceButtons.clear()
+        startChoiceCountdown(question)
+    }
+
+    private fun startChoiceCountdown(question: QuizQuestion) {
+        val countdownText = TextView(this).apply {
+            text = CHOICE_COUNTDOWN_SECONDS.toString()
+            contentDescription = "선택지 공개까지 ${CHOICE_COUNTDOWN_SECONDS}초"
+            gravity = Gravity.CENTER
+            kwText(sizeSp = 42f, color = KwColor.Plum, bold = true)
+        }
+        choicesContainer.addView(
+            countdownText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(CHOICE_AREA_HEIGHT_DP)
+            )
+        )
+
+        choiceRevealTimer?.cancel()
+        choiceRevealTimer = object : CountDownTimer(CHOICE_REVEAL_DELAY_MS, 1_000L) {
+            override fun onTick(millisUntilFinished: Long) {
+                val seconds = ((millisUntilFinished + 999L) / 1_000L)
+                    .toInt()
+                    .coerceIn(1, CHOICE_COUNTDOWN_SECONDS)
+                countdownText.text = seconds.toString()
+                countdownText.contentDescription = "선택지 공개까지 ${seconds}초"
+            }
+
+            override fun onFinish() {
+                choiceRevealTimer = null
+                if (solved || currentQuestion?.answer?.id != question.answer.id) return
+                showChoices(question)
+            }
+        }.start()
+    }
+
+    private fun showChoices(question: QuizQuestion) {
+        choicesContainer.removeAllViews()
+        choiceButtons.clear()
         question.choices.forEach { choice ->
             val button = Button(this).apply {
                 text = choice
@@ -394,6 +435,9 @@ class QuizActivity : Activity() {
 
     companion object {
         private const val EXTRA_MODE = "mode"
+        private const val CHOICE_COUNTDOWN_SECONDS = 3
+        private const val CHOICE_REVEAL_DELAY_MS = 3_000L
+        private const val CHOICE_AREA_HEIGHT_DP = 256
         const val MODE_ENDLESS = "endless"
         const val MODE_LOCK = "lock"
 
