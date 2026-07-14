@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-concept-orchestrator"
+version = "0.1.0"
+description = "저가형 LLM으로 한국어 개념 트리 웹사이트를 Eager 생성하는 Linux CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "ddgs>=9.14,<10",
+  "httpx>=0.28,<1",
+  "markdown-it-py>=3.0,<5",
+  "mdit-py-plugins>=0.4,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.8,<1",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[project.scripts]
+llm-orchestrator = "llm_orchestrator.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_orchestrator"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
