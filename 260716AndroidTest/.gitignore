@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.coverage
+.gradle/
+**/build/
+local.properties
+*.hprof
+.idea/
+*.iml
+.cxx/
+captures/

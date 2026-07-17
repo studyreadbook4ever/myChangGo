@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="scope_input" type="id" />
+    <item name="termination_input" type="id" />
+    <item name="exit_code_input" type="id" />
+    <item name="tests_input" type="id" />
+    <item name="failures_input" type="id" />
+    <item name="errors_input" type="id" />
+    <item name="trusted_input" type="id" />
+    <item name="pass_preset" type="id" />
+    <item name="fail_preset" type="id" />
+    <item name="error_preset" type="id" />
+    <item name="decide_button" type="id" />
+    <item name="result_text" type="id" />
+    <item name="copy_button" type="id" />
+</resources>
