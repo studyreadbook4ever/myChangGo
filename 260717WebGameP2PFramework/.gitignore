@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-types/
+.wrangler/
+.dev.vars
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+.idea/
+.vscode/

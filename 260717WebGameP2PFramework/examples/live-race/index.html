@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#111827" />
+    <meta name="color-scheme" content="dark" />
+    <title>RelayPlay live race</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">RelayPlay example</p>
+          <h1>Signal Sprint</h1>
+        </div>
+        <div class="connection-pill" data-state="idle" id="connection-status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="connection-label">Not connected</span>
+        </div>
+      </header>
+
+      <section class="panel join-panel" id="join-panel">
+        <div>
+          <h2>Join a two-player room</h2>
+          <p>
+            Open this page in two tabs with the same room and different player IDs.
+            Development credentials are deliberately simple.
+          </p>
+        </div>
+        <form id="join-form">
+          <label>
+            Room
+            <input id="room-id" name="room" value="demo-room" maxlength="48" required />
+          </label>
+          <label>
+            Player
+            <input id="player-id" name="player" maxlength="48" required />
+          </label>
+          <label class="wide">
+            WebSocket endpoint
+            <input id="server-url" name="server" type="url" required />
+          </label>
+          <button class="primary" type="submit">Connect</button>
+        </form>
+      </section>
+
+      <section class="race-grid" aria-labelledby="race-title">
+        <h2 id="race-title" class="sr-only">Race progress</h2>
+        <article class="panel racer local-racer">
+          <div class="racer-heading">
+            <div>
+              <p class="eyebrow">You</p>
+              <h3 id="local-name">Local player</h3>
+            </div>
+            <strong id="local-score">0</strong>
+          </div>
+          <div class="track" aria-label="Your progress">
+            <div class="track-fill local-fill" id="local-progress"></div>
+            <span class="runner" id="local-runner" aria-hidden="true">◆</span>
+          </div>
+          <div class="metrics">
+            <span><b id="local-percent">0%</b> distance</span>
+            <span><b id="local-combo">0</b> combo</span>
+          </div>
+        </article>
+
+        <article class="panel racer remote-racer">
+          <div class="racer-heading">
+            <div>
+              <p class="eyebrow">Opponent</p>
+              <h3 id="remote-name">Waiting…</h3>
+            </div>
+            <strong id="remote-score">0</strong>
+          </div>
+          <div class="track" aria-label="Opponent progress">
+            <div class="track-fill remote-fill" id="remote-progress"></div>
+            <span class="runner remote" id="remote-runner" aria-hidden="true">●</span>
+          </div>
+          <div class="metrics">
+            <span><b id="remote-percent">0%</b> distance</span>
+            <span><b id="remote-freshness">—</b> update age</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel play-panel">
+        <div class="countdown" id="countdown" aria-live="assertive">Join a room</div>
+        <button class="ready-button" id="ready-button" disabled>Ready</button>
+        <button class="tap-button" id="tap-button" disabled>
+          <span>SPRINT</span>
+          <small>Tap or press Space</small>
+        </button>
+        <button class="freeze-button" id="freeze-button" disabled>
+          <span>Send freeze</span>
+          <small id="freeze-detail">Needs a connected opponent</small>
+        </button>
+        <p class="hint" id="game-hint">
+          Progress is reported once per second. Your local button never waits for the network.
+        </p>
+      </section>
+
+      <section class="panel diagnostics">
+        <div class="diagnostic-heading">
+          <div>
+            <p class="eyebrow">Network behavior</p>
+            <h2>Resume and timing</h2>
+          </div>
+          <button class="secondary" id="disconnect-button" disabled>Simulate disconnect</button>
+        </div>
+        <dl>
+          <div><dt>Clock offset</dt><dd id="clock-offset">—</dd></div>
+          <div><dt>Uncertainty</dt><dd id="clock-uncertainty">—</dd></div>
+          <div><dt>Room epoch</dt><dd id="room-epoch">—</dd></div>
+          <div><dt>Event sequence</dt><dd id="event-sequence">0</dd></div>
+        </dl>
+        <ol class="event-log" id="event-log" aria-live="polite"></ol>
+      </section>
+    </main>
+
+    <div class="freeze-overlay" id="freeze-overlay" hidden>
+      <strong>Frozen</strong>
+      <span id="freeze-countdown">0.0s</span>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

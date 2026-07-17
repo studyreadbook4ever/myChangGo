@@ -1,0 +1,56 @@
+{
+  "name": "relayplay-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-friendly TypeScript framework for server-relayed live races and low-frequency multiplayer interactions.",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "tsc -b && npm run build --workspace @relayplay/example-live-race",
+    "clean": "tsc -b --clean",
+    "typecheck": "tsc -b --pretty false && tsc -p tooling/tsconfig.json --pretty false && tsc -p test/tsconfig.json --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test",
+    "verify": "npm run check && npm run build && npm run test:cloudflare",
+    "configure": "tsx tooling/configure.ts",
+    "validate:config": "tsx tooling/validate-config.ts",
+    "smoke:cloudflare": "tsx tooling/smoke-cloudflare.ts",
+    "dev:worker": "npm run dev:worker --workspace @relayplay/example-live-race",
+    "test:cloudflare": "start-server-and-test dev:worker http://127.0.0.1:8787/health smoke:cloudflare",
+    "dev:example": "concurrently --kill-others --names worker,web --prefix-colors magenta,cyan \"npm run dev:worker --workspace @relayplay/example-live-race\" \"npm run dev --workspace @relayplay/example-live-race\""
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "keywords": [
+    "typescript",
+    "multiplayer",
+    "live-race",
+    "web-game",
+    "serverless",
+    "cloudflare",
+    "ai-friendly"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260717.1",
+    "@types/node": "^22.20.1",
+    "ajv": "^8.20.0",
+    "concurrently": "^10.0.3",
+    "start-server-and-test": "^3.0.11",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.111.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260710.1": true,
+    "sharp@0.34.5": true
+  }
+}

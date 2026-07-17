@@ -1,0 +1,503 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://relayplay.dev/schema/relayplay.config.schema.json",
+  "title": "RelayPlay configuration input",
+  "description": "A strict, partially overridable RelayPlay configuration. Omitted properties use the framework defaults. Secrets and provider bindings are intentionally excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "protocolVersion": {
+      "const": 1,
+      "default": 1,
+      "description": "Wire protocol major version."
+    },
+    "room": {
+      "$ref": "#/$defs/room"
+    },
+    "features": {
+      "$ref": "#/$defs/features"
+    },
+    "progress": {
+      "$ref": "#/$defs/progress"
+    },
+    "time": {
+      "$ref": "#/$defs/time"
+    },
+    "platform": {
+      "$ref": "#/$defs/platform"
+    },
+    "security": {
+      "$ref": "#/$defs/security"
+    }
+  },
+  "$defs": {
+    "room": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxPlayers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 8
+        },
+        "disconnectGraceMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 300000,
+          "default": 15000
+        },
+        "eventLogCapacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "default": 4096
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "progress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "interactions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "targeted": {
+              "type": "boolean",
+              "default": true
+            },
+            "scheduled": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "targeted": {
+                    "const": false
+                  },
+                  "scheduled": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "targeted",
+                  "scheduled"
+                ]
+              }
+            }
+          ]
+        },
+        "reconnect": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "replayCanonicalEvents": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "replayCanonicalEvents": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "replayCanonicalEvents"
+                ]
+              }
+            }
+          ]
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "replayChunks": {
+              "type": "boolean",
+              "default": false
+            },
+            "stateHashes": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "interactionClaims": {
+              "type": "boolean",
+              "default": false
+            },
+            "finalResults": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "intervalMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 60000,
+          "default": 1000,
+          "description": "Client progress snapshot interval in milliseconds."
+        },
+        "broadcast": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clockMode": {
+          "enum": [
+            "monotonic",
+            "fixed-tick",
+            "audio"
+          ],
+          "default": "monotonic"
+        },
+        "sync": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "sampleCount": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "default": 5
+            },
+            "resyncIntervalMs": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 3600000,
+              "default": 30000
+            },
+            "maxRttMs": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 60000,
+              "default": 2000
+            }
+          }
+        },
+        "startLeadMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000,
+          "default": 3000
+        },
+        "interactionLeadMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000,
+          "default": 150
+        },
+        "lateEventPolicy": {
+          "enum": [
+            "apply-immediately",
+            "drop",
+            "next-boundary"
+          ],
+          "default": "next-boundary"
+        },
+        "tickRateHz": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 60
+        },
+        "audioLookAheadMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2000,
+          "default": 100
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "enum": [
+            "universal",
+            "mobile-first",
+            "desktop-first"
+          ],
+          "default": "universal"
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "touch": {
+              "type": "boolean",
+              "default": true
+            },
+            "keyboard": {
+              "type": "boolean",
+              "default": true
+            },
+            "pointer": {
+              "type": "boolean",
+              "default": true
+            },
+            "gamepad": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "not": {
+            "properties": {
+              "touch": {
+                "const": false
+              },
+              "keyboard": {
+                "const": false
+              },
+              "pointer": {
+                "const": false
+              },
+              "gamepad": {
+                "const": false
+              }
+            },
+            "required": [
+              "touch",
+              "keyboard",
+              "pointer",
+              "gamepad"
+            ]
+          }
+        },
+        "crossPlay": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "rankedPool": {
+              "enum": [
+                "unified",
+                "same-input-preferred",
+                "separate"
+              ],
+              "default": "same-input-preferred"
+            },
+            "allowInputSwitch": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "presentation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "adaptiveQuality": {
+              "type": "boolean",
+              "default": true
+            },
+            "maxDevicePixelRatio": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 4,
+              "default": 2
+            },
+            "preferReducedMotion": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "rateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "capacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "refillPerSecond": {
+          "type": "number",
+          "minimum": 0.001,
+          "maximum": 10000
+        }
+      }
+    },
+    "completeRateLimit": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/rateLimit"
+        }
+      ],
+      "required": [
+        "capacity",
+        "refillPerSecond"
+      ]
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "peerToPeer": {
+          "const": false,
+          "default": false,
+          "description": "Invariant: RelayPlay never opens client-to-client sockets."
+        },
+        "strictMessageValidation": {
+          "const": true,
+          "default": true
+        },
+        "maxMessageBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 4194304,
+          "default": 65536
+        },
+        "maxPayloadBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 8192,
+          "description": "Must also be less than or equal to maxMessageBytes; runtime validation enforces the cross-field invariant."
+        },
+        "opaqueIdentifiers": {
+          "const": true,
+          "default": true
+        },
+        "requireIdempotencyKeys": {
+          "const": true,
+          "default": true
+        },
+        "requireResumeEpoch": {
+          "const": true,
+          "default": true
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requiredInProduction": {
+              "const": true,
+              "default": true
+            }
+          }
+        },
+        "rateLimits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/rateLimit",
+              "default": {
+                "capacity": 20,
+                "refillPerSecond": 10
+              }
+            },
+            "actions": {
+              "type": "object",
+              "default": {
+                "interaction": {
+                  "capacity": 8,
+                  "refillPerSecond": 4
+                },
+                "progress": {
+                  "capacity": 4,
+                  "refillPerSecond": 2
+                },
+                "replay_chunk": {
+                  "capacity": 16,
+                  "refillPerSecond": 8
+                }
+              },
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_.:-]{0,63}$"
+              },
+              "properties": {
+                "interaction": {
+                  "$ref": "#/$defs/rateLimit"
+                },
+                "progress": {
+                  "$ref": "#/$defs/rateLimit"
+                },
+                "replay_chunk": {
+                  "$ref": "#/$defs/rateLimit"
+                }
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/completeRateLimit"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
