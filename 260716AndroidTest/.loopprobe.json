@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "limits": {
+    "timeout_seconds": 150,
+    "kill_grace_seconds": 2,
+    "max_output_bytes": 1048576,
+    "output_tail_bytes": 32768,
+    "min_free_memory_mb": 1024,
+    "min_free_disk_mb": 2048
+  },
+  "probes": [
+    {
+      "name": "android-decision-fast",
+      "kind": "gradle-test",
+      "scope": "Pocket Loop 판정 코어는 불완전하거나 모순된 증거를 PASS로 만들지 않는다",
+      "argv": [
+        "./gradlew",
+        "--no-daemon",
+        "--console=plain",
+        "--max-workers=1",
+        "--no-parallel",
+        ":app:testDebugUnitTest",
+        "--tests=dev.loopprobe.pocketloop.LoopDecisionEngineTest"
+      ],
+      "cwd": ".",
+      "changes": [
+        "app/src/main/java/dev/loopprobe/pocketloop/LoopDecisionEngine.java",
+        "app/src/test/java/dev/loopprobe/pocketloop/LoopDecisionEngineTest.java",
+        "app/build.gradle",
+        "build.gradle",
+        "settings.gradle",
+        "gradle.properties",
+        "gradle/wrapper/**",
+        ".loopprobe.json"
+      ],
+      "fallback": true,
+      "cost": 1,
+      "timeout_seconds": 120,
+      "success_codes": [0],
+      "gradle_task": ":app:testDebugUnitTest",
+      "junit_xml": [
+        "app/build/test-results/testDebugUnitTest/TEST-dev.loopprobe.pocketloop.LoopDecisionEngineTest.xml"
+      ],
+      "min_tests": 6,
+      "evidence_mode": "gradle-cache-ok",
+      "expected_test_class": "dev.loopprobe.pocketloop.LoopDecisionEngineTest"
+    },
+    {
+      "name": "android-decision-fresh",
+      "kind": "gradle-test",
+      "scope": "Pocket Loop 판정 코어는 불완전하거나 모순된 증거를 PASS로 만들지 않는다",
+      "argv": [
+        "./gradlew",
+        "--no-daemon",
+        "--console=plain",
+        "--max-workers=1",
+        "--no-parallel",
+        ":app:testDebugUnitTest",
+        "--rerun",
+        "--tests=dev.loopprobe.pocketloop.LoopDecisionEngineTest"
+      ],
+      "cwd": ".",
+      "changes": [
+        "app/src/main/java/dev/loopprobe/pocketloop/LoopDecisionEngine.java",
+        "app/src/test/java/dev/loopprobe/pocketloop/LoopDecisionEngineTest.java"
+      ],
+      "fallback": false,
+      "cost": 100,
+      "timeout_seconds": 150,
+      "success_codes": [0],
+      "gradle_task": ":app:testDebugUnitTest",
+      "junit_xml": [
+        "app/build/test-results/testDebugUnitTest/TEST-dev.loopprobe.pocketloop.LoopDecisionEngineTest.xml"
+      ],
+      "min_tests": 6,
+      "evidence_mode": "fresh",
+      "expected_test_class": "dev.loopprobe.pocketloop.LoopDecisionEngineTest"
+    },
+    {
+      "name": "machine-selftest",
+      "kind": "command",
+      "scope": "LoopProbe's own state machine and safety invariants",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-q"
+      ],
+      "cwd": ".",
+      "changes": [
+        "loopprobe.py",
+        "tests/**",
+        ".loopprobe.json"
+      ],
+      "fallback": false,
+      "cost": 10,
+      "timeout_seconds": 30,
+      "success_codes": [0]
+    }
+  ]
+}

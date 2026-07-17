@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "limits": {
+    "timeout_seconds": 180,
+    "kill_grace_seconds": 2,
+    "max_output_bytes": 1048576,
+    "output_tail_bytes": 32768,
+    "min_free_memory_mb": 1024,
+    "min_free_disk_mb": 2048
+  },
+  "probes": [
+    {
+      "name": "domain-rule-fast",
+      "kind": "gradle-test",
+      "scope": "빈 사용자 이름을 UsernamePolicy가 거부한다",
+      "argv": [
+        "./gradlew",
+        "--no-daemon",
+        "-Pkotlin.compiler.execution.strategy=in-process",
+        "--console=plain",
+        "--max-workers=1",
+        "--no-parallel",
+        ":app:testDebugUnitTest",
+        "--tests=com.example.loop.UsernamePolicyLoopProofTest.rejectsBlankName"
+      ],
+      "cwd": ".",
+      "changes": [
+        "app/src/main/**/UsernamePolicy.kt",
+        "app/src/main/**/UsernamePolicy.java",
+        "app/src/test/**/UsernamePolicyLoopProofTest.kt",
+        "app/src/test/**/UsernamePolicyLoopProofTest.java",
+        "app/build.gradle",
+        "app/build.gradle.kts",
+        "gradle/libs.versions.toml",
+        ".loopprobe.json"
+      ],
+      "fallback": true,
+      "cost": 1,
+      "timeout_seconds": 120,
+      "success_codes": [0],
+      "gradle_task": ":app:testDebugUnitTest",
+      "junit_xml": [
+        "app/build/test-results/testDebugUnitTest/TEST-com.example.loop.UsernamePolicyLoopProofTest.xml"
+      ],
+      "min_tests": 1,
+      "evidence_mode": "gradle-cache-ok",
+      "expected_test_class": "com.example.loop.UsernamePolicyLoopProofTest",
+      "expected_test_name": "rejectsBlankName"
+    },
+    {
+      "name": "domain-rule-fresh",
+      "kind": "gradle-test",
+      "scope": "빈 사용자 이름을 UsernamePolicy가 거부한다",
+      "argv": [
+        "./gradlew",
+        "--no-daemon",
+        "-Pkotlin.compiler.execution.strategy=in-process",
+        "--console=plain",
+        "--max-workers=1",
+        "--no-parallel",
+        ":app:testDebugUnitTest",
+        "--rerun",
+        "--tests=com.example.loop.UsernamePolicyLoopProofTest.rejectsBlankName"
+      ],
+      "cwd": ".",
+      "changes": [
+        "app/src/main/**/UsernamePolicy.kt",
+        "app/src/main/**/UsernamePolicy.java",
+        "app/src/test/**/UsernamePolicyLoopProofTest.kt",
+        "app/src/test/**/UsernamePolicyLoopProofTest.java"
+      ],
+      "fallback": false,
+      "cost": 100,
+      "timeout_seconds": 150,
+      "success_codes": [0],
+      "gradle_task": ":app:testDebugUnitTest",
+      "junit_xml": [
+        "app/build/test-results/testDebugUnitTest/TEST-com.example.loop.UsernamePolicyLoopProofTest.xml"
+      ],
+      "min_tests": 1,
+      "evidence_mode": "fresh",
+      "expected_test_class": "com.example.loop.UsernamePolicyLoopProofTest",
+      "expected_test_name": "rejectsBlankName"
+    }
+  ]
+}

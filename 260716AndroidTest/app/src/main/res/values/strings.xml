@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pocket Loop</string>
+    <string name="title">Pocket Loop</string>
+    <string name="subtitle">한 번의 변경 · 한 개의 증거 · 한 개의 다음 행동</string>
+    <string name="scope_label">이번 변경이 보장해야 할 한 문장</string>
+    <string name="scope_hint">예: 빈 사용자 이름을 거부한다</string>
+    <string name="preset_scope">빈 사용자 이름을 거부한다</string>
+    <string name="observation_label">관찰값</string>
+    <string name="termination_label">프로세스 종료</string>
+    <string name="exit_code_label">종료 코드</string>
+    <string name="tests_label">실행된 테스트 수</string>
+    <string name="failures_label">Assertion failure 수</string>
+    <string name="errors_label">Fixture/runner error 수</string>
+    <string name="trusted_evidence">현재 실행 또는 Gradle이 검증한 증거</string>
+    <string name="pass_preset">PASS 예시</string>
+    <string name="fail_preset">FAIL 예시</string>
+    <string name="error_preset">ERROR 예시</string>
+    <string name="decide">판정하기</string>
+    <string name="copy_prompt">Codex 지시문 복사</string>
+    <string name="copied">Codex 지시문을 복사했습니다</string>
+    <string name="result_waiting">관찰값을 넣고 판정하세요.</string>
+    <string name="invalid_input">ERROR · INVALID_INPUT\n%1$s</string>
+    <string name="decision_result">%1$s · %2$s\n\n%3$s</string>
+    <string name="footer">PASS는 위 한 문장만 뜻합니다. 앱 전체 성공으로 확대하지 마세요.</string>
+    <string-array name="termination_options">
+        <item>종료 상태 선택</item>
+        <item>COMPLETED · 정상 종료</item>
+        <item>TIMEOUT · 시간 초과</item>
+        <item>CANCELLED · 사용자 중단</item>
+        <item>NOT_STARTED · 실행 전 차단</item>
+        <item>SIGNAL · 외부 종료</item>
+        <item>OUTPUT_LIMIT · 출력 제한</item>
+        <item>SPAWN_ERROR · 실행 실패</item>
+    </string-array>
+</resources>
