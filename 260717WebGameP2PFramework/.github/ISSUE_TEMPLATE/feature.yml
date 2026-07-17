@@ -1,0 +1,25 @@
+name: Feature proposal
+description: Propose a reusable policy or adapter
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: game-class
+    attributes:
+      label: Game class and outcome
+      description: Explain why this remains a local-first, loosely coupled multiplayer game.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Package boundary and schedule rule
+      description: State which package owns it and how any remote effect maps to a future boundary.
+    validations:
+      required: true
+  - type: textarea
+    id: trust
+    attributes:
+      label: Trust, abuse, and verification impact
+    validations:
+      required: true

@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible RelayPlay defect
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials or security vulnerabilities. Use SECURITY.md for private reporting.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - core
+        - client
+        - server
+        - cloudflare
+        - live-race example
+        - documentation/tooling
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include configuration, protocol sequence, and exact commands where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Node, browser, platform, adapter, and version/commit
+    validations:
+      required: true

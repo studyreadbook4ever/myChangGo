@@ -1,0 +1,103 @@
+{
+  "protocolVersion": 1,
+  "room": {
+    "maxPlayers": 4,
+    "disconnectGraceMs": 15000,
+    "eventLogCapacity": 4096
+  },
+  "features": {
+    "progress": {
+      "enabled": true
+    },
+    "interactions": {
+      "enabled": true,
+      "targeted": true,
+      "scheduled": true
+    },
+    "reconnect": {
+      "enabled": true,
+      "replayCanonicalEvents": true
+    },
+    "evidence": {
+      "replayChunks": false,
+      "stateHashes": false
+    },
+    "verification": {
+      "interactionClaims": true,
+      "finalResults": false
+    }
+  },
+  "progress": {
+    "intervalMs": 1000,
+    "broadcast": true
+  },
+  "time": {
+    "clockMode": "monotonic",
+    "sync": {
+      "enabled": true,
+      "sampleCount": 5,
+      "resyncIntervalMs": 30000,
+      "maxRttMs": 2000
+    },
+    "startLeadMs": 3000,
+    "interactionLeadMs": 250,
+    "lateEventPolicy": "next-boundary",
+    "tickRateHz": 60,
+    "audioLookAheadMs": 100
+  },
+  "platform": {
+    "target": "universal",
+    "inputs": {
+      "touch": true,
+      "keyboard": true,
+      "pointer": true,
+      "gamepad": true
+    },
+    "crossPlay": {
+      "enabled": true,
+      "rankedPool": "same-input-preferred",
+      "allowInputSwitch": false
+    },
+    "presentation": {
+      "adaptiveQuality": true,
+      "maxDevicePixelRatio": 2,
+      "preferReducedMotion": true
+    }
+  },
+  "security": {
+    "peerToPeer": false,
+    "strictMessageValidation": true,
+    "maxMessageBytes": 65536,
+    "maxPayloadBytes": 8192,
+    "opaqueIdentifiers": true,
+    "requireIdempotencyKeys": true,
+    "requireResumeEpoch": true,
+    "auth": {
+      "requiredInProduction": true
+    },
+    "rateLimits": {
+      "default": {
+        "capacity": 20,
+        "refillPerSecond": 10
+      },
+      "actions": {
+        "interaction": {
+          "capacity": 6,
+          "refillPerSecond": 3
+        },
+        "progress": {
+          "capacity": 4,
+          "refillPerSecond": 2
+        },
+        "replay_chunk": {
+          "capacity": 16,
+          "refillPerSecond": 8
+        },
+        "freeze": {
+          "capacity": 1,
+          "refillPerSecond": 0.125
+        }
+      }
+    }
+  }
+}

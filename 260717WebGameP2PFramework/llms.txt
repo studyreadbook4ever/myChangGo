@@ -1,0 +1,37 @@
+# RelayPlay
+
+> Pure TypeScript framework for local-first web games with server-relayed
+> progress and occasional canonical interactions. No P2P.
+
+Primary docs:
+- README.md: product overview and quick start
+- docs/requirements.md: authoritative capabilities and non-goals
+- docs/architecture.md: package and data-flow boundaries
+- docs/configuration.md: flags, presets, and recipes
+- docs/protocol.md: message classes, ordering, resume, and scheduling
+- docs/security.md: trust model, authentication hooks, limits, ranked caveats
+- docs/game-design.md: mobile/desktop, Tetris-like, and rhythm-like guidance
+- docs/deploy-cloudflare.md: deployment and operations
+- docs/verification.md: requirement-to-code-to-test traceability
+- docs/ai-guide.md: deterministic coding-agent workflow
+- relayplay.config.schema.json: machine-readable configuration contract
+- AGENTS.md: repository invariants and validation commands
+
+Packages:
+- packages/core: config + protocol + validators + time math
+- packages/client: browser SDK + reconnect + cadence + capability helpers
+- packages/server: provider-neutral room engine + in-memory adapter
+- packages/cloudflare: Worker + Durable Object adapter
+- examples/live-race: complete browser example
+
+Hard rules:
+- Never implement WebRTC/P2P.
+- Never block the local game loop on network response.
+- Treat progress as replaceable telemetry and canonical interactions as an
+  append-only, persist-before-broadcast log.
+- Schedule remote gameplay effects in the future at a logical boundary.
+- Runtime-validate all wire messages.
+- Client reports are not authoritative ranked evidence without a verifier.
+
+Validation:
+`npm run verify`
