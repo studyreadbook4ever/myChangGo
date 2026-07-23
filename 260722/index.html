@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta
+      name="description"
+      content="집중을 방해하는 생각을 다시 볼 시간과 함께 잠깐 맡겨두는 로컬 전용 생각 보관함"
+    />
+    <meta name="theme-color" content="#f4f0e7" />
+    <meta name="color-scheme" content="light" />
+    <title>잠깐 맡김소 — 생각 임시 보관소</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">본문으로 건너뛰기</a>
+
+    <div class="page-grain" aria-hidden="true"></div>
+    <div class="app-shell">
+      <header class="site-header">
+        <a class="brand" href="./" aria-label="잠깐 맡김소 홈">
+          <img class="brand-mark" src="icon.svg" alt="" width="42" height="42" />
+          <span class="brand-copy">
+            <strong>잠깐 맡김소</strong>
+            <small>생각 임시 보관소</small>
+          </span>
+        </a>
+
+        <div class="header-actions" role="group" aria-label="도움말과 데이터 관리">
+          <span class="local-badge" role="status">
+            <span class="local-dot" aria-hidden="true"></span>
+            이 브라우저에 저장
+          </span>
+          <button id="openHelpButton" class="text-button" type="button">사용법</button>
+          <button
+            id="openSettingsButton"
+            class="utility-button"
+            type="button"
+            aria-label="데이터 관리 열기"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6" />
+            </svg>
+            <span>데이터</span>
+          </button>
+        </div>
+      </header>
+
+      <main id="main">
+        <section class="hero" aria-labelledby="heroTitle">
+          <div class="hero-copy">
+            <p class="eyebrow"><span>3 STEPS</span> 머릿속 자리 만들기</p>
+            <h1 id="heroTitle">
+              떠오른 생각,<br />
+              <em>잠깐 맡겨요.</em>
+            </h1>
+            <p class="hero-description">
+              한 줄 적고 다시 볼 시간만 고르면 끝이에요.
+              앱을 다시 열면 볼 시간이 된 생각이 맨 위로 올라옵니다.
+            </p>
+
+            <ol class="hero-steps" aria-label="생각 저장 순서">
+              <li><b>1</b><span>생각 적기</span></li>
+              <li><b>2</b><span>시간 고르기</span></li>
+              <li><b>3</b><span>저장하기</span></li>
+            </ol>
+          </div>
+
+          <section class="deposit-card" aria-labelledby="depositTitle">
+            <div class="deposit-card-top">
+              <div>
+                <span class="counter-label">새 생각</span>
+                <h2 id="depositTitle">지금 떠오른 생각을 적어주세요</h2>
+              </div>
+            </div>
+
+            <form id="captureForm" novalidate>
+              <label class="form-label" for="thoughtInput">
+                <span>1. 생각 내용</span>
+                <small>완벽한 문장이 아니어도 괜찮아요.</small>
+              </label>
+              <div class="thought-field">
+                <textarea
+                  id="thoughtInput"
+                  name="thought"
+                  rows="3"
+                  maxlength="280"
+                  placeholder="예: 집에 가면 화분 흙 확인하기"
+                  autocomplete="off"
+                  aria-describedby="thoughtHelp characterCount thoughtError"
+                  aria-errormessage="thoughtError"
+                  required
+                ></textarea>
+              </div>
+              <div class="field-meta">
+                <p id="thoughtHelp">한 문장만 적으면 충분해요.</p>
+                <output id="characterCount" class="character-count" for="thoughtInput">0 / 280</output>
+              </div>
+              <p id="thoughtError" class="field-error" role="alert" hidden></p>
+
+              <fieldset class="time-fieldset">
+                <legend>2. 언제 다시 볼까요?</legend>
+                <p id="timeHelp" class="field-help">가장 편한 시간을 하나 고르세요. 기본값은 1시간 뒤예요.</p>
+                <div id="presetGroup" class="preset-group">
+                  <label class="time-chip">
+                    <input type="radio" name="reviewPreset" value="10m" />
+                    <span>10분 뒤</span>
+                  </label>
+                  <label class="time-chip selected">
+                    <input type="radio" name="reviewPreset" value="1h" checked />
+                    <span>1시간 뒤</span>
+                  </label>
+                  <label class="time-chip">
+                    <input type="radio" name="reviewPreset" value="tonight" />
+                    <span id="tonightPresetLabel">오늘 저녁</span>
+                  </label>
+                  <label class="time-chip">
+                    <input type="radio" name="reviewPreset" value="tomorrow" />
+                    <span>내일 아침</span>
+                  </label>
+                  <label class="time-chip">
+                    <input type="radio" name="reviewPreset" value="custom" />
+                    <span>날짜 직접 선택</span>
+                  </label>
+                </div>
+                <div id="customTimeWrap" class="custom-time" hidden>
+                  <label for="customTimeInput">날짜와 시간</label>
+                  <input
+                    id="customTimeInput"
+                    type="datetime-local"
+                    aria-describedby="customTimeError"
+                    aria-errormessage="customTimeError"
+                  />
+                  <p id="customTimeError" class="field-error" role="alert" hidden></p>
+                </div>
+              </fieldset>
+
+              <div class="deposit-actions">
+                <span class="shortcut-hint">빠른 저장 <kbd>⌘</kbd><span>/</span><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
+                <button id="depositButton" class="primary-button" type="submit">
+                  <span>3. 생각 저장하기</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 12h14M14 7l5 5-5 5" />
+                  </svg>
+                </button>
+              </div>
+            </form>
+
+            <div class="deposit-slot" aria-hidden="true">
+              <span></span>
+            </div>
+          </section>
+        </section>
+
+        <section
+          id="corruptBanner"
+          class="notice-banner"
+          role="alert"
+          hidden
+          aria-labelledby="corruptTitle"
+        >
+          <div>
+            <span class="notice-kicker">데이터 점검 필요</span>
+            <h2 id="corruptTitle">저장한 생각을 안전하게 읽지 못했어요.</h2>
+            <p>원본을 내려받은 뒤 보관소를 비우면 다시 사용할 수 있어요.</p>
+          </div>
+          <div class="notice-actions">
+            <button id="downloadRawButton" class="secondary-button" type="button">원본 내려받기</button>
+            <button id="resetCorruptButton" class="danger-button" type="button">비우고 계속</button>
+          </div>
+        </section>
+
+        <section id="storageWarning" class="notice-banner storage-warning" role="alert" hidden>
+          <div>
+            <span class="notice-kicker">저장 차단됨</span>
+            <h2>지금 적는 내용은 이 탭에서만 유지돼요.</h2>
+            <p>브라우저가 로컬 저장을 막고 있어요. 탭을 닫기 전에 JSON으로 내보내 주세요.</p>
+          </div>
+          <button id="openStorageSettingsButton" class="secondary-button" type="button">데이터 관리 열기</button>
+        </section>
+
+        <section class="locker-board" aria-labelledby="lockerTitle">
+          <div class="board-header">
+            <div class="board-title-wrap">
+              <p class="eyebrow"><span>SAVED</span> 시간에 따라 자동으로 정리</p>
+              <h2 id="lockerTitle" tabindex="-1">저장한 생각</h2>
+            </div>
+
+            <div id="boardTools" class="board-tools">
+              <label class="search-field" for="searchInput">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6"></circle>
+                  <path d="m16 16 4 4"></path>
+                </svg>
+                <span class="sr-only">저장한 생각 검색</span>
+                <input
+                  id="searchInput"
+                  type="search"
+                  placeholder="저장한 생각 찾기"
+                  autocomplete="off"
+                  aria-controls="dueList holdingList doneList"
+                />
+                <kbd>/</kbd>
+              </label>
+              <dl class="count-strip" aria-label="저장한 생각 요약">
+                <div><dt>지금 볼 생각</dt><dd id="dueCount">0</dd></div>
+                <div><dt>나중에 볼 생각</dt><dd id="holdingCount">0</dd></div>
+                <div><dt>완료</dt><dd id="doneCount">0</dd></div>
+              </dl>
+            </div>
+          </div>
+
+          <section id="firstRunEmpty" class="first-run-empty" aria-labelledby="firstRunTitle">
+            <div class="empty-locker" aria-hidden="true"><span></span></div>
+            <div>
+              <p class="eyebrow"><span>START</span> 처음에는 이것만</p>
+              <h3 id="firstRunTitle">위에 생각 한 줄을 적고 시간을 고르세요.</h3>
+              <p>
+                저장하면 이곳에 자동으로 나타나요. 시스템 알림은 보내지 않으며,
+                앱을 열었을 때 볼 시간이 된 생각을 맨 위에 보여드려요.
+              </p>
+              <button id="trySampleButton" class="inline-button" type="button">예시 문장 넣어보기</button>
+            </div>
+          </section>
+
+          <div class="queue-grid">
+            <section class="queue-panel due-panel" aria-labelledby="dueTitle">
+              <header class="queue-heading">
+                <div>
+                  <div>
+                    <h3 id="dueTitle">지금 볼 생각</h3>
+                    <p>고른 시간이 되었어요. 지금 확인하거나 나중으로 미뤄도 돼요.</p>
+                  </div>
+                </div>
+                <span id="dueBadge" class="queue-badge">0개</span>
+              </header>
+              <ul id="dueList" class="ticket-list" aria-labelledby="dueTitle"></ul>
+            </section>
+
+            <section class="queue-panel holding-panel" aria-labelledby="holdingTitle">
+              <header class="queue-heading">
+                <div>
+                  <div>
+                    <h3 id="holdingTitle">나중에 볼 생각</h3>
+                    <p>아직 고른 시간 전이에요. 지금은 잊고 있어도 괜찮아요.</p>
+                  </div>
+                </div>
+                <span id="holdingBadge" class="queue-badge">0개</span>
+              </header>
+              <ul id="holdingList" class="ticket-list compact" aria-labelledby="holdingTitle"></ul>
+            </section>
+          </div>
+
+          <details id="doneDrawer" class="done-drawer">
+            <summary>
+              <h3>
+                <span>완료한 생각</span>
+                <small><b id="doneSummaryCount">0</b>개 완료</small>
+              </h3>
+            </summary>
+            <ul id="doneList" class="ticket-list done-list" aria-label="완료한 생각 목록"></ul>
+          </details>
+
+          <div id="searchEmpty" class="search-empty" hidden>
+            <strong>그 생각은 안 보이네요.</strong>
+            <p>단어를 조금 바꿔볼까요?</p>
+            <button id="clearSearchButton" class="inline-button" type="button">검색 지우기</button>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <p><strong>잠깐 맡김소</strong>는 계정도, 서버도, 추적 도구도 없어요.</p>
+        <p>당신의 생각은 이 브라우저 안에만 머뭅니다.</p>
+      </footer>
+    </div>
+
+    <dialog id="helpDialog" class="settings-dialog help-dialog" aria-labelledby="helpDialogTitle">
+      <div class="dialog-top">
+        <div>
+          <span class="counter-label">처음 사용하기</span>
+          <h2 id="helpDialogTitle">생각 한 줄, 시간 하나면 끝이에요</h2>
+        </div>
+        <button class="dialog-close round-button" type="button" data-close-dialog aria-label="사용법 닫기">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </div>
+      <ol class="help-steps">
+        <li><b>1</b><span><strong>생각 적기</strong> — 해야 할 일, 걱정, 아이디어를 한 줄로 적어요.</span></li>
+        <li><b>2</b><span><strong>시간 고르기</strong> — 언제 다시 볼지만 하나 선택해요.</span></li>
+        <li><b>3</b><span><strong>저장하기</strong> — 앱을 다시 열면 시간이 된 생각이 위로 올라와요.</span></li>
+      </ol>
+      <dl class="state-guide">
+        <div><dt>지금 볼 생각</dt><dd>고른 시간이 된 생각</dd></div>
+        <div><dt>나중에 볼 생각</dt><dd>아직 고른 시간 전인 생각</dd></div>
+        <div><dt>완료한 생각</dt><dd>처리를 마친 생각</dd></div>
+      </dl>
+      <p class="help-note">시스템 알림은 보내지 않아요. 앱을 열었을 때 상태가 자동으로 바뀝니다.</p>
+      <a class="primary-button help-link" href="example.md" target="_blank" rel="noopener">
+        자세한 사용법 열기
+      </a>
+    </dialog>
+
+    <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsDialogTitle">
+      <div class="dialog-top">
+        <div>
+          <span class="counter-label">보관소 관리</span>
+          <h2 id="settingsDialogTitle">내 데이터, 내가 챙기기</h2>
+        </div>
+        <button class="dialog-close round-button" type="button" data-close-dialog aria-label="설정 닫기">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="privacy-card">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="5" y="10" width="14" height="10" rx="2"></rect>
+          <path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2" />
+        </svg>
+        <div>
+          <strong id="storageStatusTitle">이 브라우저에만 저장됩니다</strong>
+          <p id="storageStatusDescription">
+            입력한 내용은 서버로 전송되지 않으며 브라우저 저장 공간에만 남아요.
+          </p>
+        </div>
+      </div>
+
+      <section id="installSection" class="dialog-section" hidden>
+        <div>
+          <h3>앱으로 설치하기</h3>
+          <p>홈 화면이나 앱 목록에서 더 빠르게 열 수 있어요.</p>
+        </div>
+        <button id="installButton" class="secondary-button" type="button" hidden>앱 설치</button>
+      </section>
+
+      <section class="dialog-section">
+        <div>
+          <h3>보관함 옮기기</h3>
+          <p>JSON 파일로 내려받아 백업하거나 다른 브라우저로 가져올 수 있어요.</p>
+        </div>
+        <div class="dialog-action-row">
+          <button id="exportButton" class="secondary-button" type="button">내보내기</button>
+          <label class="secondary-button file-button">
+            가져오기
+            <input id="importInput" type="file" accept=".json,application/json" />
+          </label>
+        </div>
+      </section>
+
+      <section class="dialog-section danger-section">
+        <div>
+          <h3>보관소 비우기</h3>
+          <p>이 브라우저에 저장된 생각을 모두 지웁니다.</p>
+        </div>
+        <button id="openClearButton" class="danger-button" type="button">전체 삭제</button>
+      </section>
+
+      <p class="version-line">잠깐 맡김소 · local edition 1.0</p>
+    </dialog>
+
+    <dialog
+      id="importDialog"
+      class="confirm-dialog"
+      aria-labelledby="importDialogTitle"
+      aria-describedby="importSummary"
+    >
+      <span class="dialog-stamp" aria-hidden="true">IMPORT</span>
+      <h2 id="importDialogTitle">저장한 생각을 어떻게 가져올까요?</h2>
+      <p id="importSummary">가져올 생각을 확인했어요.</p>
+      <div class="confirm-actions stacked-actions">
+        <button id="mergeImportButton" class="primary-button" type="button">기존 보관함에 합치기</button>
+        <button id="replaceImportButton" class="secondary-button" type="button">파일 내용으로 교체</button>
+        <button class="text-button" type="button" data-close-dialog>취소</button>
+      </div>
+    </dialog>
+
+    <dialog
+      id="clearDialog"
+      class="confirm-dialog"
+      aria-labelledby="clearDialogTitle"
+      aria-describedby="clearDialogDescription"
+    >
+      <span class="dialog-stamp danger-stamp" aria-hidden="true">CLEAR</span>
+      <h2 id="clearDialogTitle">저장한 생각을 모두 지울까요?</h2>
+      <p id="clearDialogDescription">
+        삭제 뒤에는 되돌릴 수 없어요. 필요하다면 먼저 내보내기로 백업해 주세요.
+      </p>
+      <div class="confirm-actions">
+        <button class="secondary-button" type="button" data-close-dialog>취소</button>
+        <button id="confirmClearButton" class="danger-button" type="button">모두 지우기</button>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" hidden>
+      <span id="toastMessage" role="status" aria-live="polite" aria-atomic="true"></span>
+      <button id="undoButton" type="button">이전 작업 되돌리기</button>
+    </div>
+    <div id="liveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    <noscript>
+      <div class="noscript">잠깐 맡김소를 사용하려면 브라우저에서 JavaScript를 켜 주세요.</div>
+    </noscript>
+  </body>
+</html>

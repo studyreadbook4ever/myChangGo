@@ -1,0 +1,26 @@
+{
+  "id": "./",
+  "name": "잠깐 맡김소 — 생각 보관소",
+  "short_name": "잠깐 맡김소",
+  "description": "지금 처리할 수 없는 생각을 잠깐 맡겨 두고, 알맞은 때 다시 꺼내는 로컬 생각 보관소",
+  "lang": "ko-KR",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F4F0E7",
+  "theme_color": "#315CFF",
+  "categories": [
+    "productivity",
+    "utilities"
+  ],
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
