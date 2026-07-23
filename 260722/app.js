@@ -19,9 +19,12 @@ const dom = {
   thoughtInput: $("#thoughtInput"),
   characterCount: $("#characterCount"),
   thoughtField: $(".thought-field"),
+  thoughtError: $("#thoughtError"),
   presetGroup: $("#presetGroup"),
   customTimeWrap: $("#customTimeWrap"),
   customTimeInput: $("#customTimeInput"),
+  customTimeError: $("#customTimeError"),
+  tonightPresetLabel: $("#tonightPresetLabel"),
   depositButton: $("#depositButton"),
   depositCard: $(".deposit-card"),
   corruptBanner: $("#corruptBanner"),
@@ -29,16 +32,18 @@ const dom = {
   corruptDescription: $("#corruptBanner p"),
   downloadRawButton: $("#downloadRawButton"),
   resetCorruptButton: $("#resetCorruptButton"),
+  storageWarning: $("#storageWarning"),
+  openStorageSettingsButton: $("#openStorageSettingsButton"),
   lockerBoard: $(".locker-board"),
+  lockerTitle: $("#lockerTitle"),
+  boardTools: $("#boardTools"),
+  firstRunEmpty: $("#firstRunEmpty"),
   queueGrid: $(".queue-grid"),
   duePanel: $(".due-panel"),
   holdingPanel: $(".holding-panel"),
   dueList: $("#dueList"),
   holdingList: $("#holdingList"),
   doneList: $("#doneList"),
-  dueEmpty: $("#dueEmpty"),
-  holdingEmpty: $("#holdingEmpty"),
-  doneEmpty: $("#doneEmpty"),
   doneDrawer: $("#doneDrawer"),
   searchEmpty: $("#searchEmpty"),
   searchInput: $("#searchInput"),
@@ -50,6 +55,8 @@ const dom = {
   dueBadge: $("#dueBadge"),
   holdingBadge: $("#holdingBadge"),
   doneSummaryCount: $("#doneSummaryCount"),
+  openHelpButton: $("#openHelpButton"),
+  helpDialog: $("#helpDialog"),
   openSettingsButton: $("#openSettingsButton"),
   settingsDialog: $("#settingsDialog"),
   exportButton: $("#exportButton"),
@@ -68,7 +75,10 @@ const dom = {
   undoButton: $("#undoButton"),
   liveRegion: $("#liveRegion"),
   installButton: $("#installButton"),
+  installSection: $("#installSection"),
   localBadge: $(".local-badge"),
+  storageStatusTitle: $("#storageStatusTitle"),
+  storageStatusDescription: $("#storageStatusDescription"),
 };
 
 const dateFormatter = new Intl.DateTimeFormat("ko-KR", {
@@ -81,7 +91,7 @@ const dateFormatter = new Intl.DateTimeFormat("ko-KR", {
 
 const state = {
   items: [],
-  selectedPreset: "10m",
+  selectedPreset: "1h",
   query: "",
   corruptRaw: null,
   corruptMode: null,
@@ -93,6 +103,7 @@ const state = {
   dueIds: new Set(),
   hasRendered: false,
   storageAvailable: true,
+  searchTimer: 0,
 };
 
 initialize();
@@ -100,6 +111,7 @@ initialize();
 function initialize() {
   bindEvents();
   setDefaultCustomTime();
+  updateTonightPresetLabel();
   loadStoredItems();
   render();
   registerServiceWorker();
@@ -109,16 +121,20 @@ function initialize() {
 function bindEvents() {
   dom.captureForm.addEventListener("submit", handleDeposit);
   dom.thoughtInput.addEventListener("input", handleThoughtInput);
-  dom.presetGroup.addEventListener("click", handlePresetClick);
+  dom.presetGroup.addEventListener("change", handlePresetChange);
+  dom.customTimeInput.addEventListener("input", clearCustomTimeError);
   dom.searchInput.addEventListener("input", () => {
     state.query = dom.searchInput.value;
     render();
+    scheduleSearchAnnouncement();
   });
   dom.clearSearchButton.addEventListener("click", clearSearch);
   dom.trySampleButton.addEventListener("click", insertSample);
   dom.lockerBoard.addEventListener("click", handleTicketAction);
 
+  dom.openHelpButton.addEventListener("click", () => dom.helpDialog.showModal());
   dom.openSettingsButton.addEventListener("click", () => dom.settingsDialog.showModal());
+  dom.openStorageSettingsButton.addEventListener("click", () => dom.settingsDialog.showModal());
   dom.exportButton.addEventListener("click", exportItems);
   dom.importInput.addEventListener("change", handleImportFile);
   dom.openClearButton.addEventListener("click", () => openClearDialog("all"));
@@ -140,9 +156,9 @@ function bindEvents() {
   window.addEventListener("appinstalled", () => {
     state.installPrompt = null;
     dom.installButton.hidden = true;
+    dom.installSection.hidden = true;
     showToast("앱 설치가 끝났어요.");
   });
-
 }
 
 function loadStoredItems() {
@@ -207,12 +223,20 @@ function markStorageUnavailable() {
   state.storageAvailable = false;
   dom.localBadge.lastChild.textContent = " 이 탭에서만 유지";
   dom.localBadge.title = "브라우저가 로컬 저장을 차단했습니다";
+  dom.storageWarning.hidden = false;
+  dom.storageStatusTitle.textContent = "이 탭에서만 유지됩니다";
+  dom.storageStatusDescription.textContent =
+    "브라우저 저장이 차단되어 탭을 닫으면 내용이 사라질 수 있어요. 먼저 내보내기로 백업해 주세요.";
 }
 
 function markStorageAvailable() {
   state.storageAvailable = true;
-  dom.localBadge.lastChild.textContent = " 이 기기에만 저장";
+  dom.localBadge.lastChild.textContent = " 이 브라우저에 저장";
   dom.localBadge.removeAttribute("title");
+  dom.storageWarning.hidden = true;
+  dom.storageStatusTitle.textContent = "이 브라우저에만 저장됩니다";
+  dom.storageStatusDescription.textContent =
+    "입력한 내용은 서버로 전송되지 않으며 브라우저 저장 공간에만 남아요.";
 }
 
 function handleThoughtInput() {
@@ -220,26 +244,46 @@ function handleThoughtInput() {
   dom.characterCount.textContent = `${length} / 280`;
   if (dom.thoughtInput.value.trim()) {
     dom.thoughtInput.removeAttribute("aria-invalid");
+    dom.thoughtError.hidden = true;
+    dom.thoughtError.textContent = "";
   }
 }
 
-function handlePresetClick(event) {
-  const button = event.target.closest("[data-preset]");
-  if (!button) return;
+function handlePresetChange(event) {
+  const input = event.target.closest('input[name="reviewPreset"]');
+  if (!input) return;
 
-  state.selectedPreset = button.dataset.preset;
-  for (const chip of dom.presetGroup.querySelectorAll("[data-preset]")) {
-    const isSelected = chip === button;
-    chip.classList.toggle("selected", isSelected);
-    chip.setAttribute("aria-pressed", String(isSelected));
+  state.selectedPreset = input.value;
+  for (const chip of dom.presetGroup.querySelectorAll(".time-chip")) {
+    chip.classList.toggle("selected", chip.contains(input));
   }
 
   const isCustom = state.selectedPreset === "custom";
   dom.customTimeWrap.hidden = !isCustom;
+  dom.customTimeInput.required = isCustom;
+  if (!isCustom) {
+    dom.customTimeInput.removeAttribute("aria-invalid");
+    dom.customTimeError.hidden = true;
+    dom.customTimeError.textContent = "";
+  }
   if (isCustom) {
     setDefaultCustomTime();
     dom.customTimeInput.focus();
   }
+}
+
+function clearCustomTimeError() {
+  const value = dom.customTimeInput.value;
+  if (!value || new Date(value).getTime() <= Date.now()) return;
+  dom.customTimeInput.removeAttribute("aria-invalid");
+  dom.customTimeError.hidden = true;
+  dom.customTimeError.textContent = "";
+}
+
+function updateTonightPresetLabel(now = new Date()) {
+  const tonight = new Date(now);
+  tonight.setHours(20, 0, 0, 0);
+  dom.tonightPresetLabel.textContent = tonight.getTime() < now.getTime() ? "내일 저녁" : "오늘 저녁";
 }
 
 function setDefaultCustomTime() {
@@ -287,9 +331,10 @@ function handleDeposit(event) {
     (!dom.customTimeInput.value ||
       new Date(dom.customTimeInput.value).getTime() <= Date.now())
   ) {
+    dom.customTimeInput.setAttribute("aria-invalid", "true");
+    dom.customTimeError.textContent = "지금보다 뒤의 날짜와 시간을 골라 주세요.";
+    dom.customTimeError.hidden = false;
     dom.customTimeInput.focus();
-    showToast("지금보다 뒤의 시간을 골라 주세요.");
-    announce("다시 꺼낼 시간을 지금보다 뒤로 정해 주세요.");
     return;
   }
 
@@ -300,30 +345,33 @@ function handleDeposit(event) {
       Date.now(),
       dom.customTimeInput.value,
     );
-    commitItems([...state.items, item], "맡김표를 안전하게 보관했어요.");
+    commitItems([...state.items, item], "생각을 저장했어요.");
     dom.captureForm.reset();
     dom.characterCount.textContent = "0 / 280";
-    selectPreset("10m");
+    dom.thoughtError.hidden = true;
+    selectPreset("1h");
     animateDeposit();
-    announce(`${text}, 맡김표를 보관했어요.`);
     dom.thoughtInput.focus();
   } catch {
-    showToast("맡김표를 만들지 못했어요. 시간과 내용을 다시 확인해 주세요.");
+    showToast("생각을 저장하지 못했어요. 내용과 시간을 다시 확인해 주세요.");
   }
 }
 
 function showInputError(message) {
   dom.thoughtInput.setAttribute("aria-invalid", "true");
+  dom.thoughtError.textContent = message;
+  dom.thoughtError.hidden = false;
   dom.thoughtField.classList.remove("shake");
   void dom.thoughtField.offsetWidth;
   dom.thoughtField.classList.add("shake");
   dom.thoughtInput.focus();
-  announce(message);
 }
 
 function selectPreset(preset) {
-  const button = dom.presetGroup.querySelector(`[data-preset="${preset}"]`);
-  button?.click();
+  const input = dom.presetGroup.querySelector(`input[name="reviewPreset"][value="${preset}"]`);
+  if (!input) return;
+  input.checked = true;
+  input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 function animateDeposit() {
@@ -347,7 +395,7 @@ function handleTicketAction(event) {
   const now = Date.now();
   switch (button.dataset.action) {
     case "complete":
-      updateItem(id, { status: "done", doneAt: now }, "생각 하나를 잘 정리했어요.");
+      updateItem(id, { status: "done", doneAt: now }, "완료한 생각으로 옮겼어요.");
       break;
     case "snooze": {
       const minutes = Number(button.dataset.minutes);
@@ -355,24 +403,24 @@ function handleTicketAction(event) {
       updateItem(
         id,
         { status: "holding", doneAt: null, reviewAt: now + minutes * 60_000 },
-        minutes >= 24 * 60 ? "내일 다시 꺼내둘게요." : "조금 더 맡아둘게요.",
+        minutes >= 24 * 60 ? "내일 다시 보여드릴게요." : "고른 시간 뒤에 다시 보여드릴게요.",
       );
       break;
     }
     case "due-now":
-      updateItem(id, { status: "holding", doneAt: null, reviewAt: now }, "지금 볼 곳으로 꺼냈어요.");
+      updateItem(id, { status: "holding", doneAt: null, reviewAt: now }, "지금 볼 생각으로 옮겼어요.");
       break;
     case "reopen":
       updateItem(
         id,
         { status: "holding", doneAt: null, reviewAt: now + 10 * 60_000 },
-        "다시 맡았어요. 10분 뒤에 꺼내둘게요.",
+        "다시 열었어요. 10분 뒤에 보여드릴게요.",
       );
       break;
     case "delete":
       commitItems(
         state.items.filter((candidate) => candidate.id !== id),
-        "맡김표 한 장을 버렸어요.",
+        "생각을 삭제했어요.",
       );
       break;
     default:
@@ -380,6 +428,13 @@ function handleTicketAction(event) {
   }
 
   button.closest("details")?.removeAttribute("open");
+  window.requestAnimationFrame(focusAfterTicketAction);
+}
+
+function focusAfterTicketAction() {
+  const nextAction = dom.lockerBoard.querySelector(".ticket .primary-action");
+  const target = nextAction || dom.lockerTitle;
+  target.focus({ preventScroll: true });
 }
 
 function updateItem(id, patch, message) {
@@ -420,43 +475,43 @@ function undoLastMutation() {
       : "이 탭에서만 되돌렸어요. 브라우저 저장은 갱신하지 못했어요.",
     null,
   );
-  announce("마지막 작업을 되돌렸습니다.");
 }
 
 function render() {
   const now = Date.now();
   const all = partitionItems(state.items, now);
   const visible = partitionItems(state.items, now, state.query);
+  const totalCount = all.due.length + all.holding.length + all.done.length;
   const visibleCount = visible.due.length + visible.holding.length + visible.done.length;
   const isSearching = state.query.trim().length > 0;
+  const isFirstRun = totalCount === 0 && !isSearching;
 
   dom.dueCount.textContent = String(all.due.length);
   dom.holdingCount.textContent = String(all.holding.length);
   dom.doneCount.textContent = String(all.done.length);
-  dom.dueBadge.textContent = `${visible.due.length}장`;
-  dom.holdingBadge.textContent = `${visible.holding.length}장`;
+  dom.dueBadge.textContent = `${visible.due.length}개`;
+  dom.holdingBadge.textContent = `${visible.holding.length}개`;
   dom.doneSummaryCount.textContent = String(visible.done.length);
 
   renderTicketList(dom.dueList, visible.due, "due", now);
   renderTicketList(dom.holdingList, visible.holding, "holding", now);
   renderTicketList(dom.doneList, visible.done, "done", now);
 
-  dom.dueEmpty.hidden = visible.due.length > 0 || isSearching;
-  dom.holdingEmpty.hidden = visible.holding.length > 0 || isSearching;
-  dom.doneEmpty.hidden = visible.done.length > 0 || isSearching;
-
   const hasNoSearchResult = isSearching && visibleCount === 0;
-  dom.searchEmpty.hidden = !hasNoSearchResult;
-  dom.queueGrid.hidden = hasNoSearchResult;
-  dom.doneDrawer.hidden = hasNoSearchResult || (isSearching && visible.done.length === 0);
-  dom.duePanel.hidden = isSearching && visible.due.length === 0;
-  dom.holdingPanel.hidden = isSearching && visible.holding.length === 0;
-  dom.queueGrid.classList.toggle(
-    "single-column",
-    isSearching && (visible.due.length === 0 || visible.holding.length === 0),
-  );
+  const hasDue = visible.due.length > 0;
+  const hasHolding = visible.holding.length > 0;
+  const hasDone = visible.done.length > 0;
 
-  if (isSearching && visible.done.length > 0) {
+  dom.firstRunEmpty.hidden = !isFirstRun;
+  dom.boardTools.hidden = totalCount === 0;
+  dom.searchEmpty.hidden = !hasNoSearchResult;
+  dom.queueGrid.hidden = isFirstRun || hasNoSearchResult || (!hasDue && !hasHolding);
+  dom.doneDrawer.hidden = isFirstRun || hasNoSearchResult || !hasDone;
+  dom.duePanel.hidden = !hasDue;
+  dom.holdingPanel.hidden = !hasHolding;
+  dom.queueGrid.classList.toggle("single-column", hasDue !== hasHolding);
+
+  if ((isSearching && hasDone) || (!hasDue && !hasHolding && hasDone)) {
     dom.doneDrawer.open = true;
   }
 
@@ -473,9 +528,9 @@ function renderRecoveryNotice() {
   if (state.corruptRaw === null) return;
 
   if (state.corruptMode === "partial") {
-    dom.corruptTitle.textContent = "일부 맡김표를 안전하게 읽지 못했어요.";
+    dom.corruptTitle.textContent = "일부 생각을 안전하게 읽지 못했어요.";
     dom.corruptDescription.textContent =
-      `읽힌 ${state.items.length}장은 화면에 남겨뒀어요. 원본을 내려받거나 읽힌 항목만 남겨 복구할 수 있어요.`;
+      `읽힌 ${state.items.length}개는 화면에 남겨뒀어요. 원본을 내려받거나 읽힌 항목만 남겨 복구할 수 있어요.`;
     dom.resetCorruptButton.textContent = "읽힌 항목으로 복구";
     return;
   }
@@ -488,7 +543,7 @@ function renderRecoveryNotice() {
     return;
   }
 
-  dom.corruptTitle.textContent = "저장된 맡김표를 안전하게 읽지 못했어요.";
+  dom.corruptTitle.textContent = "저장한 생각을 안전하게 읽지 못했어요.";
   dom.corruptDescription.textContent =
     "원본을 내려받은 뒤 보관소를 비우면 다시 사용할 수 있어요.";
   dom.resetCorruptButton.textContent = "비우고 계속";
@@ -503,13 +558,13 @@ function renderTicketList(container, items, section, now) {
 }
 
 function createTicket(item, section, now, index) {
-  const article = document.createElement("article");
-  article.className = "ticket";
-  article.dataset.state = section;
-  article.dataset.itemId = item.id;
-  article.dataset.reviewAt = String(item.reviewAt);
-  if (item.doneAt !== null) article.dataset.doneAt = String(item.doneAt);
-  article.style.animationDelay = `${Math.min(index * 35, 175)}ms`;
+  const listItem = document.createElement("li");
+  listItem.className = "ticket";
+  listItem.dataset.state = section;
+  listItem.dataset.itemId = item.id;
+  listItem.dataset.reviewAt = String(item.reviewAt);
+  if (item.doneAt !== null) listItem.dataset.doneAt = String(item.doneAt);
+  listItem.style.animationDelay = `${Math.min(index * 35, 175)}ms`;
 
   const main = document.createElement("div");
   main.className = "ticket-main";
@@ -517,25 +572,28 @@ function createTicket(item, section, now, index) {
   const top = document.createElement("div");
   top.className = "ticket-top";
 
-  const code = document.createElement("span");
-  code.className = "ticket-code";
-  code.textContent = `MAT-${formatTicketDate(item.createdAt)}-${shortCode(item.id)}`;
-
   const stamp = document.createElement("span");
   stamp.className = "status-stamp";
-  stamp.textContent =
-    section === "due" ? "꺼낼 시간" : section === "done" ? "정리됨" : "보관 중";
+  const statusPrefix = document.createElement("span");
+  statusPrefix.className = "sr-only";
+  statusPrefix.textContent = "상태: ";
+  stamp.append(
+    statusPrefix,
+    section === "due" ? "지금 볼 생각" : section === "done" ? "완료" : "나중에 볼 생각",
+  );
 
-  top.append(code, stamp);
+  top.append(stamp);
 
   const text = document.createElement("p");
   text.className = "ticket-text";
+  text.id = `thought-${section}-${index}`;
   text.textContent = item.text;
+  listItem.setAttribute("aria-labelledby", text.id);
 
   const meta = document.createElement("div");
   meta.className = "ticket-meta";
 
-  const time = document.createElement("span");
+  const time = document.createElement("time");
   time.className = "ticket-time";
   const relative = document.createElement("strong");
   relative.className = "ticket-relative";
@@ -543,27 +601,32 @@ function createTicket(item, section, now, index) {
   detail.className = "ticket-date";
 
   if (section === "done") {
+    time.dateTime = new Date(item.doneAt).toISOString();
     relative.textContent = formatCompletedTime(item.doneAt, now);
-    detail.textContent = `${dateFormatter.format(item.doneAt)} 정리`;
+    detail.textContent = `${dateFormatter.format(item.doneAt)} 완료`;
   } else {
+    time.dateTime = new Date(item.reviewAt).toISOString();
     relative.textContent =
       section === "due"
-        ? `약속한 시간이 ${formatRelativeTime(item.reviewAt, now)}`
+        ? `볼 시간이 ${formatRelativeTime(item.reviewAt, now)}`
         : `${formatRelativeTime(item.reviewAt, now)} 다시 보기`;
     detail.textContent = dateFormatter.format(item.reviewAt);
   }
   time.append(relative, detail);
 
-  const created = document.createElement("span");
+  const created = document.createElement("time");
   created.className = "ticket-date";
-  created.textContent = `${dateFormatter.format(item.createdAt)} 접수`;
+  created.dateTime = new Date(item.createdAt).toISOString();
+  created.textContent = `${dateFormatter.format(item.createdAt)} 저장`;
   meta.append(time, created);
 
   main.append(top, text, meta);
 
   const actions = document.createElement("div");
   actions.className = "ticket-actions";
-  actions.append(...createTicketActions(section));
+  actions.setAttribute("role", "group");
+  actions.setAttribute("aria-label", `${shortContext(item.text)} 작업`);
+  actions.append(...createTicketActions(section, item));
   if (state.corruptRaw !== null) {
     for (const button of actions.querySelectorAll("button[data-action]")) {
       button.disabled = true;
@@ -571,86 +634,83 @@ function createTicket(item, section, now, index) {
     }
   }
 
-  article.append(main, actions);
-  return article;
+  listItem.append(main, actions);
+  return listItem;
 }
 
-function createTicketActions(section) {
+function createTicketActions(section, item) {
   if (section === "done") {
     return [
-      actionButton("다시 맡기기", "reopen", "primary-action"),
-      actionButton("삭제", "delete", "delete-action"),
+      actionButton("다시 열기", "reopen", item, "primary-action"),
+      actionButton("삭제", "delete", item, "delete-action"),
     ];
   }
 
-  const completeLabel = section === "due" ? "정리했어요" : "미리 정리했어요";
-  const primary = actionButton(completeLabel, "complete", "primary-action");
+  const primary = actionButton("완료", "complete", item, "primary-action");
 
   if (section === "holding") {
     return [
       primary,
-      actionButton("지금 꺼내기", "due-now"),
-      actionButton("삭제", "delete", "delete-action"),
+      actionButton("지금 보기", "due-now", item),
+      actionButton("삭제", "delete", item, "delete-action"),
     ];
   }
 
-  return [primary, createSnoozeMenu(), actionButton("삭제", "delete", "delete-action")];
+  return [
+    primary,
+    createSnoozeMenu(item),
+    actionButton("삭제", "delete", item, "delete-action"),
+  ];
 }
 
-function actionButton(label, action, className = "") {
+function actionButton(label, action, item, className = "") {
   const button = document.createElement("button");
   button.type = "button";
   button.className = `ticket-button ${className}`.trim();
   button.dataset.action = action;
   button.textContent = label;
+  button.setAttribute("aria-label", `${label}: ${shortContext(item.text)}`);
   return button;
 }
 
-function createSnoozeMenu() {
+function createSnoozeMenu(item) {
   const details = document.createElement("details");
   details.className = "ticket-menu";
 
   const summary = document.createElement("summary");
-  summary.textContent = "조금 더 맡기기";
+  summary.textContent = "나중에 보기";
+  summary.setAttribute("aria-label", `나중에 볼 시간 선택: ${shortContext(item.text)}`);
 
   const popover = document.createElement("div");
   popover.className = "ticket-menu-popover";
   popover.append(
-    snoozeButton("10분 뒤", 10),
-    snoozeButton("1시간 뒤", 60),
-    snoozeButton("내일 이맘때", 24 * 60),
+    snoozeButton("10분 뒤", 10, item),
+    snoozeButton("1시간 뒤", 60, item),
+    snoozeButton("내일 이맘때", 24 * 60, item),
   );
 
   details.append(summary, popover);
   return details;
 }
 
-function snoozeButton(label, minutes) {
+function snoozeButton(label, minutes, item) {
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.action = "snooze";
   button.dataset.minutes = String(minutes);
   button.textContent = label;
+  button.setAttribute("aria-label", `${label} 다시 보기: ${shortContext(item.text)}`);
   return button;
 }
 
-function formatTicketDate(timestamp) {
-  const date = new Date(timestamp);
-  return `${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function shortCode(id) {
-  let hash = 0;
-  for (const character of id) {
-    hash = (hash * 31 + character.charCodeAt(0)) | 0;
-  }
-  return String(Math.abs(hash) % 1000).padStart(3, "0");
+function shortContext(text) {
+  return text.length > 40 ? `${text.slice(0, 40)}…` : text;
 }
 
 function formatCompletedTime(doneAt, now) {
   const label = formatRelativeTime(doneAt, now);
-  if (label === "방금 지남" || label === "지금") return "방금 정리";
-  return `${label.replace(" 지남", " 전")} 정리`;
+  if (label === "방금 지남" || label === "지금") return "방금 완료";
+  return `${label.replace(" 지남", " 전")} 완료`;
 }
 
 function insertSample() {
@@ -670,10 +730,21 @@ function clearSearch() {
   state.query = "";
   render();
   dom.searchInput.focus();
+  scheduleSearchAnnouncement();
+}
+
+function scheduleSearchAnnouncement() {
+  window.clearTimeout(state.searchTimer);
+  state.searchTimer = window.setTimeout(() => {
+    const result = partitionItems(state.items, Date.now(), state.query);
+    const count = result.due.length + result.holding.length + result.done.length;
+    announce(state.query.trim() ? `검색 결과 ${count}개` : "검색을 지웠습니다.");
+  }, 250);
 }
 
 function handleClockTick() {
   const now = Date.now();
+  updateTonightPresetLabel(new Date(now));
   const nextDue = new Set(partitionItems(state.items, now).due.map((item) => item.id));
   const dueMembershipChanged =
     nextDue.size !== state.dueIds.size || [...nextDue].some((id) => !state.dueIds.has(id));
@@ -686,8 +757,7 @@ function handleClockTick() {
   }
 
   if (state.hasRendered && hasNewDue) {
-    showToast("약속한 시간이 된 맡김표가 있어요.");
-    announce("꺼낼 시간이 된 맡김표가 있습니다.");
+    showToast("지금 볼 시간이 된 생각이 있어요.");
   }
 }
 
@@ -702,7 +772,7 @@ function refreshRelativeTimes(now) {
       const reviewAt = Number(ticket.dataset.reviewAt);
       relative.textContent =
         ticket.dataset.state === "due"
-          ? `약속한 시간이 ${formatRelativeTime(reviewAt, now)}`
+          ? `볼 시간이 ${formatRelativeTime(reviewAt, now)}`
           : `${formatRelativeTime(reviewAt, now)} 다시 보기`;
     }
   }
@@ -713,7 +783,7 @@ function exportItems() {
   const date = new Date();
   const filename = `jamkkan-matgimso-${formatLocalFileDate(date)}.json`;
   downloadBlob(JSON.stringify(payload, null, 2), filename, "application/json");
-  showToast(`${state.items.length}장의 맡김표를 내보냈어요.`);
+  showToast(`${state.items.length}개의 생각을 내보냈어요.`);
 }
 
 async function handleImportFile(event) {
@@ -744,17 +814,17 @@ async function handleImportFile(event) {
 
     if (normalized.items.length === 0) {
       dom.settingsDialog.close();
-      showToast("가져올 수 있는 맡김표가 한 장도 없어요.");
+      showToast("가져올 수 있는 생각이 하나도 없어요.");
       return;
     }
 
     state.pendingImport = normalized.items;
     dom.importSummary.textContent =
       state.corruptRaw !== null
-        ? `${normalized.items.length}장의 맡김표를 확인했어요. 읽지 못한 현재 데이터를 이 파일로 교체할 수 있어요.`
+        ? `${normalized.items.length}개의 생각을 확인했어요. 읽지 못한 현재 데이터를 이 파일로 교체할 수 있어요.`
         : normalized.discarded
-          ? `${normalized.items.length}장은 읽었고, 손상되거나 중복된 ${normalized.discarded}장은 제외했어요.`
-          : `${normalized.items.length}장의 맡김표를 확인했어요.`;
+          ? `${normalized.items.length}개는 읽었고, 손상되거나 중복된 ${normalized.discarded}개는 제외했어요.`
+          : `${normalized.items.length}개의 생각을 확인했어요.`;
     dom.mergeImportButton.disabled =
       normalized.items.length === 0 || state.corruptRaw !== null;
     dom.replaceImportButton.disabled = false;
@@ -782,7 +852,7 @@ function applyImport(mode) {
   commitItems(
     nextItems,
     mode === "merge"
-      ? "가져온 맡김표를 기존 보관함에 합쳤어요."
+      ? "가져온 생각을 현재 목록에 합쳤어요."
       : "파일 속 보관함으로 교체했어요.",
     { undoable: !wasRecovering },
   );
@@ -793,7 +863,7 @@ function openClearDialog(mode) {
   if (dom.settingsDialog.open) dom.settingsDialog.close();
 
   if (mode === "repair") {
-    dom.clearDialogTitle.textContent = `읽힌 맡김표 ${state.items.length}장만 남길까요?`;
+    dom.clearDialogTitle.textContent = `읽힌 생각 ${state.items.length}개만 남길까요?`;
     dom.clearDialogDescription.textContent =
       "읽지 못한 항목과 새 형식의 정보는 제거됩니다. 계속하기 전에 원본을 내려받는 것을 권해요.";
     dom.confirmClearButton.textContent = "현재 형식으로 복구";
@@ -803,7 +873,7 @@ function openClearDialog(mode) {
       "지우기 전에 원본을 내려받는 것을 권해요. 삭제 뒤에는 되돌릴 수 없습니다.";
     dom.confirmClearButton.textContent = "데이터 지우기";
   } else {
-    dom.clearDialogTitle.textContent = "모든 맡김표를 지울까요?";
+    dom.clearDialogTitle.textContent = "저장한 생각을 모두 지울까요?";
     dom.clearDialogDescription.textContent =
       "삭제 뒤에는 되돌릴 수 없어요. 필요하다면 먼저 내보내기로 백업해 주세요.";
     dom.confirmClearButton.textContent = "모두 지우기";
@@ -819,7 +889,7 @@ function confirmClear() {
       state.corruptRaw = null;
       state.corruptMode = null;
       render();
-      showToast(`읽힌 맡김표 ${state.items.length}장으로 보관소를 복구했어요.`, null);
+      showToast(`읽힌 생각 ${state.items.length}개로 목록을 복구했어요.`, null);
     } else {
       render();
       showToast("복구 내용을 저장하지 못했어요. 원본 데이터는 그대로 두었습니다.", null);
@@ -834,6 +904,8 @@ function confirmClear() {
       state.corruptRaw = null;
       state.corruptMode = null;
       state.items = [];
+      state.query = "";
+      dom.searchInput.value = "";
       render();
       showToast("읽지 못한 데이터를 지우고 새 보관소를 열었어요.", null);
       dom.thoughtInput.focus();
@@ -857,6 +929,8 @@ function confirmClear() {
 
   state.corruptRaw = null;
   state.corruptMode = null;
+  state.query = "";
+  dom.searchInput.value = "";
   render();
   showToast("보관소를 모두 비웠어요.", null);
 }
@@ -899,7 +973,7 @@ function showToast(message, undoSnapshot) {
   state.toastTimer = window.setTimeout(() => {
     dom.toast.hidden = true;
     state.undoSnapshot = null;
-  }, 5_000);
+  }, 10_000);
 }
 
 function announce(message) {
@@ -944,10 +1018,9 @@ function handleKeyboardShortcut(event) {
     if (openDialog) {
       event.preventDefault();
       openDialog.close();
-    } else if (active === dom.thoughtInput && dom.thoughtInput.value) {
-      dom.thoughtInput.value = "";
-      handleThoughtInput();
-      announce("작성 중인 생각을 지웠습니다.");
+    } else if (active === dom.thoughtInput) {
+      dom.thoughtInput.blur();
+      announce("입력한 내용은 그대로 두었습니다.");
     }
     return;
   }
@@ -1032,6 +1105,7 @@ function handleStorageChange(event) {
 function handleBeforeInstallPrompt(event) {
   event.preventDefault();
   state.installPrompt = event;
+  dom.installSection.hidden = false;
   dom.installButton.hidden = false;
 }
 
@@ -1041,6 +1115,7 @@ async function promptInstall() {
   await state.installPrompt.userChoice;
   state.installPrompt = null;
   dom.installButton.hidden = true;
+  dom.installSection.hidden = true;
 }
 
 function registerServiceWorker() {

@@ -225,6 +225,38 @@ svg {
     transform 160ms ease;
 }
 
+.utility-button {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--line-dark);
+  border-radius: 999px;
+  background: transparent;
+  font-size: 0.74rem;
+  font-weight: 850;
+  transition:
+    color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.utility-button:hover {
+  color: #fff;
+  background: var(--ink);
+  transform: translateY(-1px);
+}
+
+.utility-button svg {
+  width: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
 .round-button:hover {
   color: #fff;
   background: var(--ink);
@@ -326,6 +358,46 @@ main {
   line-height: 1.72;
 }
 
+.hero-steps {
+  display: flex;
+  width: min(100%, 500px);
+  gap: 10px;
+  margin: 34px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hero-steps li {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.hero-steps li:not(:last-child)::after {
+  width: 22px;
+  height: 1px;
+  margin-left: auto;
+  background: var(--line-dark);
+  content: "";
+}
+
+.hero-steps b {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line-dark);
+  border-radius: 50%;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+}
+
 .locker-sign {
   display: flex;
   width: max-content;
@@ -408,7 +480,24 @@ main {
 }
 
 #captureForm {
-  margin-top: 29px;
+  margin-top: 24px;
+}
+
+.form-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.form-label small {
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  font-weight: 650;
 }
 
 .thought-field {
@@ -417,9 +506,9 @@ main {
 
 #thoughtInput {
   width: 100%;
-  min-height: 126px;
+  min-height: 112px;
   resize: vertical;
-  padding: 18px 18px 34px;
+  padding: 16px 18px;
   border: 1px solid var(--line-dark);
   border-radius: 2px;
   outline: 0;
@@ -454,12 +543,33 @@ main {
 }
 
 .character-count {
-  position: absolute;
-  right: 12px;
-  bottom: 10px;
   color: var(--ink-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.67rem;
+}
+
+.field-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 7px;
+}
+
+.field-meta p,
+.field-help {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.field-error {
+  margin: 7px 0 0;
+  color: var(--danger);
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.45;
 }
 
 .time-fieldset {
@@ -470,10 +580,14 @@ main {
 }
 
 .time-fieldset legend {
+  margin-bottom: 5px;
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.time-fieldset .field-help {
   margin-bottom: 11px;
-  color: var(--ink-soft);
-  font-size: 0.75rem;
-  font-weight: 800;
 }
 
 .preset-group {
@@ -483,7 +597,11 @@ main {
 }
 
 .time-chip {
+  position: relative;
+  display: inline-flex;
   min-height: 39px;
+  align-items: center;
+  justify-content: center;
   padding: 0 13px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -495,6 +613,15 @@ main {
     color 140ms ease,
     background 140ms ease,
     transform 140ms ease;
+  cursor: pointer;
+}
+
+.time-chip input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
 }
 
 .time-chip:hover {
@@ -506,6 +633,11 @@ main {
   border-color: var(--ink);
   background: var(--ink);
   color: #fff;
+}
+
+.time-chip:focus-within {
+  outline: 3px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .custom-time {
@@ -530,6 +662,11 @@ main {
   padding: 0 10px;
   border: 1px solid var(--line-dark);
   background: var(--paper-light);
+}
+
+.custom-time .field-error {
+  grid-column: 1 / -1;
+  margin: 0;
 }
 
 .deposit-actions {
@@ -692,6 +829,19 @@ kbd {
   gap: 8px;
 }
 
+.storage-warning {
+  border-color: var(--orange-dark);
+  background: var(--orange-wash);
+}
+
+.storage-warning .notice-kicker {
+  color: var(--orange-dark);
+}
+
+.storage-warning > button {
+  flex: 0 0 auto;
+}
+
 .locker-board {
   padding: 74px max(24px, calc((100% - 1260px) / 2)) 92px;
   border-top: 1px solid var(--ink);
@@ -757,20 +907,59 @@ kbd {
 
 .count-strip {
   gap: 16px;
+  margin: 0;
   color: var(--ink-soft);
   font-size: 0.7rem;
   font-weight: 700;
 }
 
-.count-strip span {
+.count-strip > div {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
   white-space: nowrap;
 }
 
-.count-strip strong {
-  margin-right: 2px;
+.count-strip dt,
+.count-strip dd {
+  margin: 0;
+}
+
+.count-strip dd {
+  order: -1;
   color: var(--ink);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.first-run-empty {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 28px;
+  margin-top: 38px;
+  padding: 30px;
+  border: 1px dashed var(--line-dark);
+  background: rgba(251, 250, 246, 0.48);
+}
+
+.first-run-empty .empty-locker {
+  margin: 0;
+}
+
+.first-run-empty h3 {
+  margin: 10px 0 0;
+  font-size: 1.18rem;
+  letter-spacing: -0.04em;
+}
+
+.first-run-empty p:not(.eyebrow) {
+  max-width: 660px;
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  line-height: 1.6;
 }
 
 .queue-grid {
@@ -851,6 +1040,9 @@ kbd {
   display: grid;
   gap: 13px;
   margin-top: 17px;
+  margin-bottom: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .ticket {
@@ -895,6 +1087,10 @@ kbd {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.ticket-top {
+  justify-content: flex-end;
 }
 
 .ticket-code {
@@ -1135,11 +1331,7 @@ kbd {
 }
 
 .done-drawer > summary {
-  display: flex;
   min-height: 68px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
   padding: 13px 19px;
   list-style: none;
 }
@@ -1148,19 +1340,26 @@ kbd {
   display: none;
 }
 
-.done-drawer > summary > span {
+.done-drawer > summary h3 {
   display: flex;
+  min-height: 40px;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 0;
+  font-size: 0.9rem;
 }
 
-.done-drawer > summary > span:last-child {
+.done-drawer > summary small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--ink-soft);
   font-size: 0.7rem;
   font-weight: 700;
 }
 
-.done-drawer > summary > span:last-child::after {
+.done-drawer > summary small::after {
   width: 8px;
   height: 8px;
   transform: rotate(45deg);
@@ -1170,7 +1369,7 @@ kbd {
   transition: transform 160ms ease;
 }
 
-.done-drawer[open] > summary > span:last-child::after {
+.done-drawer[open] > summary small::after {
   transform: rotate(225deg);
 }
 
@@ -1241,6 +1440,88 @@ dialog::backdrop {
 .dialog-close {
   width: 38px;
   height: 38px;
+}
+
+.help-dialog {
+  width: min(calc(100% - 32px), 560px);
+}
+
+.help-steps {
+  display: grid;
+  gap: 10px;
+  margin: 26px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.help-steps li {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.help-steps b {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: #fff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.help-steps strong {
+  color: var(--ink);
+}
+
+.state-guide {
+  display: grid;
+  gap: 0;
+  margin: 20px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.state-guide > div {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 14px;
+  padding: 11px 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.state-guide dt {
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.state-guide dd {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+}
+
+.help-note {
+  margin: 18px 0 0;
+  padding: 12px;
+  background: var(--orange-wash);
+  color: var(--orange-dark);
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1.5;
+}
+
+.help-link {
+  width: 100%;
+  margin-top: 18px;
+  text-decoration: none;
 }
 
 .privacy-card {
@@ -1539,26 +1820,43 @@ dialog::backdrop {
 
   .hero {
     width: calc(100% - 32px);
-    gap: 42px;
-    padding: 47px 0 62px;
+    gap: 20px;
+    padding: 24px 0 42px;
   }
 
   .hero h1 {
-    margin-top: 18px;
-    font-size: clamp(2.85rem, 14vw, 4.7rem);
+    margin-top: 12px;
+    font-size: clamp(2.25rem, 10.5vw, 3.2rem);
+    line-height: 1;
   }
 
   .hero-description {
-    margin-top: 22px;
-    font-size: 0.94rem;
+    margin-top: 14px;
+    font-size: 0.82rem;
+    line-height: 1.55;
   }
 
-  .locker-sign {
-    margin-top: 30px;
+  .hero-steps {
+    gap: 6px;
+    margin-top: 16px;
+  }
+
+  .hero-steps li {
+    gap: 5px;
+    font-size: 0.64rem;
+  }
+
+  .hero-steps li:not(:last-child)::after {
+    display: none;
+  }
+
+  .hero-steps b {
+    width: 24px;
+    height: 24px;
   }
 
   .deposit-card {
-    padding: 22px 18px 26px;
+    padding: 18px 16px 22px;
     box-shadow:
       7px 7px 0 var(--blue),
       var(--shadow);
@@ -1569,11 +1867,38 @@ dialog::backdrop {
   }
 
   .deposit-card h2 {
-    font-size: 1.35rem;
+    font-size: 1.18rem;
+  }
+
+  #captureForm {
+    margin-top: 17px;
+  }
+
+  .form-label {
+    margin-bottom: 7px;
+  }
+
+  .form-label small {
+    display: none;
   }
 
   #thoughtInput {
-    min-height: 114px;
+    min-height: 82px;
+    padding: 12px 13px;
+    font-size: 1rem;
+  }
+
+  .time-fieldset {
+    margin-top: 16px;
+  }
+
+  .time-chip {
+    min-height: 44px;
+    font-size: 0.82rem;
+  }
+
+  .deposit-actions {
+    margin-top: 17px;
   }
 
   .custom-time {
@@ -1586,7 +1911,7 @@ dialog::backdrop {
   }
 
   .locker-board {
-    padding: 58px 16px 66px;
+    padding: 44px 16px 58px;
   }
 
   .board-header {
@@ -1611,6 +1936,22 @@ dialog::backdrop {
   .count-strip {
     justify-content: space-between;
     gap: 8px;
+  }
+
+  .count-strip > div {
+    display: grid;
+    gap: 1px;
+  }
+
+  .first-run-empty {
+    grid-template-columns: 1fr;
+    gap: 0;
+    margin-top: 24px;
+    padding: 22px 18px;
+  }
+
+  .first-run-empty > .empty-locker {
+    display: none;
   }
 
   .queue-grid {
@@ -1642,6 +1983,7 @@ dialog::backdrop {
   .ticket-button,
   .ticket-menu summary {
     min-height: 44px;
+    font-size: 0.82rem;
   }
 
   .ticket-button.delete-action {
@@ -1649,8 +1991,21 @@ dialog::backdrop {
   }
 
   .ticket-menu-popover {
-    right: auto;
-    left: 0;
+    position: static;
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: 5px;
+  }
+
+  .ticket-menu[open] {
+    order: 4;
+    flex-basis: 100%;
+  }
+
+  .ticket-menu button {
+    min-height: 44px;
+    padding: 0 6px;
+    text-align: center;
   }
 
   .done-drawer > summary {
@@ -1658,13 +2013,8 @@ dialog::backdrop {
     padding: 13px;
   }
 
-  .done-drawer > summary > span:last-child {
-    font-size: 0;
-  }
-
-  .done-drawer > summary > span:last-child b,
-  .done-drawer > summary > span:last-child::after {
-    font-size: 0.72rem;
+  .done-drawer > summary h3 {
+    width: 100%;
   }
 
   .done-list {
@@ -1713,14 +2063,6 @@ dialog::backdrop {
     font-size: 0.9rem;
   }
 
-  .hero h1 {
-    font-size: 2.72rem;
-  }
-
-  .window-number {
-    display: none;
-  }
-
   .time-chip {
     flex: 1 1 calc(50% - 7px);
   }
@@ -1729,9 +2071,6 @@ dialog::backdrop {
     font-size: 0.62rem;
   }
 
-  .ticket-date {
-    display: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

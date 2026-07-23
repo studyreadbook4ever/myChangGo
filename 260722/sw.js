@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "jamkkan-matgimso";
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `${CACHE_PREFIX}-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -8,6 +8,7 @@ const APP_SHELL = [
   "./styles.css",
   "./app.js",
   "./logic.js",
+  "./example.md",
   "./manifest.webmanifest",
   "./icon.svg"
 ];
