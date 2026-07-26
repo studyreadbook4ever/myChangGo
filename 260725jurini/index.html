@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="회사나 업종을 입력하면 어떤 LLM에도 붙여 넣을 수 있는 안전한 도움 요청 스키마를 만드는 챗봇"
+    />
+    <meta name="theme-color" content="#f3efe5" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./src/styles.css" />
+    <title>도와줘 — 기업·업종 도움 프롬프트 스키마</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#schema-chat">챗봇으로 바로가기</a>
+
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="도와줘 홈">
+        <span class="brand-mark" aria-hidden="true">도</span>
+        <span>도와줘</span>
+      </a>
+      <div class="header-meta">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>LLM 호출 없음</span>
+        <a href="#how-it-works">작동 방식</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">HELP QUERY · VERSION 1</p>
+          <h1 id="hero-title">전 국민의 AI에,<br /><em>도와줘</em>라는 동사.</h1>
+          <p class="hero-description">
+            회사나 업종 이름을 말하면, 원하는 AI에 그대로 붙여 넣을 수 있는
+            정직한 도움 요청 스키마를 만들어드려요. 여기서는 어떤 AI도 호출하지
+            않습니다.
+          </p>
+
+          <div class="promise-list" aria-label="서비스 특징">
+            <div>
+              <span>01</span>
+              <strong>복사 가능한 스키마</strong>
+              <small>특정 AI에 묶이지 않아요</small>
+            </div>
+            <div>
+              <span>02</span>
+              <strong>기본 안전 규칙</strong>
+              <small>투자 선동과 어뷰징 제외</small>
+            </div>
+            <div>
+              <span>03</span>
+              <strong>결과별 피드백</strong>
+              <small>좋아요·싫어요를 즉시 보관</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="hero-note" aria-label="서비스 한 줄 설명">
+          <span aria-hidden="true">↳</span>
+          <p>
+            답을 대신 만드는 챗봇이 아니라,<br />
+            <strong>좋은 질문의 틀</strong>을 만드는 챗봇입니다.
+          </p>
+        </div>
+      </section>
+
+      <section class="workspace" id="schema-chat" aria-label="프롬프트 스키마 챗봇">
+        <div class="workspace-heading">
+          <div>
+            <p class="eyebrow">SCHEMA WORKBENCH</p>
+            <h2>회사·업종 이름부터 시작해보세요.</h2>
+          </div>
+          <div class="privacy-note">
+            <span aria-hidden="true">●</span>
+            스키마 생성 중 외부 전송 없음
+          </div>
+        </div>
+
+        <div class="workspace-grid">
+          <section class="chat-shell" aria-labelledby="chat-title">
+            <header class="panel-header">
+              <div>
+                <span class="panel-kicker">SCHEMA CHAT</span>
+                <h3 id="chat-title">질문 만들기</h3>
+              </div>
+              <button class="ghost-button" id="reset-chat" type="button">
+                처음부터
+              </button>
+            </header>
+
+            <div
+              class="chat-log"
+              id="chat-log"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
+            >
+              <article class="message message-bot">
+                <div class="avatar" aria-hidden="true">도</div>
+                <div class="message-body">
+                  <p>
+                    어떤 회사나 업종을 돕고 싶나요? 이름만 입력해도 충분해요.
+                  </p>
+                  <div class="example-chips" aria-label="입력 예시">
+                    <button type="button" data-example="삼성전자">삼성전자</button>
+                    <button type="button" data-example="국내 반도체 장비업">
+                      국내 반도체 장비업
+                    </button>
+                    <button type="button" data-example="전북 식품 중소기업">
+                      전북 식품 중소기업
+                    </button>
+                  </div>
+                </div>
+              </article>
+            </div>
+
+            <form class="chat-form" id="chat-form">
+              <div class="target-field-heading">
+                <label for="target-input">회사·업종·지역산업</label>
+                <label class="target-type-label" for="target-type-select">
+                  <span>대상 범위</span>
+                  <select id="target-type-select" name="targetType">
+                    <option value="auto">자동 해석</option>
+                    <option value="company">회사</option>
+                    <option value="industry">업종</option>
+                    <option value="regionalIndustry">지역산업</option>
+                  </select>
+                </label>
+              </div>
+              <div class="input-row">
+                <input
+                  id="target-input"
+                  name="target"
+                  type="text"
+                  maxlength="120"
+                  autocomplete="off"
+                  placeholder="예: 국내 조선기자재업"
+                  required
+                />
+                <button class="send-button" type="submit" aria-label="스키마 만들기">
+                  <span>만들기</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m5 12 14-7-4 14-3-6-7-1Z" />
+                    <path d="m12 13 7-8" />
+                  </svg>
+                </button>
+              </div>
+
+              <fieldset class="condition-fieldset">
+                <legend>조건을 더해도 좋아요 <span>선택</span></legend>
+                <div class="condition-chips">
+                  <button type="button" aria-pressed="false" data-condition="zeroCost">
+                    돈 안 쓰고
+                  </button>
+                  <button type="button" aria-pressed="false" data-condition="fiveMinutes">
+                    5분 안에
+                  </button>
+                  <button type="button" aria-pressed="false" data-condition="expertise">
+                    내 전문성으로
+                  </button>
+                  <button type="button" aria-pressed="false" data-condition="local">
+                    우리 지역에서
+                  </button>
+                </div>
+                <label class="context-label" for="context-input">
+                  내 상황 한 줄
+                  <input
+                    id="context-input"
+                    name="context"
+                    type="text"
+                    maxlength="160"
+                    placeholder="예: 반도체 전공 대학생이고 온라인 활동만 가능해요"
+                  />
+                </label>
+              </fieldset>
+            </form>
+          </section>
+
+          <section class="schema-shell" aria-labelledby="schema-title">
+            <header class="panel-header">
+              <div>
+                <span class="panel-kicker">OUTPUT</span>
+                <h3 id="schema-title">복사용 스키마</h3>
+              </div>
+              <span class="schema-version">Help Query v1</span>
+            </header>
+
+            <div class="empty-state" id="empty-state">
+              <div class="empty-glyph" aria-hidden="true">
+                <span>{</span><span>+</span><span>}</span>
+              </div>
+              <p>왼쪽에서 대상을 입력하면<br />여기에 스키마가 만들어져요.</p>
+              <small>스키마 생성 중 API 요청이나 LLM 호출은 없습니다.</small>
+            </div>
+
+            <div class="schema-result" id="schema-result" hidden>
+              <div class="schema-summary">
+                <div>
+                  <span id="target-type-badge">회사</span>
+                  <strong id="target-summary"></strong>
+                </div>
+                <p id="context-summary"></p>
+              </div>
+
+              <div class="view-tabs" role="tablist" aria-label="스키마 보기 방식">
+                <button
+                  id="prompt-tab"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="prompt-panel"
+                >
+                  복사용 프롬프트
+                </button>
+                <button
+                  id="structure-tab"
+                  type="button"
+                  role="tab"
+                  tabindex="-1"
+                  aria-selected="false"
+                  aria-controls="structure-panel"
+                >
+                  구조화 스키마
+                </button>
+              </div>
+
+              <div id="prompt-panel" role="tabpanel" aria-labelledby="prompt-tab">
+                <pre
+                  class="schema-code"
+                  tabindex="0"
+                  aria-label="생성된 복사용 프롬프트. 방향키로 내용을 스크롤할 수 있습니다."
+                ><code id="prompt-output"></code></pre>
+              </div>
+              <div
+                id="structure-panel"
+                role="tabpanel"
+                aria-labelledby="structure-tab"
+                hidden
+              >
+                <pre
+                  class="schema-code"
+                  tabindex="0"
+                  aria-label="생성된 구조화 스키마. 방향키로 내용을 스크롤할 수 있습니다."
+                ><code id="structure-output"></code></pre>
+              </div>
+
+              <div class="schema-actions">
+                <button class="primary-button" id="copy-schema" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="8" y="8" width="11" height="11" rx="2" />
+                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+                  </svg>
+                  <span>프롬프트 복사</span>
+                </button>
+                <button class="secondary-button" id="download-schema" type="button">
+                  스키마 저장
+                </button>
+              </div>
+
+              <section class="feedback-card" aria-labelledby="feedback-title">
+                <div>
+                  <p id="feedback-title">이 스키마, 쓸 만했나요?</p>
+                  <small>대상과 선택을 먼저 이 기기에 보관해요.</small>
+                </div>
+                <div class="vote-buttons" role="group" aria-label="스키마 평가">
+                  <button
+                    id="vote-up"
+                    type="button"
+                    aria-pressed="false"
+                    aria-label="좋아요"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M7 10v11H3V10h4Zm0 10h10.4a2 2 0 0 0 1.95-1.56l1.4-6A2 2 0 0 0 18.8 10H14l.7-3.3A3 3 0 0 0 11.77 3L7 10Z" />
+                    </svg>
+                    좋아요
+                  </button>
+                  <button
+                    id="vote-down"
+                    type="button"
+                    aria-pressed="false"
+                    aria-label="싫어요"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M7 14V3H3v11h4Zm0-10h10.4a2 2 0 0 1 1.95 1.56l1.4 6A2 2 0 0 1 18.8 14H14l.7 3.3A3 3 0 0 1 11.77 21L7 14Z" />
+                    </svg>
+                    아쉬워요
+                  </button>
+                </div>
+
+                <div class="feedback-followup" id="feedback-followup" hidden>
+                  <p id="feedback-question"></p>
+                  <div class="reason-chips" id="reason-chips"></div>
+                  <label for="feedback-note">
+                    한마디 더 남기기 <span>선택</span>
+                    <textarea
+                      id="feedback-note"
+                      maxlength="300"
+                      rows="2"
+                      placeholder="개인정보는 적지 말아주세요."
+                    ></textarea>
+                  </label>
+                  <div class="feedback-actions">
+                    <button class="secondary-button" id="save-feedback" type="button">
+                      피드백 저장
+                    </button>
+                    <a
+                      class="text-link"
+                      id="github-feedback-link"
+                      href="#"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-describedby="feedback-disclosure"
+                      hidden
+                    >
+                      GitHub에서 공개 이슈 등록하기 ↗
+                    </a>
+                  </div>
+                  <small
+                    class="feedback-disclosure"
+                    id="feedback-disclosure"
+                    hidden
+                  >
+                    GitHub 링크를 열면 평가·대상 유형·응답 ID가 GitHub로
+                    전송됩니다. 대상 원문과 한마디는 자동으로 넣지 않아요.
+                    제출한 내용은 공개됩니다.
+                  </small>
+                </div>
+                <p class="feedback-status" id="feedback-status" role="status"></p>
+              </section>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="how-it-works" id="how-it-works" aria-labelledby="how-title">
+        <div>
+          <p class="eyebrow">HOW IT WORKS</p>
+          <h2 id="how-title">가볍게 만들고,<br />피드백은 잃지 않게.</h2>
+        </div>
+        <ol>
+          <li>
+            <span>1</span>
+            <div>
+              <strong>브라우저에서 규칙 기반 조립</strong>
+              <p>입력을 분류하고 Help Query v1을 만듭니다. 외부 AI로 보내지 않아요.</p>
+            </div>
+          </li>
+          <li>
+            <span>2</span>
+            <div>
+              <strong>어떤 LLM에도 복사</strong>
+              <p>사람용 프롬프트와 구조화된 스키마를 함께 제공합니다.</p>
+            </div>
+          </li>
+          <li>
+            <span>3</span>
+            <div>
+              <strong>피드백 선저장·후전송</strong>
+              <p>평가를 먼저 로컬 outbox에 보관하고, 수집기가 연결되면 자동 재전송합니다.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p><strong>도와줘</strong> · 공급자 중립형 기업·업종 참여 프롬프트</p>
+      <div>
+        <button id="export-feedback" type="button">내 피드백 내보내기</button>
+        <button id="retry-feedback" type="button" hidden>전송 다시 시도</button>
+        <button id="delete-feedback" type="button">이 기기 피드백 삭제</button>
+        <span id="pending-feedback">이 기기 보관 0건</span>
+      </div>
+    </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
