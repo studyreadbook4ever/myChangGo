@@ -20,6 +20,7 @@ const PROJECT_ID = "e2e-editor-interaction";
 const EDITED_TEXT = "사람이 직접 고친 한글 자막";
 const KEY = Object.freeze({
   ARROW_RIGHT: "\uE014",
+  DELETE: "\uE017",
   ESCAPE: "\uE00C",
   SPACE: "\uE00D",
   TAB: "\uE004"
@@ -44,6 +45,15 @@ let driverOutput = "";
 let ffmpegOutput = "";
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function formatEditorTime(milliseconds) {
+  const value = Math.max(0, Math.round(Number(milliseconds) || 0));
+  const hours = Math.floor(value / 3_600_000);
+  const minutes = Math.floor((value % 3_600_000) / 60_000);
+  const seconds = Math.floor((value % 60_000) / 1_000);
+  const millis = value % 1_000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
 
 function assert(condition, message) {
   if (!condition) {
@@ -304,6 +314,28 @@ async function pressKey(value) {
   }
 }
 
+async function pressKeyRepeated(value, count) {
+  const repetitions = Math.max(0, Math.floor(Number(count) || 0));
+  const actions = [];
+  for (let index = 0; index < repetitions; index += 1) {
+    actions.push(
+      { type: "keyDown", value },
+      { type: "keyUp", value }
+    );
+  }
+  try {
+    await webdriver("POST", `/session/${sessionId}/actions`, {
+      actions: [{
+        type: "key",
+        id: `repeated-keyboard-${Date.now()}`,
+        actions
+      }]
+    });
+  } finally {
+    await webdriver("DELETE", `/session/${sessionId}/actions`).catch(() => {});
+  }
+}
+
 async function clearAndType(selector, text) {
   const element = await findElement(selector);
   await webdriver("POST", `/session/${sessionId}/element/${element[ELEMENT_KEY]}/clear`);
@@ -321,7 +353,7 @@ async function setFileInput(selector, filePath) {
   });
 }
 
-async function pointerDrag(selector, moves) {
+async function pointerDragOnce(selector, moves) {
   const element = await findElement(selector);
   await executeSync(`
     arguments[0].scrollIntoView({ block: "center", inline: "center" });
@@ -402,7 +434,22 @@ async function pointerDrag(selector, moves) {
   `);
 }
 
-async function contextClickElement(selector) {
+async function pointerDrag(selector, moves) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await pointerDragOnce(selector, moves);
+    } catch (error) {
+      const staleElement = String(error?.message || "").includes("stale element reference");
+      if (!staleElement || attempt === 2) {
+        throw error;
+      }
+      await delay(120);
+    }
+  }
+  throw new Error(`drag 대상을 안정적으로 찾지 못했습니다: ${selector}`);
+}
+
+async function contextClickElement(selector, { x = 0, y = 0 } = {}) {
   const element = await findElement(selector);
   try {
     await webdriver("POST", `/session/${sessionId}/actions`, {
@@ -411,7 +458,7 @@ async function contextClickElement(selector) {
         id: `context-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         parameters: { pointerType: "mouse" },
         actions: [
-          { type: "pointerMove", duration: 0, origin: element, x: 0, y: 0 },
+          { type: "pointerMove", duration: 0, origin: element, x, y },
           { type: "pointerDown", button: 2 },
           { type: "pointerUp", button: 2 }
         ]
@@ -1267,6 +1314,225 @@ async function main() {
     "우클릭 자막 삭제"
   );
 
+  await clickElement('.clip-block[data-id="clip-selection-b"] .clip-block-body');
+  await executeSync(`document.querySelector("#stage")?.focus();`);
+  await pressKeyRepeated(KEY.ARROW_RIGHT, 30);
+  await delay(180);
+  await clickElement("#add-cue");
+  const rangeCueProject = await waitForStoredProject(
+    (project) => (
+      project.subtitles.length === 2 &&
+      project.subtitles.some((cue) => (
+        cue.id !== cueId &&
+        cue.clipId === "clip-selection-b" &&
+        cue.startOffsetMs >= 2_800
+      ))
+    ),
+    "리플 삭제 뒤 이동을 검증할 후행 자막 추가"
+  );
+  const rangeCue = rangeCueProject.subtitles.find((cue) => cue.id !== cueId);
+  const cueTimelineStart = (candidateProject, candidateCue) => {
+    const clip = candidateProject.clips.find((candidate) => candidate.id === candidateCue?.clipId);
+    return clip ? clip.timelineStartMs + candidateCue.startOffsetMs : null;
+  };
+  const rangeCueTimelineStartBefore = cueTimelineStart(rangeCueProject, rangeCue);
+  assert(
+    Number.isFinite(rangeCueTimelineStartBefore),
+    `후행 자막의 삭제 전 타임라인 시각을 찾지 못했습니다: ${JSON.stringify(rangeCue)}`
+  );
+
+  await clickElement('.clip-block[data-id="clip-selection-a"] .clip-block-body');
+  await clickElement("#set-range-start");
+  await clickElement('.clip-block[data-id="clip-selection-b"] .clip-block-body');
+  await clickElement("#set-range-end");
+  const toolbarRange = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        overlayHidden: document.querySelector("#timeline-range-selection")?.hidden,
+        overlayValid: document.querySelector("#timeline-range-selection")?.classList.contains("valid"),
+        startPressed: document.querySelector("#set-range-start")?.getAttribute("aria-pressed"),
+        endPressed: document.querySelector("#set-range-end")?.getAttribute("aria-pressed"),
+        deleteDisabled: document.querySelector("#delete-range")?.disabled,
+        summary: document.querySelector("#timeline-range-summary")?.textContent || ""
+      };
+    `);
+    return (
+      state.overlayHidden === false &&
+      state.overlayValid === true &&
+      state.startPressed === "true" &&
+      state.endPressed === "true" &&
+      state.deleteDisabled === false &&
+      state.summary.includes("삭제")
+    ) ? state : false;
+  }, "툴바 시작·끝점과 삭제 범위 overlay");
+  await clickElement("#clear-range");
+  await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        overlayHidden: document.querySelector("#timeline-range-selection")?.hidden,
+        deleteDisabled: document.querySelector("#delete-range")?.disabled,
+        clearHidden: document.querySelector("#clear-range")?.hidden
+      };
+    `);
+    return state.overlayHidden && state.deleteDisabled && state.clearHidden ? state : false;
+  }, "툴바 삭제 범위 선택 해제");
+
+  await contextClickElement('.clip-block[data-id="clip-selection-b"]', { x: -35 });
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#context-set-range-start")?.hidden === false;`),
+    "영상 우클릭 삭제 시작점 메뉴"
+  );
+  await clickElement("#context-set-range-start");
+  await contextClickElement('.clip-block[data-id="clip-selection-b"]', { x: 35 });
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#context-set-range-end")?.hidden === false;`),
+    "영상 우클릭 삭제 끝점 메뉴"
+  );
+  await clickElement("#context-set-range-end");
+  const rangeHandleBeforeDrag = await waitUntil(async () => {
+    const state = await executeSync(`
+      const overlay = document.querySelector("#timeline-range-selection");
+      const start = document.querySelector("#range-start-handle");
+      const end = document.querySelector("#range-end-handle");
+      return {
+        valid: overlay?.classList.contains("valid"),
+        width: Number.parseFloat(overlay?.style.width || "0"),
+        startNow: Number(start?.getAttribute("aria-valuenow")),
+        endNow: Number(end?.getAttribute("aria-valuenow")),
+        startHidden: start?.hidden,
+        endHidden: end?.hidden
+      };
+    `);
+    return (
+      state.valid &&
+      state.width > 20 &&
+      state.endNow - state.startNow >= 0.1 &&
+      state.startHidden === false &&
+      state.endHidden === false
+    ) ? state : false;
+  }, "영상 우클릭 구간과 접근 가능한 양끝 손잡이");
+  const rangeStartDrag = await pointerDrag(
+    "#range-start-handle",
+    [{ x: 4, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 0 }]
+  );
+  assert(
+    rangeStartDrag.moves >= 3,
+    `삭제 구간 시작 손잡이 drag pointermove가 부족합니다: ${JSON.stringify(rangeStartDrag)}`
+  );
+  const rangeEndBeforeNudge = await executeSync(`
+    const handle = document.querySelector("#range-end-handle");
+    handle?.focus();
+    return Number(handle?.getAttribute("aria-valuenow"));
+  `);
+  await pressKey(KEY.ARROW_RIGHT);
+  const rangeEndAfterNudge = await waitUntil(async () => {
+    const value = await executeSync(
+      `return Number(document.querySelector("#range-end-handle")?.getAttribute("aria-valuenow"));`
+    );
+    return value >= rangeEndBeforeNudge + 0.099 ? value : false;
+  }, "삭제 구간 끝 손잡이 Arrow nudge");
+
+  await executeSync(`document.querySelector("#cue-text")?.focus();`);
+  await pressKey(KEY.ESCAPE);
+  const inputEscapeRange = await executeSync(`
+    return {
+      activeId: document.activeElement?.id || null,
+      valid: document.querySelector("#timeline-range-selection")?.classList.contains("valid"),
+      hidden: document.querySelector("#timeline-range-selection")?.hidden
+    };
+  `);
+  assert(
+    inputEscapeRange.activeId === "cue-text" &&
+      inputEscapeRange.valid &&
+      inputEscapeRange.hidden === false,
+    `텍스트 입력 중 Escape가 삭제 범위를 지웠습니다: ${JSON.stringify(inputEscapeRange)}`
+  );
+  await executeSync(`document.querySelector("#stage")?.focus();`);
+  await pressKey(KEY.ESCAPE);
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#timeline-range-selection")?.hidden === true;`),
+    "Escape 삭제 범위 선택 해제"
+  );
+
+  await contextClickElement('.clip-block[data-id="clip-selection-b"]', { x: -35 });
+  await clickElement("#context-set-range-start");
+  await contextClickElement('.clip-block[data-id="clip-selection-b"]', { x: 35 });
+  await clickElement("#context-set-range-end");
+  await contextClickElement('.clip-block[data-id="clip-selection-b"]');
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#context-delete-range")?.hidden === false;`),
+    "영상 우클릭 선택 구간 삭제 메뉴"
+  );
+  await pressKey(KEY.ESCAPE);
+  const deleteRange = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        startMs: Math.round(Number(document.querySelector("#range-start-handle")?.getAttribute("aria-valuenow")) * 1000),
+        endMs: Math.round(Number(document.querySelector("#range-end-handle")?.getAttribute("aria-valuenow")) * 1000),
+        deleteDisabled: document.querySelector("#delete-range")?.disabled
+      };
+    `);
+    return (
+      state.endMs - state.startMs >= 100 &&
+      state.deleteDisabled === false
+    ) ? state : false;
+  }, "키보드 삭제 전 유효한 범위");
+  await executeSync(`document.querySelector("#range-end-handle")?.focus();`);
+  await pressKey(KEY.DELETE);
+  const rippleDeletedProject = await waitForStoredProject(
+    (project) => {
+      const movedCue = project.subtitles.find((cue) => cue.id === rangeCue.id);
+      const movedStartMs = cueTimelineStart(project, movedCue);
+      return (
+        project.clips.length === 3 &&
+        project.clips.filter((clip) => clip.selectionId === "selection-b").length === 2 &&
+        Number.isFinite(movedStartMs) &&
+        Math.abs(
+          movedStartMs -
+          (rangeCueTimelineStartBefore - (deleteRange.endMs - deleteRange.startMs))
+        ) <= 1
+      );
+    },
+    "내부 구간 리플 삭제와 후행 자막 동시 이동"
+  );
+  const rippleMovedCue = rippleDeletedProject.subtitles.find((cue) => cue.id === rangeCue.id);
+  const rippleMovedCueTimelineStart = cueTimelineStart(rippleDeletedProject, rippleMovedCue);
+  const rangeUiAfterDelete = await executeSync(`
+    return {
+      overlayHidden: document.querySelector("#timeline-range-selection")?.hidden,
+      playheadNow: Number(document.querySelector("#playhead")?.getAttribute("aria-valuenow"))
+    };
+  `);
+  assert(
+    rangeUiAfterDelete.overlayHidden &&
+      Math.abs(rangeUiAfterDelete.playheadNow * 1000 - deleteRange.startMs) <= 1,
+    `리플 삭제 뒤 범위 해제·접합점 playhead 오류: ${JSON.stringify(rangeUiAfterDelete)}`
+  );
+
+  await clickElement("#undo");
+  const rippleRestoredProject = await waitForStoredProject(
+    (project) => {
+      const restoredRangeCue = project.subtitles.find((cue) => cue.id === rangeCue.id);
+      return (
+        project.clips.length === rangeCueProject.clips.length &&
+        project.clips.every((clip, index) => (
+          clip.id === rangeCueProject.clips[index]?.id &&
+          clip.sourceStartMs === rangeCueProject.clips[index]?.sourceStartMs &&
+          clip.sourceEndMs === rangeCueProject.clips[index]?.sourceEndMs
+        )) &&
+        cueTimelineStart(project, restoredRangeCue) === rangeCueTimelineStartBefore
+      );
+    },
+    "리플 삭제 한 번 Undo로 영상·자막 복원"
+  );
+  const restoredRangeCue = rippleRestoredProject.subtitles.find((cue) => cue.id === rangeCue.id);
+  await contextClickElement(`.cue-block[data-id="${restoredRangeCue.id}"]`);
+  await clickElement("#context-delete-cue");
+  await waitForStoredProject(
+    (project) => project.subtitles.length === 1 && project.subtitles[0].id === cueId,
+    "리플 삭제 E2E 후행 자막 fixture 정리"
+  );
+
   const transparentAssetPaste = await dispatchTransparentPngPaste();
   assert(
     !transparentAssetPaste?.error &&
@@ -1594,6 +1860,163 @@ async function main() {
     (project) => Math.abs(project.audioRegions[0]?.gain - 0.35) < 0.0001,
     "음성 구간 음량 autosave"
   );
+  const audioClip = quietAudioProject.clips.find(
+    (clip) => clip.id === quietAudioProject.audioRegions[0]?.clipId
+  );
+  assert(audioClip, "정밀 음성 미리보기용 clip을 찾지 못했습니다.");
+  const preciseAudioStartOffsetMs = 500;
+  const preciseAudioEndOffsetMs = 620;
+  const preciseAudioStartMs = audioClip.timelineStartMs + preciseAudioStartOffsetMs;
+  const preciseAudioEndMs = audioClip.timelineStartMs + preciseAudioEndOffsetMs;
+  await executeSync(`
+    const start = document.querySelector("#audio-start");
+    const end = document.querySelector("#audio-end");
+    start.value = arguments[0];
+    start.dispatchEvent(new Event("change", { bubbles: true }));
+    end.value = arguments[1];
+    end.dispatchEvent(new Event("change", { bubbles: true }));
+    const volume = document.querySelector("#audio-volume");
+    volume.value = "0";
+    volume.dispatchEvent(new Event("input", { bubbles: true }));
+    volume.dispatchEvent(new Event("change", { bubbles: true }));
+  `, [
+    formatEditorTime(preciseAudioStartMs),
+    formatEditorTime(preciseAudioEndMs)
+  ]);
+  const preciseAudioProject = await waitForStoredProject(
+    (project) => (
+      project.audioRegions[0]?.startOffsetMs === preciseAudioStartOffsetMs &&
+      project.audioRegions[0]?.endOffsetMs === preciseAudioEndOffsetMs &&
+      project.audioRegions[0]?.gain === 0
+    ),
+    "120ms 정밀 음성 구간 autosave"
+  );
+  const preciseAudioRegion = preciseAudioProject.audioRegions[0];
+  const preciseAudioMediaOriginMs = Number(preciseAudioProject.mediaAsset?.mediaOriginMs) || 0;
+  const preciseAudioPreviewStartSeconds = (
+    preciseAudioMediaOriginMs +
+    audioClip.sourceStartMs +
+    preciseAudioRegion.startOffsetMs
+  ) / 1_000;
+  const preciseAudioPreviewEndSeconds = (
+    preciseAudioMediaOriginMs +
+    audioClip.sourceStartMs +
+    preciseAudioRegion.endOffsetMs
+  ) / 1_000;
+  await executeAsync(`
+    const video = document.querySelector("#preview-video");
+    const target = arguments[0];
+    const done = arguments[arguments.length - 1];
+    video.pause();
+    const finish = () => {
+      video.removeEventListener("seeked", finish);
+      video.dispatchEvent(new Event("timeupdate"));
+      requestAnimationFrame(() => done({
+        currentTime: video.currentTime,
+        paused: video.paused,
+        volume: video.volume
+      }));
+    };
+    video.addEventListener("seeked", finish, { once: true });
+    video.currentTime = target;
+    if (!video.seeking) {
+      finish();
+    }
+  `, [preciseAudioPreviewStartSeconds - 0.08]);
+  const preciseAudioTraceSetup = await executeSync(`
+    const video = document.querySelector("#preview-video");
+    let volumePrototype = video;
+    let volumeDescriptor = null;
+    while (volumePrototype && !volumeDescriptor) {
+      volumeDescriptor = Object.getOwnPropertyDescriptor(volumePrototype, "volume");
+      volumePrototype = Object.getPrototypeOf(volumePrototype);
+    }
+    if (!volumeDescriptor?.get || !volumeDescriptor?.set) {
+      throw new Error("HTMLMediaElement volume descriptor를 찾지 못했습니다.");
+    }
+    globalThis.__kirinukiPreciseAudioTrace = {
+      transitions: [],
+      startedAt: video.currentTime,
+      lastAppliedVolume: volumeDescriptor.get.call(video)
+    };
+    Object.defineProperty(video, "volume", {
+      configurable: true,
+      get() {
+        return volumeDescriptor.get.call(video);
+      },
+      set(value) {
+        const trace = globalThis.__kirinukiPreciseAudioTrace;
+        if (trace && value !== trace.lastAppliedVolume) {
+          trace.lastAppliedVolume = value;
+          trace.transitions.push({
+            currentTime: video.currentTime,
+            volume: value
+          });
+        }
+        volumeDescriptor.set.call(video, value);
+      }
+    });
+    return {
+      currentTime: video.currentTime,
+      paused: video.paused,
+      volume: video.volume
+    };
+  `);
+  assert(
+    preciseAudioTraceSetup.paused &&
+      preciseAudioTraceSetup.volume === 1 &&
+      preciseAudioTraceSetup.currentTime < preciseAudioPreviewStartSeconds,
+    `정밀 음성 미리보기 사전 상태가 잘못됐습니다: ${JSON.stringify(preciseAudioTraceSetup)}`
+  );
+  await clickElement("#play-toggle");
+  await waitUntil(
+    () => executeSync(
+      `return document.querySelector("#preview-video").currentTime >= arguments[0];`,
+      [preciseAudioPreviewEndSeconds + 0.08]
+    ),
+    "120ms 음성 구간 재생 통과",
+    { timeout: 5_000 }
+  );
+  const preciseAudioPreviewClock = await executeSync(`
+    const video = document.querySelector("#preview-video");
+    video.pause();
+    const trace = globalThis.__kirinukiPreciseAudioTrace;
+    delete video.volume;
+    delete globalThis.__kirinukiPreciseAudioTrace;
+    return {
+      ...trace,
+      finishedAt: video.currentTime,
+      finalVolume: video.volume,
+      paused: video.paused
+    };
+  `);
+  const preciseAudioEnter = preciseAudioPreviewClock.transitions.find(
+    (transition) => transition.volume === 0
+  );
+  const preciseAudioExit = preciseAudioPreviewClock.transitions.find(
+    (transition) => (
+      transition.volume === 1 &&
+      transition.currentTime >= preciseAudioPreviewStartSeconds
+    )
+  );
+  assert(
+    preciseAudioEnter &&
+      preciseAudioEnter.currentTime >= preciseAudioPreviewStartSeconds - 0.02 &&
+      preciseAudioEnter.currentTime <= preciseAudioPreviewStartSeconds + 0.05,
+    `120ms 음소거 진입이 50ms 안에 적용되지 않았습니다: ${JSON.stringify({
+      preciseAudioPreviewStartSeconds,
+      preciseAudioPreviewClock
+    })}`
+  );
+  assert(
+    preciseAudioExit &&
+      preciseAudioExit.currentTime >= preciseAudioPreviewEndSeconds - 0.02 &&
+      preciseAudioExit.currentTime <= preciseAudioPreviewEndSeconds + 0.05,
+    `120ms 음소거 해제가 50ms 안에 적용되지 않았습니다: ${JSON.stringify({
+      preciseAudioPreviewEndSeconds,
+      preciseAudioPreviewClock
+    })}`
+  );
   await contextClickElement(`.audio-block[data-id="${audioRegionId}"]`);
   await waitUntil(
     () => executeSync(`return document.querySelector("#context-delete-audio")?.hidden === false;`),
@@ -1628,6 +2051,18 @@ async function main() {
     simultaneousCueLane: simultaneousCue.lane,
     simultaneousOverlayCount,
     audioGain: quietAudioProject.audioRegions[0]?.gain,
+    preciseAudioPreviewClock: {
+      region: {
+        startOffsetMs: preciseAudioRegion.startOffsetMs,
+        endOffsetMs: preciseAudioRegion.endOffsetMs,
+        gain: preciseAudioRegion.gain
+      },
+      expected: {
+        startSeconds: preciseAudioPreviewStartSeconds,
+        endSeconds: preciseAudioPreviewEndSeconds
+      },
+      trace: preciseAudioPreviewClock
+    },
     asset: {
       id: imageAssetId,
       ui: assetUi,
@@ -1706,9 +2141,54 @@ async function main() {
       rollbackCueBefore.text === EDITED_TEXT,
     "clip trim round-trip 전 human cue fixture가 없습니다."
   );
+  const liveClipTrimProbeSetup = await executeSync(`
+    const cue = document.querySelector('.cue-block[data-id="' + arguments[0] + '"]');
+    globalThis.__kirinukiE2eLiveClipTrimGeometry = [];
+    globalThis.__kirinukiE2eLiveClipTrimObserver?.disconnect();
+    globalThis.__kirinukiE2eLiveClipTrimObserver = new MutationObserver(() => {
+      globalThis.__kirinukiE2eLiveClipTrimGeometry.push({
+        left: cue?.style.left || null,
+        width: cue?.style.width || null,
+        hidden: cue?.hidden ?? null
+      });
+    });
+    if (cue) {
+      globalThis.__kirinukiE2eLiveClipTrimObserver.observe(cue, {
+        attributes: true,
+        attributeFilter: ["style", "hidden"]
+      });
+    }
+    return {
+      ready: Boolean(cue),
+      left: cue?.style.left || null,
+      width: cue?.style.width || null,
+      hidden: cue?.hidden ?? null
+    };
+  `, [cueId]);
+  assert(
+    liveClipTrimProbeSetup.ready,
+    `clip trim 중 자막 geometry probe를 준비하지 못했습니다: ${JSON.stringify(liveClipTrimProbeSetup)}`
+  );
   const clipTrimRoundTrip = await pointerDrag(
     '.clip-block[data-id="clip-selection-a"] .trim-handle.left',
     [{ x: 160, y: 0, duration: 180 }, { x: -160, y: 0, duration: 180 }]
+  );
+  await delay(50);
+  const liveClipTrimGeometry = await executeSync(`
+    globalThis.__kirinukiE2eLiveClipTrimObserver?.disconnect();
+    delete globalThis.__kirinukiE2eLiveClipTrimObserver;
+    return globalThis.__kirinukiE2eLiveClipTrimGeometry || [];
+  `);
+  assert(
+    liveClipTrimGeometry.some((entry) => (
+      entry.hidden ||
+      entry.left !== liveClipTrimProbeSetup.left ||
+      entry.width !== liveClipTrimProbeSetup.width
+    )),
+    `clip 손잡이 drag 중 자막 geometry가 영상과 함께 갱신되지 않았습니다: ${JSON.stringify({
+      before: liveClipTrimProbeSetup,
+      changes: liveClipTrimGeometry
+    })}`
   );
   const roundTripDown = clipTrimRoundTrip.trace.find((event) => event.type === "down");
   const roundTripMoves = clipTrimRoundTrip.trace.filter((event) => event.type === "move");
@@ -2588,13 +3068,24 @@ async function main() {
         after: cueHandleNudgeAfter
       },
       reorderKeyboardFocus,
+      rippleRange: {
+        toolbar: toolbarRange,
+        handleBeforeDrag: rangeHandleBeforeDrag,
+        endAfterNudge: rangeEndAfterNudge,
+        deletedRange: deleteRange,
+        cueTimelineStartBefore: rangeCueTimelineStartBefore,
+        cueTimelineStartAfter: rippleMovedCueTimelineStart,
+        inputEscape: inputEscapeRange,
+        uiAfterDelete: rangeUiAfterDelete
+      },
       clipTrimRoundTrip: {
         moves: clipTrimRoundTrip.moves,
         down: roundTripDown,
         maxX: Math.max(...roundTripMoves.map((event) => event.x)),
         up: roundTripUp,
         cueBefore: rollbackCueBefore,
-        cueAfter: rollbackCueAfter
+        cueAfter: rollbackCueAfter,
+        liveCueGeometry: liveClipTrimGeometry
       },
       persistentErrorToast,
       aiDialog: {

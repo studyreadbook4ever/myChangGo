@@ -179,6 +179,30 @@ function reflowClips(clips = []) {
     return normalized;
   });
 }
+function normalizeSuppressedSelection(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const selectionId = String(raw.selectionId || "").trim();
+  const requestedStartMs = Number(raw.selectionStartMs);
+  const requestedEndMs = Number(raw.selectionEndMs);
+  if (!selectionId || !Number.isFinite(requestedStartMs) || !Number.isFinite(requestedEndMs)) {
+    return null;
+  }
+  const selectionStartMs = Math.max(0, Math.round(requestedStartMs));
+  const selectionEndMs = Math.round(requestedEndMs);
+  if (selectionEndMs - selectionStartMs < MIN_CLIP_DURATION_MS) {
+    return null;
+  }
+  return {
+    ...raw,
+    selectionId,
+    selectionStartMs,
+    selectionEndMs,
+    createdAt: raw.createdAt || nowIso(),
+    updatedAt: raw.updatedAt || raw.createdAt || nowIso()
+  };
+}
 function createEditorProjectFromCapture(captureState = {}, {
   id = captureProjectId(captureState),
   createdAt = nowIso()
@@ -193,6 +217,7 @@ function createEditorProjectFromCapture(captureState = {}, {
     broadcastSession: createBroadcastSession(source),
     mediaAsset: null,
     clips,
+    suppressedSelections: [],
     imageAssets: [],
     subtitles: [],
     subtitleLaneCount: MIN_SUBTITLE_LANES,
@@ -243,6 +268,15 @@ function normalizeEditorProject(raw) {
     createdAt: raw.createdAt || nowIso()
   });
   const clipIds = new Set(clips.map((clip) => clip.id));
+  const clipSelectionIds = new Set(clips.map((clip) => clip.selectionId));
+  const suppressedBySelectionId = /* @__PURE__ */ new Map();
+  (Array.isArray(raw.suppressedSelections) ? raw.suppressedSelections : []).forEach((entry) => {
+    const suppressed = normalizeSuppressedSelection(entry);
+    if (suppressed && !clipSelectionIds.has(suppressed.selectionId)) {
+      suppressedBySelectionId.set(suppressed.selectionId, suppressed);
+    }
+  });
+  const suppressedSelections = [...suppressedBySelectionId.values()];
   const rawSubtitles = (Array.isArray(raw.subtitles) ? raw.subtitles : []).filter((cue) => cue && clipIds.has(cue.clipId));
   const subtitleColor = normalizeHexColor(
     raw.subtitleDefaults?.color,
@@ -311,6 +345,7 @@ function normalizeEditorProject(raw) {
       redo: Array.isArray(raw.history?.redo) ? raw.history.redo : []
     },
     clips,
+    suppressedSelections,
     subtitles,
     subtitleLaneCount,
     audioRegions,
@@ -322,7 +357,20 @@ function normalizeEditorProject(raw) {
 function mergeCaptureIntoEditorProject(project2, captureState = {}) {
   const normalized = normalizeEditorProject(project2) || createEditorProjectFromCapture(captureState);
   const alignmentOffsetMs = Math.round(finiteNumber(normalized.broadcastSession?.alignmentOffsetMs));
-  const incomingClips = (captureState.segments || []).map(segmentToClip).map((clip) => {
+  const capturedIncomingClips = (captureState.segments || []).map(segmentToClip);
+  const capturedIncomingBySelection = new Map(
+    capturedIncomingClips.map((clip) => [clip.selectionId, clip])
+  );
+  const suppressedSelections = (normalized.suppressedSelections || []).filter((suppressed) => {
+    const incoming = capturedIncomingBySelection.get(suppressed.selectionId);
+    return Boolean(
+      incoming && incoming.selectionStartMs === suppressed.selectionStartMs && incoming.selectionEndMs === suppressed.selectionEndMs
+    );
+  });
+  const suppressedSelectionIds = new Set(
+    suppressedSelections.map((suppressed) => suppressed.selectionId)
+  );
+  const incomingClips = capturedIncomingClips.filter((clip) => !suppressedSelectionIds.has(clip.selectionId)).map((clip) => {
     const sourceStartMs = clip.selectionStartMs + alignmentOffsetMs;
     const sourceEndMs = clip.selectionEndMs + alignmentOffsetMs;
     if (sourceStartMs < 0 || sourceEndMs <= sourceStartMs) {
@@ -338,35 +386,91 @@ function mergeCaptureIntoEditorProject(project2, captureState = {}) {
   });
   const incomingBySelection = new Map(incomingClips.map((clip) => [clip.selectionId, clip]));
   const existingSelectionIds = new Set(normalized.clips.map((clip) => clip.selectionId));
-  const retainedClips = normalized.clips.flatMap((existing) => {
-    const incoming = incomingBySelection.get(existing.selectionId);
+  const existingBySelection = /* @__PURE__ */ new Map();
+  normalized.clips.forEach((clip) => {
+    const group = existingBySelection.get(clip.selectionId) || [];
+    group.push(clip);
+    existingBySelection.set(clip.selectionId, group);
+  });
+  const retainedByClipId = /* @__PURE__ */ new Map();
+  const replacementBySelection = /* @__PURE__ */ new Map();
+  existingBySelection.forEach((existingGroup, selectionId) => {
+    const incoming = incomingBySelection.get(selectionId);
     if (!incoming) {
-      return [];
+      return;
     }
-    const previousSelectionStartMs = Math.round(finiteNumber(
-      existing.selectionStartMs,
-      existing.sourceStartMs - alignmentOffsetMs
-    ));
-    const previousSelectionEndMs = Math.round(finiteNumber(
-      existing.selectionEndMs,
-      existing.sourceEndMs - alignmentOffsetMs
-    ));
-    const stillAtCapturedBoundary = existing.sourceStartMs === previousSelectionStartMs + alignmentOffsetMs && existing.sourceEndMs === previousSelectionEndMs + alignmentOffsetMs;
-    const capturedBoundaryUnchanged = previousSelectionStartMs === incoming.selectionStartMs && previousSelectionEndMs === incoming.selectionEndMs;
-    const overlapStartMs = Math.max(existing.sourceStartMs, incoming.sourceStartMs);
-    const overlapEndMs = Math.min(existing.sourceEndMs, incoming.sourceEndMs);
-    const canPreserveTrim = !stillAtCapturedBoundary && overlapEndMs - overlapStartMs >= MIN_CLIP_DURATION_MS;
-    return [{
+    const capturedBoundaryUnchanged = existingGroup.every((existing) => {
+      const previousSelectionStartMs = Math.round(finiteNumber(
+        existing.selectionStartMs,
+        existing.sourceStartMs - alignmentOffsetMs
+      ));
+      const previousSelectionEndMs = Math.round(finiteNumber(
+        existing.selectionEndMs,
+        existing.sourceEndMs - alignmentOffsetMs
+      ));
+      return previousSelectionStartMs === incoming.selectionStartMs && previousSelectionEndMs === incoming.selectionEndMs;
+    });
+    const retainedGroup = existingGroup.flatMap((existing) => {
+      const previousSelectionStartMs = Math.round(finiteNumber(
+        existing.selectionStartMs,
+        existing.sourceStartMs - alignmentOffsetMs
+      ));
+      const previousSelectionEndMs = Math.round(finiteNumber(
+        existing.selectionEndMs,
+        existing.sourceEndMs - alignmentOffsetMs
+      ));
+      const stillAtCapturedBoundary = existing.sourceStartMs === previousSelectionStartMs + alignmentOffsetMs && existing.sourceEndMs === previousSelectionEndMs + alignmentOffsetMs;
+      const overlapStartMs = Math.max(existing.sourceStartMs, incoming.sourceStartMs);
+      const overlapEndMs = Math.min(existing.sourceEndMs, incoming.sourceEndMs);
+      const canPreserveTrim = overlapEndMs - overlapStartMs >= MIN_CLIP_DURATION_MS && (existingGroup.length > 1 || !stillAtCapturedBoundary);
+      if (!capturedBoundaryUnchanged && !canPreserveTrim) {
+        return [];
+      }
+      return [{
+        ...incoming,
+        ...existing,
+        sourceStartMs: capturedBoundaryUnchanged ? existing.sourceStartMs : overlapStartMs,
+        sourceEndMs: capturedBoundaryUnchanged ? existing.sourceEndMs : overlapEndMs,
+        selectionStartMs: incoming.selectionStartMs,
+        selectionEndMs: incoming.selectionEndMs,
+        note: incoming.note,
+        capture: incoming.capture,
+        updatedAt: nowIso()
+      }];
+    });
+    if (retainedGroup.length > 0) {
+      retainedGroup.forEach((clip) => retainedByClipId.set(clip.id, clip));
+      return;
+    }
+    const [firstExisting] = existingGroup;
+    replacementBySelection.set(selectionId, {
       ...incoming,
-      ...existing,
-      sourceStartMs: capturedBoundaryUnchanged ? existing.sourceStartMs : canPreserveTrim ? overlapStartMs : incoming.sourceStartMs,
-      sourceEndMs: capturedBoundaryUnchanged ? existing.sourceEndMs : canPreserveTrim ? overlapEndMs : incoming.sourceEndMs,
+      ...firstExisting,
+      sourceStartMs: incoming.sourceStartMs,
+      sourceEndMs: incoming.sourceEndMs,
       selectionStartMs: incoming.selectionStartMs,
       selectionEndMs: incoming.selectionEndMs,
       note: incoming.note,
       capture: incoming.capture,
       updatedAt: nowIso()
-    }];
+    });
+  });
+  const emittedReplacements = /* @__PURE__ */ new Set();
+  const retainedClips = normalized.clips.flatMap((existing) => {
+    const incoming = incomingBySelection.get(existing.selectionId);
+    if (!incoming) {
+      return [];
+    }
+    const retained = retainedByClipId.get(existing.id);
+    if (retained) {
+      return [retained];
+    }
+    const replacement = replacementBySelection.get(existing.selectionId);
+    if (!replacement || emittedReplacements.has(existing.selectionId)) {
+      return [];
+    }
+    emittedReplacements.add(existing.selectionId);
+    return [replacement];
   });
   const nextClips = [
     ...retainedClips,
@@ -436,6 +540,8 @@ function mergeCaptureIntoEditorProject(project2, captureState = {}) {
   });
   const source = { ...normalized.source, ...captureState.source || {} };
   const incomingSession = createBroadcastSession(source);
+  const previouslySelectedClip = normalized.clips.find((clip) => clip.id === normalized.selectedClipId);
+  const nextSelectedClipId = nextClipIds.has(normalized.selectedClipId) ? normalized.selectedClipId : nextClips.find((clip) => clip.selectionId === previouslySelectedClip?.selectionId)?.id || nextClips[0]?.id || null;
   return {
     ...normalized,
     name: captureState.projectName || normalized.name,
@@ -450,10 +556,11 @@ function mergeCaptureIntoEditorProject(project2, captureState = {}) {
       alignmentConfirmed: normalized.broadcastSession?.alignmentConfirmed || source.contentType === "vod"
     },
     clips: reflowedClips,
+    suppressedSelections,
     subtitles,
     audioRegions,
     imageAssets,
-    selectedClipId: nextClipIds.has(normalized.selectedClipId) ? normalized.selectedClipId : nextClips[0]?.id || null,
+    selectedClipId: nextSelectedClipId,
     selectedCueId: subtitles.some((cue) => cue.id === normalized.selectedCueId) ? normalized.selectedCueId : null,
     selectedImageAssetId: imageAssets.some((asset) => asset.id === normalized.selectedImageAssetId) ? normalized.selectedImageAssetId : null,
     selectedAudioRegionId: audioRegions.some((region) => region.id === normalized.selectedAudioRegionId) ? normalized.selectedAudioRegionId : null,
@@ -1106,6 +1213,232 @@ function updateClipTrim(project2, clipId, {
     selectedAudioRegionId,
     selectedImageAssetId,
     updatedAt: nowIso()
+  };
+}
+function rippleDeleteTimelineRange(project2, {
+  startMs,
+  endMs
+} = {}) {
+  const numericStartMs = Number(startMs);
+  const numericEndMs = Number(endMs);
+  if (!Number.isFinite(numericStartMs) || !Number.isFinite(numericEndMs)) {
+    throw new TypeError("\uC0AD\uC81C\uD560 \uD0C0\uC784\uB77C\uC778 \uAD6C\uAC04\uC758 \uC2DC\uC791\uACFC \uB05D \uC2DC\uAC01\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.");
+  }
+  const start = Math.round(numericStartMs);
+  const end = Math.round(numericEndMs);
+  const duration = projectDurationMs(project2);
+  if (start < 0 || end > duration || end - start < MIN_CLIP_DURATION_MS) {
+    throw new RangeError(
+      "\uC0AD\uC81C \uAD6C\uAC04\uC740 \uD0C0\uC784\uB77C\uC778 \uC548\uC5D0\uC11C 0.1\uCD08 \uC774\uC0C1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4."
+    );
+  }
+  const timestamp = nowIso();
+  const usedClipIds = new Set((project2.clips || []).map((clip) => clip.id));
+  const makeUniqueClipId = () => {
+    let id = makeId("clip");
+    while (usedClipIds.has(id)) {
+      id = makeId("clip");
+    }
+    usedClipIds.add(id);
+    return id;
+  };
+  const slicesByClipId = /* @__PURE__ */ new Map();
+  const nextClips = [];
+  for (const clip of project2.clips || []) {
+    const clipDuration = clipDurationMs(clip);
+    const slices = [];
+    const appendSlice = (oldStartOffsetMs, oldEndOffsetMs, {
+      changed = true
+    } = {}) => {
+      const sliceIndex = slices.length;
+      const id = sliceIndex === 0 ? clip.id : makeUniqueClipId();
+      const nextClip = changed ? {
+        ...clip,
+        id,
+        sourceStartMs: clip.sourceStartMs + oldStartOffsetMs,
+        sourceEndMs: clip.sourceStartMs + oldEndOffsetMs,
+        createdAt: id === clip.id ? clip.createdAt : timestamp,
+        updatedAt: timestamp
+      } : clip;
+      slices.push({
+        oldStartOffsetMs,
+        oldEndOffsetMs,
+        nextClip
+      });
+      nextClips.push(nextClip);
+    };
+    if (clip.enabled === false) {
+      appendSlice(0, clipDuration, { changed: false });
+      slicesByClipId.set(clip.id, slices);
+      continue;
+    }
+    const clipTimelineStartMs = clip.timelineStartMs;
+    const clipTimelineEndMs = clipTimelineStartMs + clipDuration;
+    const overlapStartMs = Math.max(start, clipTimelineStartMs);
+    const overlapEndMs = Math.min(end, clipTimelineEndMs);
+    if (overlapEndMs <= overlapStartMs) {
+      appendSlice(0, clipDuration, { changed: false });
+      slicesByClipId.set(clip.id, slices);
+      continue;
+    }
+    const localDeleteStartMs = overlapStartMs - clipTimelineStartMs;
+    const localDeleteEndMs = overlapEndMs - clipTimelineStartMs;
+    const keptRanges = [
+      [0, localDeleteStartMs],
+      [localDeleteEndMs, clipDuration]
+    ].filter(([rangeStartMs2, rangeEndMs2]) => rangeEndMs2 > rangeStartMs2);
+    const tooShort = keptRanges.find(([rangeStartMs2, rangeEndMs2]) => rangeEndMs2 - rangeStartMs2 < MIN_CLIP_DURATION_MS);
+    if (tooShort) {
+      throw new RangeError(
+        "\uC0AD\uC81C \uB4A4 \uB0A8\uB294 \uC601\uC0C1 \uC870\uAC01\uC740 \uAC01\uAC01 0.1\uCD08 \uC774\uC0C1\uC774\uC5B4\uC57C \uD569\uB2C8\uB2E4."
+      );
+    }
+    keptRanges.forEach(([rangeStartMs2, rangeEndMs2]) => {
+      appendSlice(rangeStartMs2, rangeEndMs2);
+    });
+    slicesByClipId.set(clip.id, slices);
+  }
+  const clips = reflowClips(nextClips);
+  const reflowedByClipId = new Map(clips.map((clip) => [clip.id, clip]));
+  slicesByClipId.forEach((slices) => {
+    slices.forEach((slice) => {
+      slice.nextClip = reflowedByClipId.get(slice.nextClip.id);
+    });
+  });
+  const remapTimedItems = (items, {
+    idPrefix,
+    normalize,
+    patchFragment = () => ({})
+  }) => (items || []).flatMap((item) => {
+    const slices = slicesByClipId.get(item.clipId) || [];
+    const fragments = slices.flatMap((slice) => {
+      const overlapStartMs = Math.max(item.startOffsetMs, slice.oldStartOffsetMs);
+      const overlapEndMs = Math.min(item.endOffsetMs, slice.oldEndOffsetMs);
+      if (overlapEndMs - overlapStartMs < MIN_CUE_DURATION_MS) {
+        return [];
+      }
+      return [{
+        slice,
+        overlapStartMs,
+        overlapEndMs,
+        startOffsetMs: overlapStartMs - slice.oldStartOffsetMs,
+        endOffsetMs: overlapEndMs - slice.oldStartOffsetMs
+      }];
+    });
+    return fragments.flatMap((fragment, fragmentIndex) => {
+      const preserveId = fragmentIndex === 0;
+      const unchanged = fragments.length === 1 && fragment.slice.nextClip.id === item.clipId && fragment.startOffsetMs === item.startOffsetMs && fragment.endOffsetMs === item.endOffsetMs;
+      if (unchanged) {
+        return [item];
+      }
+      const raw = {
+        ...item,
+        ...patchFragment(item, fragment),
+        id: preserveId ? item.id : makeId(idPrefix),
+        clipId: fragment.slice.nextClip.id,
+        startOffsetMs: fragment.startOffsetMs,
+        endOffsetMs: fragment.endOffsetMs,
+        createdAt: preserveId ? item.createdAt : timestamp,
+        updatedAt: timestamp
+      };
+      const normalized = normalize(raw, fragment.slice.nextClip);
+      return normalized ? [normalized] : [];
+    });
+  });
+  const subtitles = remapTimedItems(project2.subtitles, {
+    idPrefix: "cue",
+    normalize: (cue, clip) => normalizeSubtitleCue(
+      cue,
+      clip,
+      project2.subtitleLaneCount ?? MIN_SUBTITLE_LANES
+    )
+  });
+  const imageAssets = remapTimedItems(project2.imageAssets, {
+    idPrefix: "asset",
+    normalize: normalizeImageAsset
+  });
+  const audioRegions = remapTimedItems(project2.audioRegions, {
+    idPrefix: "audio",
+    normalize: normalizeAudioRegion,
+    patchFragment: (region, fragment) => ({
+      fadeInMs: fragment.overlapStartMs === region.startOffsetMs ? region.fadeInMs : 0,
+      fadeOutMs: fragment.overlapEndMs === region.endOffsetMs ? region.fadeOutMs : 0
+    })
+  });
+  const previousPlayheadMs = clamp(
+    Math.round(finiteNumber(project2.playheadMs)),
+    0,
+    duration
+  );
+  const deletedDurationMs = end - start;
+  const playheadMs = clamp(
+    previousPlayheadMs <= start ? previousPlayheadMs : previousPlayheadMs < end ? start : previousPlayheadMs - deletedDurationMs,
+    0,
+    projectDurationMs({ clips })
+  );
+  const projectWithClips = { ...project2, clips };
+  const selectedClipId = clips.some((clip) => clip.id === project2.selectedClipId) ? project2.selectedClipId : mapTimelineToSource(projectWithClips, playheadMs)?.clipId || clips[0]?.id || null;
+  const survivingSelectionIds = new Set(clips.map((clip) => clip.selectionId));
+  const suppressedBySelectionId = /* @__PURE__ */ new Map();
+  for (const entry of project2.suppressedSelections || []) {
+    const suppressed = normalizeSuppressedSelection(entry);
+    if (suppressed && !survivingSelectionIds.has(suppressed.selectionId)) {
+      suppressedBySelectionId.set(suppressed.selectionId, suppressed);
+    }
+  }
+  const previousClipsBySelection = /* @__PURE__ */ new Map();
+  for (const clip of project2.clips || []) {
+    const selectionId = String(clip.selectionId || "").trim();
+    if (!selectionId) {
+      continue;
+    }
+    const group = previousClipsBySelection.get(selectionId) || [];
+    group.push(clip);
+    previousClipsBySelection.set(selectionId, group);
+  }
+  const alignmentOffsetMs = Math.round(finiteNumber(
+    project2.broadcastSession?.alignmentOffsetMs
+  ));
+  previousClipsBySelection.forEach((previousClips, selectionId) => {
+    if (survivingSelectionIds.has(selectionId)) {
+      suppressedBySelectionId.delete(selectionId);
+      return;
+    }
+    const [representative] = previousClips;
+    const previous = suppressedBySelectionId.get(selectionId);
+    const suppressed = normalizeSuppressedSelection({
+      ...previous,
+      selectionId,
+      selectionStartMs: Math.round(finiteNumber(
+        representative.selectionStartMs,
+        representative.sourceStartMs - alignmentOffsetMs
+      )),
+      selectionEndMs: Math.round(finiteNumber(
+        representative.selectionEndMs,
+        representative.sourceEndMs - alignmentOffsetMs
+      )),
+      note: representative.note,
+      createdAt: previous?.createdAt || timestamp,
+      updatedAt: timestamp
+    });
+    if (suppressed) {
+      suppressedBySelectionId.set(selectionId, suppressed);
+    }
+  });
+  const suppressedSelections = [...suppressedBySelectionId.values()];
+  return {
+    ...project2,
+    clips,
+    suppressedSelections,
+    subtitles,
+    imageAssets,
+    audioRegions,
+    selectedClipId,
+    selectedCueId: subtitles.some((cue) => cue.id === project2.selectedCueId) ? project2.selectedCueId : null,
+    selectedImageAssetId: imageAssets.some((asset) => asset.id === project2.selectedImageAssetId) ? project2.selectedImageAssetId : null,
+    selectedAudioRegionId: audioRegions.some((region) => region.id === project2.selectedAudioRegionId) ? project2.selectedAudioRegionId : null,
+    playheadMs,
+    updatedAt: timestamp
   };
 }
 function reorderClip(project2, clipId, toIndex) {
@@ -32529,6 +32862,10 @@ var elements = Object.fromEntries([
   "audio-fade-out-value",
   "reset-audio-region",
   "delete-audio-region",
+  "set-range-start",
+  "set-range-end",
+  "clear-range",
+  "delete-range",
   "add-audio-region",
   "paste-image-asset",
   "add-cue",
@@ -32543,8 +32880,15 @@ var elements = Object.fromEntries([
   "asset-track",
   "audio-track",
   "caption-tracks",
+  "timeline-range-selection",
+  "timeline-range-summary",
+  "range-start-handle",
+  "range-end-handle",
   "playhead",
   "timeline-context-menu",
+  "context-set-range-start",
+  "context-set-range-end",
+  "context-delete-range",
   "context-add-cue",
   "context-paste-asset",
   "context-pick-asset",
@@ -32594,6 +32938,11 @@ var propertyInspectorMode = "caption";
 var previewVolume = 1;
 var previewMuted = false;
 var timelineContext = null;
+var rangeStartMs = null;
+var rangeEndMs = null;
+var rangeHandleDragActive = false;
+var liveTimelineGeometryFrame = null;
+var previewAudioClockTimer = null;
 var pendingAssetTimelineMs = null;
 var imageAssetRenderSequence = 0;
 var imageAssetObjectUrls = /* @__PURE__ */ new Map();
@@ -32604,6 +32953,8 @@ var MAX_IMAGE_ASSET_PIXELS = 4e7;
 var ASSET_TRACK_BASE_HEIGHT_PX = 54;
 var ASSET_SUBROW_STRIDE_PX = 47;
 var ASSET_BLOCK_TOP_PX = 7;
+var MIN_TIMELINE_RANGE_MS = 100;
+var PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
 var ALLOWED_IMAGE_ASSET_TYPES = /* @__PURE__ */ new Set([
   "image/png",
   "image/jpeg",
@@ -32770,9 +33121,15 @@ function applyProject(next, {
 }
 function lockProjectMutations() {
   projectMutationLockCount += 1;
+  if (project) {
+    renderTimelineRange();
+  }
 }
 function unlockProjectMutations() {
   projectMutationLockCount = Math.max(0, projectMutationLockCount - 1);
+  if (project) {
+    renderTimelineRange();
+  }
   if (projectMutationLockCount === 0) {
     flushPendingCaptureSeed();
   }
@@ -32814,6 +33171,7 @@ function undo() {
   }
   redoStack.push(cloneProject(project));
   project = previous;
+  clearTimelineRangeSelection({ render: false });
   renderAll();
   scheduleSave();
   void syncPreviewToPlayhead();
@@ -32826,6 +33184,7 @@ function redo() {
   }
   undoStack.push(cloneProject(project));
   project = next;
+  clearTimelineRangeSelection({ render: false });
   renderAll();
   scheduleSave();
   void syncPreviewToPlayhead();
@@ -33120,6 +33479,243 @@ function timelineWidth() {
 function timelineX(milliseconds) {
   return milliseconds / 1e3 * pixelsPerSecond;
 }
+function clampTimelineMs(milliseconds) {
+  return Math.max(
+    0,
+    Math.min(projectDurationMs(project), Math.round(Number(milliseconds) || 0))
+  );
+}
+function selectedTimelineRange() {
+  if (!Number.isFinite(rangeStartMs) || !Number.isFinite(rangeEndMs)) {
+    return null;
+  }
+  const startMs = Math.min(rangeStartMs, rangeEndMs);
+  const endMs = Math.max(rangeStartMs, rangeEndMs);
+  return endMs - startMs >= MIN_TIMELINE_RANGE_MS ? { startMs, endMs } : null;
+}
+function renderTimelineRange() {
+  if (!project) {
+    return;
+  }
+  const durationMs = projectDurationMs(project);
+  if (Number.isFinite(rangeStartMs)) {
+    rangeStartMs = Math.max(0, Math.min(durationMs, Math.round(rangeStartMs)));
+  }
+  if (Number.isFinite(rangeEndMs)) {
+    rangeEndMs = Math.max(0, Math.min(durationMs, Math.round(rangeEndMs)));
+  }
+  const hasStart = Number.isFinite(rangeStartMs);
+  const hasEnd = Number.isFinite(rangeEndMs);
+  const rawRange = hasStart && hasEnd ? {
+    startMs: Math.min(rangeStartMs, rangeEndMs),
+    endMs: Math.max(rangeStartMs, rangeEndMs)
+  } : null;
+  const range = selectedTimelineRange();
+  const anchorMs = rawRange?.startMs ?? (hasStart ? rangeStartMs : rangeEndMs);
+  const endMs = rawRange?.endMs ?? anchorMs;
+  elements.set_range_start.classList.toggle("active", hasStart);
+  elements.set_range_start.setAttribute("aria-pressed", String(hasStart));
+  elements.set_range_start.disabled = durationMs === 0;
+  elements.set_range_end.classList.toggle("active", hasEnd);
+  elements.set_range_end.setAttribute("aria-pressed", String(hasEnd));
+  elements.set_range_end.disabled = durationMs === 0;
+  elements.clear_range.hidden = !hasStart && !hasEnd;
+  elements.delete_range.disabled = !range || projectMutationLockCount > 0 || pointerEditActive || rangeHandleDragActive;
+  elements.timeline_range_selection.hidden = !hasStart && !hasEnd;
+  elements.timeline_range_selection.classList.toggle("valid", Boolean(range));
+  elements.timeline_range_selection.style.left = `${timelineX(anchorMs || 0)}px`;
+  elements.timeline_range_selection.style.width = `${timelineX(Math.max(0, (endMs || 0) - (anchorMs || 0)))}px`;
+  elements.range_start_handle.hidden = !hasStart;
+  elements.range_end_handle.hidden = !hasEnd;
+  const updateHandle = (handle, valueMs, minimumMs, maximumMs) => {
+    handle.setAttribute("aria-valuemin", String(Math.max(0, minimumMs) / 1e3));
+    handle.setAttribute("aria-valuemax", String(Math.max(minimumMs, maximumMs) / 1e3));
+    handle.setAttribute("aria-valuenow", String((valueMs || 0) / 1e3));
+    handle.setAttribute("aria-valuetext", formatTime(valueMs || 0));
+  };
+  updateHandle(
+    elements.range_start_handle,
+    rawRange?.startMs ?? rangeStartMs,
+    0,
+    range ? Math.max(0, range.endMs - MIN_TIMELINE_RANGE_MS) : durationMs
+  );
+  updateHandle(
+    elements.range_end_handle,
+    rawRange?.endMs ?? rangeEndMs,
+    range ? Math.min(durationMs, range.startMs + MIN_TIMELINE_RANGE_MS) : 0,
+    durationMs
+  );
+  elements.timeline_range_summary.hidden = !rawRange;
+  elements.timeline_range_summary.textContent = range ? `${formatTime(range.startMs, { compact: true })}\u2013${formatTime(range.endMs, { compact: true })} \xB7 ${formatDuration(range.endMs - range.startMs)} \uC0AD\uC81C` : rawRange ? `${formatDuration(rawRange.endMs - rawRange.startMs)} \xB7 0.1\uCD08 \uC774\uC0C1 \uD544\uC694` : "";
+}
+function setTimelineRangeBoundary(side, milliseconds, {
+  constrain = false
+} = {}) {
+  let valueMs = clampTimelineMs(milliseconds);
+  if (side === "start") {
+    if (constrain && Number.isFinite(rangeEndMs)) {
+      valueMs = Math.min(valueMs, Math.max(0, rangeEndMs - MIN_TIMELINE_RANGE_MS));
+    }
+    rangeStartMs = valueMs;
+  } else {
+    if (constrain && Number.isFinite(rangeStartMs)) {
+      valueMs = Math.max(valueMs, Math.min(projectDurationMs(project), rangeStartMs + MIN_TIMELINE_RANGE_MS));
+    }
+    rangeEndMs = valueMs;
+  }
+  if (!constrain && Number.isFinite(rangeStartMs) && Number.isFinite(rangeEndMs) && rangeStartMs > rangeEndMs) {
+    [rangeStartMs, rangeEndMs] = [rangeEndMs, rangeStartMs];
+  }
+  renderTimelineRange();
+}
+function clearTimelineRangeSelection({ render = true } = {}) {
+  rangeStartMs = null;
+  rangeEndMs = null;
+  if (render) {
+    renderTimelineRange();
+  }
+}
+function nudgeTimelineRangeBoundary(side, deltaMs) {
+  const currentMs = side === "start" ? rangeStartMs : rangeEndMs;
+  if (!Number.isFinite(currentMs)) {
+    return;
+  }
+  setTimelineRangeBoundary(side, currentMs + deltaMs, { constrain: true });
+  const handle = side === "start" ? elements.range_start_handle : elements.range_end_handle;
+  handle.focus({ preventScroll: true });
+}
+function bindTimelineRangeHandle(handle, side, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  rangeHandleDragActive = true;
+  renderTimelineRange();
+  const pointerId = event.pointerId;
+  handle.setPointerCapture(pointerId);
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const rect = elements.timeline_content.getBoundingClientRect();
+    const timelineMs = (moveEvent.clientX - rect.left) / pixelsPerSecond * 1e3;
+    setTimelineRangeBoundary(side, timelineMs, { constrain: true });
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    rangeHandleDragActive = false;
+    renderTimelineRange();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+function deleteSelectedTimelineRange() {
+  const range = selectedTimelineRange();
+  if (!range) {
+    showToast("\uC0AD\uC81C\uD560 \uAD6C\uAC04\uC758 \uC2DC\uC791\uACFC \uB05D\uC744 0.1\uCD08 \uC774\uC0C1 \uBC8C\uB824 \uC9C0\uC815\uD574 \uC8FC\uC138\uC694.", "error");
+    return;
+  }
+  if (pointerEditActive || rangeHandleDragActive) {
+    showToast("\uC190\uC7A1\uC774 \uC870\uC815\uC744 \uB9C8\uCE5C \uB4A4 \uC120\uD0DD \uAD6C\uAC04\uC744 \uC0AD\uC81C\uD574 \uC8FC\uC138\uC694.", "error");
+    return;
+  }
+  if (projectMutationLockCount > 0) {
+    showToast("\uC9C4\uD589 \uC911\uC778 \uBBF8\uB514\uC5B4 \uC791\uC5C5\uC774 \uB05D\uB09C \uB4A4 \uAD6C\uAC04\uC744 \uC0AD\uC81C\uD574 \uC8FC\uC138\uC694.", "error");
+    return;
+  }
+  elements.preview_video.pause();
+  try {
+    let next = rippleDeleteTimelineRange(project, range);
+    const nextDurationMs = projectDurationMs(next);
+    const junctionMs = Math.min(range.startMs, nextDurationMs);
+    const mapping = mapTimelineToSource(next, junctionMs);
+    next = {
+      ...next,
+      playheadMs: junctionMs,
+      selectedClipId: mapping?.clipId || next.clips[0]?.id || null
+    };
+    clearTimelineRangeSelection({ render: false });
+    applyProject(next);
+    void syncPreviewToPlayhead();
+    showToast(
+      `${formatDuration(range.endMs - range.startMs)} \uAD6C\uAC04\uC744 \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4. Ctrl+Z\uB85C \uB418\uB3CC\uB9B4 \uC218 \uC788\uC2B5\uB2C8\uB2E4.`,
+      "success"
+    );
+  } catch (error) {
+    showToast(error.message, "error", 0);
+  }
+}
+function setTimedBlockGeometry(block, range) {
+  block.hidden = !range;
+  if (!range) {
+    return;
+  }
+  block.style.left = `${timelineX(range.startMs)}px`;
+  block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+}
+function syncLiveTimelineGeometry() {
+  liveTimelineGeometryFrame = null;
+  const width = timelineWidth();
+  const clipById = new Map(project.clips.map((clip) => [clip.id, clip]));
+  const cueById = new Map(project.subtitles.map((cue) => [cue.id, cue]));
+  const assetById = new Map((project.imageAssets || []).map((asset) => [asset.id, asset]));
+  const audioById = new Map(project.audioRegions.map((region) => [region.id, region]));
+  elements.timeline_content.style.width = `${width}px`;
+  elements.timeline_ruler.style.width = `${width}px`;
+  for (const track of [
+    elements.video_track,
+    elements.asset_track,
+    elements.audio_track,
+    ...elements.caption_tracks.querySelectorAll(".caption-track-row")
+  ]) {
+    track.style.width = `${width}px`;
+  }
+  for (const block of elements.video_track.querySelectorAll(".clip-block")) {
+    const clip = clipById.get(block.dataset.id);
+    setTimedBlockGeometry(block, clip && clip.enabled !== false ? {
+      startMs: clip.timelineStartMs,
+      endMs: clip.timelineStartMs + clipDurationMs(clip)
+    } : null);
+  }
+  for (const block of elements.audio_track.querySelectorAll(".audio-source-block")) {
+    const clip = clipById.get(block.dataset.clipId);
+    setTimedBlockGeometry(block, clip && clip.enabled !== false ? {
+      startMs: clip.timelineStartMs,
+      endMs: clip.timelineStartMs + clipDurationMs(clip)
+    } : null);
+  }
+  for (const block of elements.asset_track.querySelectorAll(".asset-block")) {
+    const asset = assetById.get(block.dataset.id);
+    setTimedBlockGeometry(block, asset ? imageAssetTimelineRange(project, asset) : null);
+  }
+  for (const block of elements.audio_track.querySelectorAll(".audio-block")) {
+    const region = audioById.get(block.dataset.id);
+    setTimedBlockGeometry(block, region ? audioRegionTimelineRange(project, region) : null);
+  }
+  for (const block of elements.caption_tracks.querySelectorAll(".cue-block")) {
+    const cue = cueById.get(block.dataset.id);
+    setTimedBlockGeometry(block, cue ? cueTimelineRange(project, cue) : null);
+  }
+  const durationMs = projectDurationMs(project);
+  const previewPlayheadMs = Math.max(0, Math.min(durationMs, project.playheadMs || 0));
+  elements.playhead.style.left = `${timelineX(previewPlayheadMs)}px`;
+  elements.current_time.textContent = formatTime(previewPlayheadMs);
+  elements.duration_time.textContent = `/ ${formatTime(durationMs)}`;
+  renderTimelineRange();
+}
+function scheduleLiveTimelineGeometry() {
+  if (liveTimelineGeometryFrame !== null) {
+    return;
+  }
+  liveTimelineGeometryFrame = requestAnimationFrame(syncLiveTimelineGeometry);
+}
 function layoutImageAssetSubrows(candidateProject) {
   const entries = (candidateProject.imageAssets || []).map((asset, assetIndex) => ({
     asset,
@@ -33205,10 +33801,18 @@ function beginPointerHistory() {
   if (!pointerEditActive) {
     pushUndo(cloneProject(project));
     pointerEditActive = true;
+    renderTimelineRange();
   }
 }
-function endPointerHistory() {
+function endPointerHistory({ clipStructureChanged = false } = {}) {
   pointerEditActive = false;
+  if (liveTimelineGeometryFrame !== null) {
+    cancelAnimationFrame(liveTimelineGeometryFrame);
+    liveTimelineGeometryFrame = null;
+  }
+  if (clipStructureChanged) {
+    clearTimelineRangeSelection({ render: false });
+  }
   renderAll({ keepScroll: true });
   scheduleSave();
   void syncPreviewToPlayhead();
@@ -33238,6 +33842,7 @@ function bindClipTrim(handle, clip, side, event) {
       block.style.left = `${timelineX(nextClip.timelineStartMs)}px`;
       block.style.width = `${Math.max(8, timelineX(clipDurationMs(nextClip)))}px`;
     }
+    scheduleLiveTimelineGeometry();
   };
   const finish = (finishEvent) => {
     if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
@@ -33249,7 +33854,7 @@ function bindClipTrim(handle, clip, side, event) {
     if (handle.hasPointerCapture(pointerId)) {
       handle.releasePointerCapture(pointerId);
     }
-    endPointerHistory();
+    endPointerHistory({ clipStructureChanged: true });
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", finish);
@@ -33483,6 +34088,7 @@ function renderTimeline({ keepScroll = false } = {}) {
       const maxDuration = project.mediaAsset?.durationMs || Infinity;
       const sourceStartMs = side === "left" ? Math.max(0, Math.min(current.sourceEndMs - 100, current.sourceStartMs + delta)) : current.sourceStartMs;
       const sourceEndMs = side === "right" ? Math.min(maxDuration, Math.max(current.sourceStartMs + 100, current.sourceEndMs + delta)) : current.sourceEndMs;
+      clearTimelineRangeSelection({ render: false });
       applyProject(
         updateClipTrim(project, clip.id, { sourceStartMs, sourceEndMs }),
         { render: false }
@@ -33719,6 +34325,7 @@ function renderTimeline({ keepScroll = false } = {}) {
     );
     (captionRows[cue.lane] || captionRows[0]).append(block);
   });
+  renderTimelineRange();
   updatePlayhead();
   if (keepScroll) {
     elements.timeline_scroll.scrollLeft = scrollLeft;
@@ -33839,18 +34446,40 @@ function renderSubtitleOverlay() {
     )}px`;
   });
 }
-function applyPreviewAudioSettings() {
+function previewTimelineMsFromVideoClock() {
+  const video = elements.preview_video;
+  if (!video || !project || !mediaFile || pendingPreviewSeek) {
+    return project?.playheadMs || 0;
+  }
+  const clip = project.clips.find((candidate) => candidate.id === activeClipId);
+  if (!clip) {
+    return project.playheadMs || 0;
+  }
+  const sourceMs = previewSecondsToSourceMs(video.currentTime);
+  return Math.max(
+    clip.timelineStartMs,
+    Math.min(
+      clip.timelineStartMs + clipDurationMs(clip),
+      clip.timelineStartMs + sourceMs - clip.sourceStartMs
+    )
+  );
+}
+function applyPreviewAudioSettings(timelineMs = project?.playheadMs || 0) {
   const video = elements.preview_video;
   if (!video || !project) {
     return;
   }
-  const region = audioRegionAtTimeline(project, project.playheadMs);
+  const targetTimelineMs = Math.max(
+    0,
+    Math.min(projectDurationMs(project), Number(timelineMs) || 0)
+  );
+  const region = audioRegionAtTimeline(project, targetTimelineMs);
   const targetGain = region?.muted ? 0 : region?.gain ?? 1;
   let blend = region ? 1 : 0;
   if (region) {
     const range = audioRegionTimelineRange(project, region);
-    const elapsedMs = Math.max(0, project.playheadMs - range.startMs);
-    const remainingMs = Math.max(0, range.endMs - project.playheadMs);
+    const elapsedMs = Math.max(0, targetTimelineMs - range.startMs);
+    const remainingMs = Math.max(0, range.endMs - targetTimelineMs);
     if (region.fadeInMs > 0) {
       blend = Math.min(blend, Math.min(1, elapsedMs / region.fadeInMs));
     }
@@ -33863,6 +34492,30 @@ function applyPreviewAudioSettings() {
   video.volume = Math.max(0, Math.min(1, previewVolume * regionGain));
   elements.toggle_mute.classList.toggle("active", previewMuted);
   elements.toggle_mute.title = region?.muted && !previewMuted ? "\uD604\uC7AC \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uC774 \uC74C\uC18C\uAC70\uB428" : previewMuted ? "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70 \uD574\uC81C" : "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70";
+}
+function stopPreviewAudioClock({ sync = true } = {}) {
+  if (previewAudioClockTimer !== null) {
+    clearTimeout(previewAudioClockTimer);
+    previewAudioClockTimer = null;
+  }
+  if (sync && project) {
+    applyPreviewAudioSettings(previewTimelineMsFromVideoClock());
+  }
+}
+function startPreviewAudioClock() {
+  if (previewAudioClockTimer !== null || elements.preview_video.paused) {
+    return;
+  }
+  const tick = () => {
+    previewAudioClockTimer = null;
+    if (elements.preview_video.paused || elements.preview_video.ended || !mediaFile) {
+      applyPreviewAudioSettings(previewTimelineMsFromVideoClock());
+      return;
+    }
+    applyPreviewAudioSettings(previewTimelineMsFromVideoClock());
+    previewAudioClockTimer = setTimeout(tick, PREVIEW_AUDIO_CLOCK_INTERVAL_MS);
+  };
+  tick();
 }
 function updatePlayhead() {
   const duration = projectDurationMs(project);
@@ -33881,6 +34534,7 @@ function updatePlayhead() {
 }
 function renderTransport() {
   const clip = mapTimelineToSource(project, project.playheadMs);
+  elements.preview_video.style.visibility = clip ? "" : "hidden";
   activeClipId = clip?.clipId || project.clips[0]?.id || null;
   elements.previous_clip.disabled = project.clips.length === 0;
   elements.next_clip.disabled = project.clips.length === 0;
@@ -35162,13 +35816,15 @@ function closeTimelineContextMenu() {
   timelineContext = null;
 }
 function openTimelineContextMenu(event) {
+  const clipBlock = event.target.closest(".clip-block");
   const cueBlock = event.target.closest(".cue-block");
   const assetBlock = event.target.closest(".asset-block");
   const audioBlock = event.target.closest(".audio-block");
   const captionRow = event.target.closest(".caption-track-row");
+  const inVideoTrack = Boolean(event.target.closest("#video-track"));
   const inAssetTrack = Boolean(event.target.closest("#asset-track"));
   const inAudioTrack = Boolean(event.target.closest("#audio-track"));
-  if (!cueBlock && !assetBlock && !audioBlock && !captionRow && !inAssetTrack && !inAudioTrack) {
+  if (!clipBlock && !cueBlock && !assetBlock && !audioBlock && !captionRow && !inVideoTrack && !inAssetTrack && !inAudioTrack) {
     return;
   }
   event.preventDefault();
@@ -35182,10 +35838,14 @@ function openTimelineContextMenu(event) {
     cueId: cueBlock?.dataset.id || null,
     imageAssetId: assetBlock?.dataset.id || null,
     audioRegionId: audioBlock?.dataset.id || null,
-    kind: cueBlock || captionRow ? "caption" : assetBlock || inAssetTrack ? "asset" : "audio"
+    kind: clipBlock || inVideoTrack ? "video" : cueBlock || captionRow ? "caption" : assetBlock || inAssetTrack ? "asset" : "audio"
   };
+  const videoContext = timelineContext.kind === "video";
   const captionContext = timelineContext.kind === "caption";
   const assetContext = timelineContext.kind === "asset";
+  elements.context_set_range_start.hidden = !videoContext;
+  elements.context_set_range_end.hidden = !videoContext;
+  elements.context_delete_range.hidden = !videoContext || !selectedTimelineRange();
   elements.context_add_cue.hidden = !captionContext;
   elements.context_delete_cue.hidden = !timelineContext.cueId;
   elements.context_add_lane.hidden = !captionContext || project.subtitleLaneCount >= MAX_SUBTITLE_LANES;
@@ -35305,6 +35965,7 @@ function bindActions() {
     }
     try {
       const next = applyMediaAlignmentOffset(project, Math.round(seconds * 1e3));
+      clearTimelineRangeSelection();
       applyProject(next);
       void syncPreviewToPlayhead();
       const overrun = mediaFile && clipOutsideMedia(next);
@@ -35320,6 +35981,37 @@ function bindActions() {
   });
   elements.focus_source.addEventListener("click", () => void focusSourceTab());
   elements.preview_source_tab.addEventListener("click", () => void focusSourceTab({ seek: true }));
+  elements.set_range_start.addEventListener("click", () => {
+    setTimelineRangeBoundary("start", project.playheadMs);
+  });
+  elements.set_range_end.addEventListener("click", () => {
+    setTimelineRangeBoundary("end", project.playheadMs);
+  });
+  elements.clear_range.addEventListener("click", () => {
+    clearTimelineRangeSelection();
+  });
+  elements.delete_range.addEventListener("click", deleteSelectedTimelineRange);
+  for (const [handle, side] of [
+    [elements.range_start_handle, "start"],
+    [elements.range_end_handle, "end"]
+  ]) {
+    handle.title = "\uB4DC\uB798\uADF8 \uB610\uB294 \u2190/\u2192 0.1\uCD08 \xB7 Shift+\u2190/\u2192 1\uCD08";
+    handle.addEventListener("pointerdown", (event) => {
+      bindTimelineRangeHandle(handle, side, event);
+    });
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const deltaMs = event.shiftKey ? 1e3 : 100;
+      nudgeTimelineRangeBoundary(
+        side,
+        event.key === "ArrowLeft" ? -deltaMs : deltaMs
+      );
+    });
+  }
   elements.clip_list.addEventListener("click", (event) => {
     const item = event.target.closest(".clip-item");
     if (!item) {
@@ -35332,6 +36024,7 @@ function bindActions() {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (action) {
       const index = project.clips.findIndex((candidate) => candidate.id === clip.id);
+      clearTimelineRangeSelection({ render: false });
       applyProject(reorderClip(project, clip.id, action === "up" ? index - 1 : index + 1));
       const nextItem2 = [...elements.clip_list.querySelectorAll(".clip-item")].find((candidate) => candidate.dataset.id === clip.id);
       const nextAction = nextItem2?.querySelector(`[data-action="${action}"]`);
@@ -35350,8 +36043,14 @@ function bindActions() {
   elements.previous_clip.addEventListener("click", () => adjacentClip(-1));
   elements.next_clip.addEventListener("click", () => adjacentClip(1));
   elements.preview_video.addEventListener("timeupdate", handleVideoTimeUpdate);
-  elements.preview_video.addEventListener("play", () => elements.play_toggle.classList.add("playing"));
-  elements.preview_video.addEventListener("pause", () => elements.play_toggle.classList.remove("playing"));
+  elements.preview_video.addEventListener("play", () => {
+    elements.play_toggle.classList.add("playing");
+    startPreviewAudioClock();
+  });
+  elements.preview_video.addEventListener("pause", () => {
+    elements.play_toggle.classList.remove("playing");
+    stopPreviewAudioClock();
+  });
   elements.preview_video.addEventListener("loadedmetadata", () => {
     void renderImageAssetOverlays();
     renderSubtitleOverlay();
@@ -35715,9 +36414,28 @@ function bindActions() {
     elements.timeline_zoom.value = String(Math.round(pixelsPerSecond));
     renderTimeline();
   });
+  elements.video_track.addEventListener("contextmenu", openTimelineContextMenu);
   elements.caption_tracks.addEventListener("contextmenu", openTimelineContextMenu);
   elements.asset_track.addEventListener("contextmenu", openTimelineContextMenu);
   elements.audio_track.addEventListener("contextmenu", openTimelineContextMenu);
+  elements.context_set_range_start.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      setTimelineRangeBoundary("start", context.timelineMs);
+    }
+  });
+  elements.context_set_range_end.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      setTimelineRangeBoundary("end", context.timelineMs);
+    }
+  });
+  elements.context_delete_range.addEventListener("click", () => {
+    closeTimelineContextMenu();
+    deleteSelectedTimelineRange();
+  });
   elements.context_add_cue.addEventListener("click", () => {
     const context = timelineContext;
     closeTimelineContextMenu();
@@ -35808,6 +36526,11 @@ function bindActions() {
       }
       return;
     }
+    if (!editingText && event.key === "Escape" && (Number.isFinite(rangeStartMs) || Number.isFinite(rangeEndMs))) {
+      event.preventDefault();
+      clearTimelineRangeSelection();
+      return;
+    }
     if (!editingText && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
       event.preventDefault();
       event.shiftKey ? redo() : undo();
@@ -35817,6 +36540,15 @@ function bindActions() {
     } else if (!interactive && event.code === "Space") {
       event.preventDefault();
       void togglePlayback();
+    } else if (!editingText && !event.ctrlKey && !event.metaKey && !event.altKey && (event.code === "KeyI" || event.key.toLowerCase() === "i")) {
+      event.preventDefault();
+      setTimelineRangeBoundary("start", project.playheadMs);
+    } else if (!editingText && !event.ctrlKey && !event.metaKey && !event.altKey && (event.code === "KeyO" || event.key.toLowerCase() === "o")) {
+      event.preventDefault();
+      setTimelineRangeBoundary("end", project.playheadMs);
+    } else if (!editingText && (event.key === "Delete" || event.key === "Backspace") && selectedTimelineRange()) {
+      event.preventDefault();
+      deleteSelectedTimelineRange();
     } else if (!interactive && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
       event.preventDefault();
       const delta = event.shiftKey ? 1e3 : 100;
@@ -35919,6 +36651,7 @@ async function initialize() {
 function applyCaptureSeedUpdate(captureState) {
   try {
     const next = mergeCaptureIntoEditorProject(project, captureState);
+    clearTimelineRangeSelection({ render: false });
     applyProject(next);
     sourceBindingConnected = true;
     void syncPreviewToPlayhead();
@@ -35953,6 +36686,7 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 window.addEventListener("beforeunload", () => {
+  stopPreviewAudioClock({ sync: false });
   void flushSave();
   if (mediaUrl) {
     URL.revokeObjectURL(mediaUrl);
