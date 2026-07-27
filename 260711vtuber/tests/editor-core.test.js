@@ -5,6 +5,7 @@ import {
   EDITOR_SCHEMA,
   MAX_SUBTITLE_LANES,
   MIN_SUBTITLE_LANES,
+  SUPPORTED_IMAGE_ASSET_MIME_TYPES,
   addSubtitleLane,
   applyMediaAlignmentOffset,
   audioRegionAtTimeline,
@@ -13,16 +14,22 @@ import {
   captureProjectId,
   createAudioRegion,
   createEditorProjectFromCapture,
+  createImageAsset,
   createSubtitleCue,
   cuesAtTimeline,
   cueAtTimeline,
   cueTimelineRange,
   deleteAudioRegion,
+  deleteImageAsset,
+  findImageAssetOverlaps,
   findAudioRegionOverlaps,
   findSubtitleOverlaps,
+  imageAssetsAtTimeline,
+  imageAssetTimelineRange,
   mapTimelineToSource,
   mergeCaptureIntoEditorProject,
   normalizeEditorProject,
+  normalizeImageAssetSource,
   projectDurationMs,
   reorderClip,
   replaceAiSubtitleDraft,
@@ -31,6 +38,7 @@ import {
   transcriptChunksToCueDrafts,
   updateAudioRegion,
   updateClipTrim,
+  updateImageAsset,
   updateSubtitleCue
 } from "../extension/lib/editor-core.js";
 
@@ -120,15 +128,17 @@ test("캡처 상태를 사용자 권위 컷이 있는 편집 프로젝트로 만
   assert.equal(captureProjectId(captureState), captureProjectId(captureState));
 });
 
-test("새 프로젝트는 자막 2개 레인과 고정 음성 레인 데이터를 준비한다", () => {
+test("새 프로젝트는 에셋·자막 2개 레인과 고정 음성 레인 데이터를 준비한다", () => {
   const project = createEditorProjectFromCapture(captureState);
   assert.equal(project.subtitleLaneCount, MIN_SUBTITLE_LANES);
   assert.equal(project.subtitleLaneCount, 2);
+  assert.deepEqual(project.imageAssets, []);
   assert.deepEqual(project.audioRegions, []);
+  assert.equal(project.selectedImageAssetId, null);
   assert.equal(project.selectedAudioRegionId, null);
 });
 
-test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v2로 이관한다", () => {
+test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v3로 이관한다", () => {
   const current = createEditorProjectFromCapture(captureState, {
     id: "legacy-project",
     createdAt: "2026-07-27T09:00:00.000Z"
@@ -147,6 +157,8 @@ test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v2로 이관
   const {
     subtitleLaneCount: _subtitleLaneCount,
     audioRegions: _audioRegions,
+    imageAssets: _imageAssets,
+    selectedImageAssetId: _selectedImageAssetId,
     selectedAudioRegionId: _selectedAudioRegionId,
     ...legacy
   } = {
@@ -174,6 +186,7 @@ test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v2로 이관
   assert.equal(migrated.clips[0].sourceStartMs, 10_500);
   assert.equal(migrated.clips[0].sourceEndMs, 15_000);
   assert.equal(migrated.subtitleLaneCount, 2);
+  assert.deepEqual(migrated.imageAssets, []);
   assert.deepEqual(migrated.audioRegions, []);
   assert.equal(migrated.selectedCueId, "legacy-cue");
   assert.deepEqual(
@@ -204,6 +217,53 @@ test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v2로 이관
   assert.equal(migrated.subtitleDefaults.fontFamily, "Pretendard");
   assert.equal(migrated.subtitleDefaults.fontWeight, 800);
   assert.equal(migrated.subtitleDefaults.backgroundColor, "transparent");
+});
+
+test("v2 프로젝트를 기존 자막·음성 선택 상태를 보존해 v3로 이관한다", () => {
+  let current = createEditorProjectFromCapture(captureState, {
+    id: "v2-project",
+    createdAt: "2026-07-27T10:00:00.000Z"
+  });
+  const cue = createSubtitleCue(current, {
+    id: "v2-cue",
+    clipId: "clip-first",
+    startOffsetMs: 300,
+    endOffsetMs: 1_300,
+    text: "v2 자막",
+    lane: 1,
+    color: "#44AAEE"
+  });
+  const audio = createAudioRegion(current, {
+    id: "v2-audio",
+    clipId: "clip-second",
+    startOffsetMs: 400,
+    endOffsetMs: 2_400,
+    gain: 0.4,
+    fadeInMs: 250
+  });
+  current = {
+    ...current,
+    schema: "chzzk-kirinuki-editor/v2",
+    subtitles: [cue],
+    audioRegions: [audio],
+    selectedCueId: cue.id,
+    selectedAudioRegionId: audio.id
+  };
+  delete current.imageAssets;
+  delete current.selectedImageAssetId;
+
+  const migrated = normalizeEditorProject(current);
+  assert.equal(migrated.schema, EDITOR_SCHEMA);
+  assert.equal(migrated.id, "v2-project");
+  assert.equal(migrated.subtitles[0].id, "v2-cue");
+  assert.equal(migrated.subtitles[0].lane, 1);
+  assert.equal(migrated.subtitles[0].color, "#44aaee");
+  assert.equal(migrated.audioRegions[0].id, "v2-audio");
+  assert.equal(migrated.audioRegions[0].gain, 0.4);
+  assert.equal(migrated.selectedCueId, "v2-cue");
+  assert.equal(migrated.selectedAudioRegionId, "v2-audio");
+  assert.deepEqual(migrated.imageAssets, []);
+  assert.equal(migrated.selectedImageAssetId, null);
 });
 
 test("이전 프로젝트의 미디어 자산에 PTS 원점과 CFR 메타데이터 기본값을 보완한다", () => {
@@ -307,6 +367,115 @@ test("자막마다 색상을 따로 정규화하고 수정한다", () => {
   assert.equal(project.subtitles[0].color, "#12ab34");
   assert.equal(project.subtitles[0].humanEdited, true);
   assert.equal(project.subtitleDefaults.color, "#ffffff");
+});
+
+test("웹 붙여넣기 이미지 참조는 안전한 래스터 형식만 영속화한다", () => {
+  const png = "data:image/png;base64,AAAA";
+  assert.deepEqual(SUPPORTED_IMAGE_ASSET_MIME_TYPES, [
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif"
+  ]);
+  assert.deepEqual(normalizeImageAssetSource(png, "image/png"), {
+    kind: "data-url",
+    value: png
+  });
+  assert.deepEqual(normalizeImageAssetSource({
+    kind: "blob-key",
+    value: "project/demo/asset/logo"
+  }), {
+    kind: "blob-key",
+    value: "project/demo/asset/logo"
+  });
+  assert.equal(
+    normalizeImageAssetSource("data:image/svg+xml;base64,AAAA", "image/svg+xml"),
+    null
+  );
+  assert.equal(normalizeImageAssetSource(png, "image/jpeg"), null);
+});
+
+test("투명 이미지 에셋을 만들고 위치·크기·불투명도를 수정·삭제한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  const asset = createImageAsset(project, {
+    id: "logo",
+    clipId: "clip-first",
+    startOffsetMs: 500,
+    endOffsetMs: 2_500,
+    name: "투명 로고",
+    mimeType: "image/webp",
+    blobKey: "project/demo/asset/logo",
+    sourceUrl: "https://example.com/logo.webp",
+    x: 0.25,
+    y: 0.75,
+    naturalWidth: 800,
+    naturalHeight: 400
+  });
+  project = {
+    ...project,
+    imageAssets: [asset],
+    selectedImageAssetId: asset.id
+  };
+
+  assert.deepEqual(asset.source, {
+    kind: "blob-key",
+    value: "project/demo/asset/logo"
+  });
+  assert.equal(asset.scale, 1);
+  assert.equal(asset.opacity, 1);
+  assert.deepEqual(imageAssetTimelineRange(project, asset), {
+    startMs: 500,
+    endMs: 2_500
+  });
+
+  project = updateImageAsset(project, asset.id, {
+    x: -1,
+    y: 2,
+    scale: 9,
+    opacity: 0.35
+  });
+  assert.equal(project.imageAssets[0].x, 0);
+  assert.equal(project.imageAssets[0].y, 1);
+  assert.equal(project.imageAssets[0].scale, 5);
+  assert.equal(project.imageAssets[0].opacity, 0.35);
+  assert.equal(project.selectedImageAssetId, "logo");
+
+  project = deleteImageAsset(project, asset.id);
+  assert.deepEqual(project.imageAssets, []);
+  assert.equal(project.selectedImageAssetId, null);
+});
+
+test("동시 에셋은 배열 순서대로 뒤→앞 순서를 유지하고 겹침을 진단한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  const first = createImageAsset(project, {
+    id: "background-sticker",
+    clipId: "clip-first",
+    startOffsetMs: 0,
+    endOffsetMs: 2_000,
+    mimeType: "image/png",
+    dataUrl: "data:image/png;base64,AAAA"
+  });
+  const second = createImageAsset(project, {
+    id: "foreground-sticker",
+    clipId: "clip-first",
+    startOffsetMs: 500,
+    endOffsetMs: 1_500,
+    mimeType: "image/gif",
+    dataUrl: "data:image/gif;base64,BBBB"
+  });
+  project = { ...project, imageAssets: [first, second] };
+
+  assert.deepEqual(
+    imageAssetsAtTimeline(project, 1_000).map((asset) => asset.id),
+    ["background-sticker", "foreground-sticker"]
+  );
+  assert.deepEqual(findImageAssetOverlaps(project), [{
+    firstAssetId: "background-sticker",
+    secondAssetId: "foreground-sticker",
+    startMs: 500,
+    endMs: 1_500
+  }]);
+  assert.deepEqual(imageAssetsAtTimeline(project, 2_000), []);
 });
 
 test("자막 레인을 클릭으로 늘리고 프로젝트가 허용한 범위 안에서 cue 레인을 정규화한다", () => {
@@ -617,6 +786,49 @@ test("컷 trim은 음성 설정의 원본 시각을 보존해 자르고 범위 �
   assert.equal(project.selectedAudioRegionId, null);
 });
 
+test("컷 trim은 이미지 에셋의 원본 시각을 보존해 자르고 범위 밖 에셋을 제거한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    imageAssets: [
+      createImageAsset(project, {
+        id: "kept-asset",
+        clipId: "clip-first",
+        startOffsetMs: 500,
+        endOffsetMs: 4_000,
+        mimeType: "image/png",
+        blobKey: "asset/kept"
+      }),
+      createImageAsset(project, {
+        id: "removed-asset",
+        clipId: "clip-first",
+        startOffsetMs: 4_500,
+        endOffsetMs: 5_300,
+        mimeType: "image/webp",
+        blobKey: "asset/removed"
+      })
+    ],
+    selectedImageAssetId: "removed-asset"
+  };
+
+  project = updateClipTrim(project, "clip-first", {
+    sourceStartMs: 11_000,
+    sourceEndMs: 13_000
+  });
+  assert.deepEqual(project.imageAssets.map((asset) => ({
+    id: asset.id,
+    startOffsetMs: asset.startOffsetMs,
+    endOffsetMs: asset.endOffsetMs,
+    source: asset.source
+  })), [{
+    id: "kept-asset",
+    startOffsetMs: 0,
+    endOffsetMs: 2_000,
+    source: { kind: "blob-key", value: "asset/kept" }
+  }]);
+  assert.equal(project.selectedImageAssetId, null);
+});
+
 test("기존 편집 순서와 trim을 유지하면서 새 사용자 선택을 동기화한다", () => {
   let project = createEditorProjectFromCapture(captureState);
   const cue = createSubtitleCue(project, {
@@ -693,6 +905,56 @@ test("캡처 구간 갱신은 음성 설정을 새 컷 경계로 자르고 선�
     gain: 0.55
   }]);
   assert.equal(merged.selectedAudioRegionId, "merged-audio");
+});
+
+test("캡처 구간 갱신은 이미지 에셋을 새 컷 경계로 자르고 선택 상태를 보존한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    imageAssets: [
+      createImageAsset(project, {
+        id: "merged-asset",
+        clipId: "clip-first",
+        startOffsetMs: 500,
+        endOffsetMs: 5_000,
+        mimeType: "image/png",
+        blobKey: "asset/merged",
+        x: 0.8,
+        opacity: 0.6
+      }),
+      createImageAsset(project, {
+        id: "discarded-asset",
+        clipId: "clip-first",
+        startOffsetMs: 0,
+        endOffsetMs: 500,
+        mimeType: "image/gif",
+        blobKey: "asset/discarded"
+      })
+    ],
+    selectedImageAssetId: "merged-asset"
+  };
+
+  const merged = mergeCaptureIntoEditorProject(project, {
+    ...captureState,
+    segments: [
+      { ...captureState.segments[0], startSeconds: 12, endSeconds: 14 },
+      ...captureState.segments.slice(1)
+    ]
+  });
+  assert.deepEqual(merged.imageAssets.map((asset) => ({
+    id: asset.id,
+    startOffsetMs: asset.startOffsetMs,
+    endOffsetMs: asset.endOffsetMs,
+    x: asset.x,
+    opacity: asset.opacity
+  })), [{
+    id: "merged-asset",
+    startOffsetMs: 0,
+    endOffsetMs: 2_000,
+    x: 0.8,
+    opacity: 0.6
+  }]);
+  assert.equal(merged.selectedImageAssetId, "merged-asset");
 });
 
 test("동일한 캡처를 다시 열어도 편집기에서 확장한 컷과 그 자막을 되돌리지 않는다", () => {

@@ -295,8 +295,10 @@ async function main() {
     script: `
       const requiredIds = [
         "preview-video",
+        "image-asset-overlays",
         "subtitle-overlays",
         "video-track",
+        "asset-track",
         "audio-track",
         "caption-tracks",
         "timeline-context-menu",
@@ -305,6 +307,13 @@ async function main() {
         "cue-end",
         "cue-x",
         "cue-y",
+        "asset-mode-tab",
+        "asset-paste",
+        "asset-input",
+        "asset-start",
+        "asset-end",
+        "asset-scale",
+        "asset-opacity",
         "generate-captions",
         "export-video"
       ];

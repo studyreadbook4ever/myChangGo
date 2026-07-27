@@ -24,6 +24,8 @@ const CAPTION_TEXT = "사람이 확인한 내보내기 자막";
 const SECOND_CAPTION_TEXT = "동시에 보이는 두 번째 자막";
 const FIRST_CAPTION_COLOR = "#ff2020";
 const SECOND_CAPTION_COLOR = "#20ff40";
+const IMAGE_ASSET_ID = "asset-transparent-export-e2e";
+const IMAGE_ASSET_NAME = "transparent-export-e2e.png";
 const PREEXISTING_SIDECAR_TEXT = "do-not-overwrite-existing-sidecar\n";
 const EXPECTED_DURATION_SECONDS = 4;
 const EXPECTED_FRAME_RATE = 30;
@@ -411,7 +413,7 @@ async function readStoredProject() {
   const result = await executeAsync(`
     const projectId = arguments[0];
     const done = arguments[arguments.length - 1];
-    const open = indexedDB.open(arguments[1], 1);
+    const open = indexedDB.open(arguments[1]);
     open.onerror = () => done({ error: String(open.error || "IndexedDB open failed") });
     open.onsuccess = () => {
       const database = open.result;
@@ -430,6 +432,132 @@ async function readStoredProject() {
   `, [PROJECT_ID, DATABASE_NAME, PROJECT_STORE]);
   assert(!result?.error, `IndexedDB 읽기 실패: ${result?.error}`);
   return result?.value || null;
+}
+
+async function seedTransparentImageAssetFixture() {
+  const result = await executeAsync(`
+    const [databaseName, projectStoreName, projectId, assetId, assetName] = arguments;
+    const done = arguments[arguments.length - 1];
+    let finished = false;
+    const finish = (value) => {
+      if (!finished) {
+        finished = true;
+        done(value);
+      }
+    };
+    const canvas = document.createElement("canvas");
+    canvas.width = 120;
+    canvas.height = 120;
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "rgba(255, 0, 0, 1)";
+    context.fillRect(20, 20, 40, 80);
+    context.fillStyle = "rgba(0, 255, 0, 0.5)";
+    context.fillRect(70, 20, 30, 80);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        finish({ error: "투명 PNG fixture Blob 생성 실패" });
+        return;
+      }
+      const open = indexedDB.open(databaseName);
+      open.onerror = () => finish({ error: String(open.error || "IndexedDB open failed") });
+      open.onsuccess = () => {
+        const database = open.result;
+        const transaction = database.transaction(
+          [projectStoreName, "image-assets"],
+          "readwrite"
+        );
+        const projectStore = transaction.objectStore(projectStoreName);
+        const imageStore = transaction.objectStore("image-assets");
+        const request = projectStore.get(projectId);
+        let seededAsset = null;
+        request.onerror = () => transaction.abort();
+        request.onsuccess = () => {
+          const project = request.result;
+          if (!project) {
+            transaction.abort();
+            return;
+          }
+          const now = new Date().toISOString();
+          seededAsset = {
+            id: assetId,
+            clipId: "clip-blue",
+            startOffsetMs: 200,
+            endOffsetMs: 800,
+            name: assetName,
+            mimeType: "image/png",
+            source: { kind: "blob-key", value: assetId },
+            sourceUrl: "",
+            x: 0.5,
+            y: 0.5,
+            scale: 2,
+            opacity: 1,
+            naturalWidth: 120,
+            naturalHeight: 120,
+            createdAt: now,
+            updatedAt: now
+          };
+          projectStore.put({
+            ...project,
+            imageAssets: [
+              ...(project.imageAssets || []).filter((asset) => asset.id !== assetId),
+              seededAsset
+            ],
+            selectedImageAssetId: assetId,
+            updatedAt: now
+          });
+          imageStore.put(blob, [projectId, assetId]);
+        };
+        transaction.oncomplete = () => {
+          database.close();
+          finish({
+            ok: true,
+            asset: seededAsset,
+            blob: {
+              type: blob.type,
+              size: blob.size
+            },
+            sourcePixels: {
+              transparentCorner: Array.from(context.getImageData(5, 5, 1, 1).data),
+              opaqueRed: Array.from(context.getImageData(40, 60, 1, 1).data),
+              semiGreen: Array.from(context.getImageData(85, 60, 1, 1).data)
+            }
+          });
+        };
+        transaction.onerror = () => {
+          const error = transaction.error;
+          database.close();
+          finish({ error: String(error || "투명 PNG fixture 저장 실패") });
+        };
+        transaction.onabort = () => {
+          const error = transaction.error;
+          database.close();
+          finish({ error: String(error || "투명 PNG fixture transaction 중단") });
+        };
+      };
+    }, "image/png");
+  `, [
+    DATABASE_NAME,
+    PROJECT_STORE,
+    PROJECT_ID,
+    IMAGE_ASSET_ID,
+    IMAGE_ASSET_NAME
+  ]);
+  assert(
+    result?.ok &&
+      result.asset?.source?.kind === "blob-key" &&
+      result.asset.source.value === IMAGE_ASSET_ID &&
+      result.blob?.type === "image/png" &&
+      result.blob.size > 0 &&
+      result.sourcePixels?.transparentCorner?.[3] === 0 &&
+      result.sourcePixels?.opaqueRed?.[0] === 255 &&
+      result.sourcePixels?.opaqueRed?.[3] === 255 &&
+      result.sourcePixels?.semiGreen?.[1] === 255 &&
+      result.sourcePixels?.semiGreen?.[3] > 100 &&
+      result.sourcePixels?.semiGreen?.[3] < 200,
+    `투명 PNG blob-key fixture를 IndexedDB에 저장하지 못했습니다: ${JSON.stringify(result)}`
+  );
+  return result;
 }
 
 async function waitForStoredProject(predicate, description, options) {
@@ -942,6 +1070,35 @@ function analyzeCaptionColors(pixels) {
   ]));
 }
 
+function averageRgbRegion(pixels, {
+  x,
+  y,
+  width = 12,
+  height = 12
+}) {
+  const left = Math.max(0, Math.min(FRAME_WIDTH - 1, Math.round(x)));
+  const top = Math.max(0, Math.min(FRAME_HEIGHT - 1, Math.round(y)));
+  const right = Math.min(FRAME_WIDTH, left + Math.max(1, Math.round(width)));
+  const bottom = Math.min(FRAME_HEIGHT, top + Math.max(1, Math.round(height)));
+  const total = { red: 0, green: 0, blue: 0, count: 0 };
+  for (let pixelY = top; pixelY < bottom; pixelY += 1) {
+    for (let pixelX = left; pixelX < right; pixelX += 1) {
+      const offset = (pixelY * FRAME_WIDTH + pixelX) * 3;
+      total.red += pixels[offset];
+      total.green += pixels[offset + 1];
+      total.blue += pixels[offset + 2];
+      total.count += 1;
+    }
+  }
+  return {
+    red: total.red / total.count,
+    green: total.green / total.count,
+    blue: total.blue / total.count,
+    count: total.count,
+    region: { left, top, right, bottom }
+  };
+}
+
 async function sampleAudioPcm(ffmpeg, filePath, start, duration = 0.5) {
   const output = await runCommand(ffmpeg, [
     "-hide_banner",
@@ -1199,6 +1356,52 @@ async function main() {
       && project.clips[0].timelineStartMs === 0
       && project.clips[1].timelineStartMs === 2_000
   ), "파랑→빨강 컷 순서 저장");
+
+  await webdriver("POST", `/session/${sessionId}/url`, { url: sidepanelUrl });
+  await waitUntil(
+    () => executeSync("return document.readyState === 'complete';"),
+    "에셋 fixture 저장 전 editor flush"
+  );
+  const transparentAssetFixture = await seedTransparentImageAssetFixture();
+  await webdriver("POST", `/session/${sessionId}/url`, { url: editorUrl });
+  await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        ready: document.readyState === "complete",
+        clipOrder: [...document.querySelectorAll("#video-track .clip-block")]
+          .map((block) => block.dataset.id),
+        assetIds: [...document.querySelectorAll("#asset-track .asset-block")]
+          .map((block) => block.dataset.id)
+      };
+    `);
+    return (
+      state.ready &&
+      state.clipOrder.join(",") === "clip-blue,clip-red" &&
+      state.assetIds.join(",") === IMAGE_ASSET_ID
+    ) ? state : false;
+  }, "blob-key 투명 PNG 에셋 editor 복원");
+  await setFileInput("#media-input", mediaPath);
+  const imageAssetProject = await waitForStoredProject((project) => {
+    const asset = project.imageAssets?.find((candidate) => candidate.id === IMAGE_ASSET_ID);
+    return (
+      project.mediaAsset?.name === path.basename(mediaPath) &&
+      project.clips.map((clip) => clip.id).join(",") === "clip-blue,clip-red" &&
+      project.selectedImageAssetId === IMAGE_ASSET_ID &&
+      asset?.clipId === "clip-blue" &&
+      asset.startOffsetMs === 200 &&
+      asset.endOffsetMs === 800 &&
+      asset.source?.kind === "blob-key" &&
+      asset.source.value === IMAGE_ASSET_ID &&
+      asset.mimeType === "image/png" &&
+      asset.naturalWidth === 120 &&
+      asset.naturalHeight === 120 &&
+      asset.scale === 2 &&
+      asset.opacity === 1
+    );
+  }, "투명 PNG 에셋·원본 재연결", { timeout: 30_000 });
+  const imageAsset = imageAssetProject.imageAssets.find(
+    (candidate) => candidate.id === IMAGE_ASSET_ID
+  );
 
   const previewPaused = await executeSync(
     'return document.querySelector("#preview-video")?.paused === true;'
@@ -1756,6 +1959,17 @@ async function main() {
       exportedProject.subtitles[1].lane === 1 &&
       exportedProject.subtitles[1].color === SECOND_CAPTION_COLOR &&
       exportedProject.subtitles.every((cue) => cue.origin === "human") &&
+      exportedProject.imageAssets?.length === 1 &&
+      exportedProject.imageAssets[0].id === IMAGE_ASSET_ID &&
+      exportedProject.imageAssets[0].clipId === "clip-blue" &&
+      exportedProject.imageAssets[0].startOffsetMs === 200 &&
+      exportedProject.imageAssets[0].endOffsetMs === 800 &&
+      exportedProject.imageAssets[0].source?.kind === "blob-key" &&
+      exportedProject.imageAssets[0].source.value === IMAGE_ASSET_ID &&
+      exportedProject.imageAssets[0].naturalWidth === 120 &&
+      exportedProject.imageAssets[0].naturalHeight === 120 &&
+      exportedProject.imageAssets[0].scale === 2 &&
+      exportedProject.imageAssets[0].opacity === 1 &&
       exportedProject.audioRegions?.length === 3 &&
       exportedProject.audioRegions.some((region) => (
         region.id === gainRegion.id && Math.abs(region.gain - 0.25) < 0.001
@@ -1835,6 +2049,7 @@ async function main() {
     secondColor,
     firstAudio,
     secondAudio,
+    assetPixels,
     captionPixels,
     gainAudio,
     mutedAudio,
@@ -1847,6 +2062,7 @@ async function main() {
     sampleFrameRgb(ffmpeg, downloadedVideo, 2.75),
     sampleAudioPcm(ffmpeg, downloadedVideo, 0.5),
     sampleAudioPcm(ffmpeg, downloadedVideo, 2.5),
+    sampleFrameRgbPixels(ffmpeg, downloadedVideo, 0.5),
     sampleFrameRgbPixels(ffmpeg, downloadedVideo, 1.5),
     sampleAudioPcm(ffmpeg, downloadedVideo, gainTimelineStart + 0.2, 0.25),
     sampleAudioPcm(
@@ -1873,6 +2089,75 @@ async function main() {
     secondColor.red > secondColor.blue + 100,
     `둘째 컷이 빨강이 아닙니다: ${JSON.stringify(secondColor)}`
   );
+
+  const assetBaseFit = Math.min(
+    1,
+    FRAME_WIDTH * 0.35 / imageAsset.naturalWidth,
+    FRAME_HEIGHT * 0.35 / imageAsset.naturalHeight
+  );
+  const assetRenderWidth = imageAsset.naturalWidth * assetBaseFit * imageAsset.scale;
+  const assetRenderHeight = imageAsset.naturalHeight * assetBaseFit * imageAsset.scale;
+  const assetRenderLeft = FRAME_WIDTH * imageAsset.x - assetRenderWidth / 2;
+  const assetRenderTop = FRAME_HEIGHT * imageAsset.y - assetRenderHeight / 2;
+  const assetComposite = {
+    background: averageRgbRegion(assetPixels, { x: 40, y: 40 }),
+    transparentCorner: averageRgbRegion(assetPixels, {
+      x: assetRenderLeft + 8,
+      y: assetRenderTop + 8
+    }),
+    opaqueRed: averageRgbRegion(assetPixels, {
+      x: assetRenderLeft + 65,
+      y: assetRenderTop + 105,
+      width: 16,
+      height: 16
+    }),
+    semiGreenOverBlue: averageRgbRegion(assetPixels, {
+      x: assetRenderLeft + 165,
+      y: assetRenderTop + 105,
+      width: 16,
+      height: 16
+    }),
+    geometry: {
+      baseFit: assetBaseFit,
+      left: assetRenderLeft,
+      top: assetRenderTop,
+      width: assetRenderWidth,
+      height: assetRenderHeight
+    }
+  };
+  const transparentBackgroundDelta = (
+    Math.abs(assetComposite.transparentCorner.red - assetComposite.background.red) +
+    Math.abs(assetComposite.transparentCorner.green - assetComposite.background.green) +
+    Math.abs(assetComposite.transparentCorner.blue - assetComposite.background.blue)
+  );
+  assert(
+    assetComposite.background.blue >= 150 &&
+      assetComposite.background.blue >= assetComposite.background.red + 100 &&
+      assetComposite.background.blue >= assetComposite.background.green + 100,
+    `에셋 합성 기준 배경이 파랑이 아닙니다: ${JSON.stringify(assetComposite)}`
+  );
+  assert(
+    assetComposite.opaqueRed.red >= 150 &&
+      assetComposite.opaqueRed.red >= assetComposite.opaqueRed.green + 90 &&
+      assetComposite.opaqueRed.red >= assetComposite.opaqueRed.blue + 90,
+    `투명 PNG의 불투명 빨강 픽셀이 영상에 합성되지 않았습니다: ${JSON.stringify(assetComposite)}`
+  );
+  assert(
+    assetComposite.semiGreenOverBlue.green >= 70 &&
+      assetComposite.semiGreenOverBlue.blue >= 70 &&
+      assetComposite.semiGreenOverBlue.red <= 60 &&
+      assetComposite.semiGreenOverBlue.green >= assetComposite.background.green + 60 &&
+      assetComposite.semiGreenOverBlue.blue <= assetComposite.background.blue - 40,
+    `투명 PNG의 반투명 초록이 파랑 배경과 혼합되지 않았습니다: ${JSON.stringify(assetComposite)}`
+  );
+  assert(
+    transparentBackgroundDelta <= 45 &&
+      assetComposite.transparentCorner.blue >= 150 &&
+      assetComposite.transparentCorner.blue >= assetComposite.transparentCorner.red + 100,
+    `투명 PNG 모서리에서 원본 파랑 배경이 드러나지 않습니다: delta=${transparentBackgroundDelta} ` +
+      JSON.stringify(assetComposite)
+  );
+  assetComposite.transparentBackgroundDelta = transparentBackgroundDelta;
 
   const captionColorAnalysis = analyzeCaptionColors(captionPixels);
   assert(
@@ -1948,7 +2233,8 @@ async function main() {
       duration: Number(fixtureProbe.format.duration),
       mediaOriginMs: attachedProject.mediaAsset.mediaOriginMs,
       editorDurationMs: attachedProject.mediaAsset.durationMs,
-      attachedPreviewMedia
+      attachedPreviewMedia,
+      transparentImageAsset: transparentAssetFixture
     },
     project: {
       clipOrder: reorderedProject.clips.map((clip) => clip.id),
@@ -1970,6 +2256,7 @@ async function main() {
         startOffsetMs: cue.startOffsetMs,
         endOffsetMs: cue.endOffsetMs
       })),
+      imageAssets: imageAssetProject.imageAssets,
       audioRegions: audioProject.audioRegions,
       audioUiActions
     },
@@ -2001,6 +2288,7 @@ async function main() {
           lane: cue.lane,
           color: cue.color
         })),
+        jsonImageAssets: exportedProject.imageAssets,
         jsonAudioRegions: exportedProject.audioRegions,
         srt: srtText
       },
@@ -2009,6 +2297,7 @@ async function main() {
       audio: audioStream,
       firstColor,
       secondColor,
+      assetComposite,
       captionColorAnalysis,
       firstTone,
       secondTone,

@@ -1,12 +1,24 @@
 // extension/lib/editor-core.js
-var EDITOR_SCHEMA = "chzzk-kirinuki-editor/v2";
+var EDITOR_SCHEMA = "chzzk-kirinuki-editor/v3";
 var EDITOR_SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 var EDITOR_DATABASE_NAME = "chzzk-kirinuki-studio";
 var MIN_SUBTITLE_LANES = 2;
 var MAX_SUBTITLE_LANES = 8;
+var SUPPORTED_IMAGE_ASSET_MIME_TYPES = Object.freeze([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif"
+]);
 var MIN_CLIP_DURATION_MS = 100;
 var MIN_CUE_DURATION_MS = 100;
-var LEGACY_EDITOR_SCHEMA = "chzzk-kirinuki-editor/v1";
+var LEGACY_EDITOR_SCHEMA_V1 = "chzzk-kirinuki-editor/v1";
+var LEGACY_EDITOR_SCHEMA_V2 = "chzzk-kirinuki-editor/v2";
+var ACCEPTED_EDITOR_SCHEMAS = /* @__PURE__ */ new Set([
+  EDITOR_SCHEMA,
+  LEGACY_EDITOR_SCHEMA_V1,
+  LEGACY_EDITOR_SCHEMA_V2
+]);
 var nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
 var makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 var finiteNumber = (value, fallback = 0) => {
@@ -24,6 +36,40 @@ function normalizeHexColor(value, fallback = "#ffffff") {
     return `#${[...candidate.slice(1)].map((character) => character.repeat(2)).join("")}`;
   }
   return fallback;
+}
+function normalizeImageMimeType(value) {
+  const candidate = String(value || "").trim().toLowerCase();
+  const normalized = candidate === "image/jpg" ? "image/jpeg" : candidate;
+  return SUPPORTED_IMAGE_ASSET_MIME_TYPES.includes(normalized) ? normalized : "";
+}
+function imageMimeTypeFromDataUrl(value) {
+  const match = /^data:([^;,]+)(?:;[^,]*)?,/iu.exec(String(value || "").trim());
+  return normalizeImageMimeType(match?.[1]);
+}
+function normalizeImageAssetSource(raw, mimeType = "") {
+  const candidate = raw && typeof raw === "object" ? raw : typeof raw === "string" ? { kind: raw.startsWith("data:") ? "data-url" : "blob-key", value: raw } : null;
+  if (!candidate) {
+    return null;
+  }
+  const kind = candidate.kind === "blob-key" ? "blob-key" : "data-url";
+  const value = String(
+    candidate.value ?? candidate.dataUrl ?? candidate.blobKey ?? ""
+  ).trim();
+  if (!value) {
+    return null;
+  }
+  if (kind === "blob-key") {
+    return { kind, value };
+  }
+  const dataMimeType = imageMimeTypeFromDataUrl(value);
+  if (!dataMimeType || !value.startsWith(`data:${dataMimeType}`) || !value.includes(",")) {
+    return null;
+  }
+  const requestedMimeType = normalizeImageMimeType(mimeType);
+  if (requestedMimeType && requestedMimeType !== dataMimeType) {
+    return null;
+  }
+  return { kind, value };
 }
 function normalizeMediaAsset(raw) {
   if (!raw || typeof raw !== "object") {
@@ -147,10 +193,12 @@ function createEditorProjectFromCapture(captureState = {}, {
     broadcastSession: createBroadcastSession(source),
     mediaAsset: null,
     clips,
+    imageAssets: [],
     subtitles: [],
     subtitleLaneCount: MIN_SUBTITLE_LANES,
     audioRegions: [],
     selectedClipId: clips[0]?.id || null,
+    selectedImageAssetId: null,
     selectedCueId: null,
     selectedAudioRegionId: null,
     playheadMs: 0,
@@ -185,10 +233,10 @@ function createEditorProjectFromCapture(captureState = {}, {
   };
 }
 function normalizeEditorProject(raw) {
-  if (!raw || ![EDITOR_SCHEMA, LEGACY_EDITOR_SCHEMA].includes(raw.schema)) {
+  if (!raw || !ACCEPTED_EDITOR_SCHEMAS.has(raw.schema)) {
     return null;
   }
-  const migratingLegacyProject = raw.schema === LEGACY_EDITOR_SCHEMA;
+  const migratingLegacyProject = raw.schema === LEGACY_EDITOR_SCHEMA_V1;
   const clips = reflowClips(Array.isArray(raw.clips) ? raw.clips : []);
   const defaults = createEditorProjectFromCapture({}, {
     id: raw.id || makeId("project"),
@@ -230,6 +278,13 @@ function normalizeEditorProject(raw) {
     region,
     clips.find((clip) => clip.id === region.clipId)
   ));
+  const imageAssets = (Array.isArray(raw.imageAssets) ? raw.imageAssets : []).filter((asset) => asset && clipIds.has(asset.clipId)).flatMap((asset) => {
+    const normalized = normalizeImageAsset(
+      asset,
+      clips.find((clip) => clip.id === asset.clipId)
+    );
+    return normalized ? [normalized] : [];
+  });
   const subtitleDefaults = {
     ...defaults.subtitleDefaults,
     ...raw.subtitleDefaults || {},
@@ -259,6 +314,8 @@ function normalizeEditorProject(raw) {
     subtitles,
     subtitleLaneCount,
     audioRegions,
+    imageAssets,
+    selectedImageAssetId: imageAssets.some((asset) => asset.id === raw.selectedImageAssetId) ? raw.selectedImageAssetId : null,
     selectedAudioRegionId: audioRegions.some((region) => region.id === raw.selectedAudioRegionId) ? raw.selectedAudioRegionId : null
   };
 }
@@ -357,6 +414,26 @@ function mergeCaptureIntoEditorProject(project2, captureState = {}) {
       endOffsetMs: overlapEndMs - nextClip.sourceStartMs
     }, nextClip)];
   });
+  const imageAssets = normalized.imageAssets.flatMap((asset) => {
+    const previousClip = previousClipsById.get(asset.clipId);
+    const nextClip = nextClipsById.get(asset.clipId);
+    if (!previousClip || !nextClip) {
+      return [];
+    }
+    const assetSourceStartMs = previousClip.sourceStartMs + asset.startOffsetMs;
+    const assetSourceEndMs = previousClip.sourceStartMs + asset.endOffsetMs;
+    const overlapStartMs = Math.max(nextClip.sourceStartMs, assetSourceStartMs);
+    const overlapEndMs = Math.min(nextClip.sourceEndMs, assetSourceEndMs);
+    if (overlapEndMs - overlapStartMs < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    const next = normalizeImageAsset({
+      ...asset,
+      startOffsetMs: overlapStartMs - nextClip.sourceStartMs,
+      endOffsetMs: overlapEndMs - nextClip.sourceStartMs
+    }, nextClip);
+    return next ? [next] : [];
+  });
   const source = { ...normalized.source, ...captureState.source || {} };
   const incomingSession = createBroadcastSession(source);
   return {
@@ -375,8 +452,10 @@ function mergeCaptureIntoEditorProject(project2, captureState = {}) {
     clips: reflowedClips,
     subtitles,
     audioRegions,
+    imageAssets,
     selectedClipId: nextClipIds.has(normalized.selectedClipId) ? normalized.selectedClipId : nextClips[0]?.id || null,
     selectedCueId: subtitles.some((cue) => cue.id === normalized.selectedCueId) ? normalized.selectedCueId : null,
+    selectedImageAssetId: imageAssets.some((asset) => asset.id === normalized.selectedImageAssetId) ? normalized.selectedImageAssetId : null,
     selectedAudioRegionId: audioRegions.some((region) => region.id === normalized.selectedAudioRegionId) ? normalized.selectedAudioRegionId : null,
     updatedAt: nowIso()
   };
@@ -468,6 +547,126 @@ function createSubtitleCue(project2, {
     createdAt,
     updatedAt: createdAt
   }, clip, project2.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
+}
+function normalizeImageAsset(asset, clip) {
+  if (!asset || !clip) {
+    return null;
+  }
+  const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
+  const startOffsetMs = clamp(
+    Math.round(finiteNumber(asset.startOffsetMs)),
+    0,
+    Math.max(0, duration - MIN_CUE_DURATION_MS)
+  );
+  const endOffsetMs = clamp(
+    Math.round(finiteNumber(asset.endOffsetMs, startOffsetMs + 2e3)),
+    startOffsetMs + MIN_CUE_DURATION_MS,
+    duration
+  );
+  const requestedSource = asset.source ?? (asset.dataUrl ? { kind: "data-url", value: asset.dataUrl } : null) ?? (asset.blobKey ? { kind: "blob-key", value: asset.blobKey } : null);
+  const source = normalizeImageAssetSource(requestedSource, asset.mimeType);
+  const mimeType = source?.kind === "data-url" ? imageMimeTypeFromDataUrl(source.value) : normalizeImageMimeType(asset.mimeType);
+  if (!source || !mimeType) {
+    return null;
+  }
+  const naturalWidth = Math.round(finiteNumber(asset.naturalWidth));
+  const naturalHeight = Math.round(finiteNumber(asset.naturalHeight));
+  return {
+    id: asset.id || makeId("asset"),
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    name: String(asset.name || "\uC774\uBBF8\uC9C0 \uC5D0\uC14B").trim() || "\uC774\uBBF8\uC9C0 \uC5D0\uC14B",
+    mimeType,
+    source,
+    sourceUrl: String(asset.sourceUrl || "").trim(),
+    x: clamp(finiteNumber(asset.x, 0.5), 0, 1),
+    y: clamp(finiteNumber(asset.y, 0.5), 0, 1),
+    scale: clamp(finiteNumber(asset.scale, 1), 0.05, 5),
+    opacity: clamp(finiteNumber(asset.opacity, 1), 0, 1),
+    naturalWidth: naturalWidth > 0 ? naturalWidth : null,
+    naturalHeight: naturalHeight > 0 ? naturalHeight : null,
+    createdAt: asset.createdAt || nowIso(),
+    updatedAt: asset.updatedAt || asset.createdAt || nowIso()
+  };
+}
+function createImageAsset(project2, {
+  id,
+  clipId,
+  startOffsetMs = 0,
+  endOffsetMs = 2e3,
+  name = "\uC774\uBBF8\uC9C0 \uC5D0\uC14B",
+  mimeType = "",
+  source = null,
+  dataUrl = "",
+  blobKey = "",
+  sourceUrl = "",
+  x = 0.5,
+  y = 0.5,
+  scale = 1,
+  opacity = 1,
+  naturalWidth = null,
+  naturalHeight = null,
+  createdAt = nowIso()
+} = {}) {
+  const clip = project2?.clips?.find((candidate) => candidate.id === clipId) || project2?.clips?.[0];
+  if (!clip) {
+    throw new Error("\uC5D0\uC14B\uC744 \uCD94\uAC00\uD560 \uC601\uC0C1 \uAD6C\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  const normalized = normalizeImageAsset({
+    id,
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    name,
+    mimeType,
+    source: source ?? (dataUrl ? { kind: "data-url", value: dataUrl } : null) ?? (blobKey ? { kind: "blob-key", value: blobKey } : null),
+    sourceUrl,
+    x,
+    y,
+    scale,
+    opacity,
+    naturalWidth,
+    naturalHeight,
+    createdAt,
+    updatedAt: createdAt
+  }, clip);
+  if (!normalized) {
+    throw new Error("PNG, JPEG, WebP \uB610\uB294 GIF \uC774\uBBF8\uC9C0 \uB370\uC774\uD130\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
+  }
+  return normalized;
+}
+function updateImageAsset(project2, assetId, patch = {}) {
+  const index = (project2.imageAssets || []).findIndex((asset) => asset.id === assetId);
+  if (index < 0) {
+    return project2;
+  }
+  const current = project2.imageAssets[index];
+  const clip = project2.clips.find((candidate) => candidate.id === current.clipId);
+  const next = normalizeImageAsset({
+    ...current,
+    ...patch,
+    updatedAt: nowIso()
+  }, clip);
+  if (!next) {
+    throw new Error("PNG, JPEG, WebP \uB610\uB294 GIF \uC774\uBBF8\uC9C0 \uB370\uC774\uD130\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
+  }
+  const imageAssets = [...project2.imageAssets];
+  imageAssets[index] = next;
+  return {
+    ...project2,
+    imageAssets,
+    selectedImageAssetId: assetId,
+    updatedAt: nowIso()
+  };
+}
+function deleteImageAsset(project2, assetId) {
+  return {
+    ...project2,
+    imageAssets: (project2.imageAssets || []).filter((asset) => asset.id !== assetId),
+    selectedImageAssetId: project2.selectedImageAssetId === assetId ? null : project2.selectedImageAssetId,
+    updatedAt: nowIso()
+  };
 }
 function normalizeAudioRegion(region, clip) {
   const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
@@ -570,6 +769,16 @@ function cueTimelineRange(project2, cue) {
     endMs: clip.timelineStartMs + cue.endOffsetMs
   };
 }
+function imageAssetTimelineRange(project2, asset) {
+  const clip = project2?.clips?.find((candidate) => candidate.id === asset?.clipId);
+  if (!clip || clip.enabled === false) {
+    return null;
+  }
+  return {
+    startMs: clip.timelineStartMs + asset.startOffsetMs,
+    endMs: clip.timelineStartMs + asset.endOffsetMs
+  };
+}
 function audioRegionTimelineRange(project2, region) {
   const clip = project2?.clips?.find((candidate) => candidate.id === region?.clipId);
   if (!clip || clip.enabled === false) {
@@ -583,6 +792,13 @@ function audioRegionTimelineRange(project2, region) {
 function cuesAtTimeline(project2, timelineMs) {
   const target = Math.round(finiteNumber(timelineMs));
   return (project2?.subtitles || []).map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ range }) => range && target >= range.startMs && target < range.endMs).sort((a, b) => a.cue.lane - b.cue.lane || a.range.startMs - b.range.startMs || a.cue.id.localeCompare(b.cue.id)).map(({ cue }) => cue);
+}
+function imageAssetsAtTimeline(project2, timelineMs) {
+  const target = Math.round(finiteNumber(timelineMs));
+  return (project2?.imageAssets || []).filter((asset) => {
+    const range = imageAssetTimelineRange(project2, asset);
+    return range && target >= range.startMs && target < range.endMs;
+  });
 }
 function findSubtitleOverlaps(project2) {
   const cues = (project2?.subtitles || []).map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ range }) => range).sort((a, b) => a.range.startMs - b.range.startMs);
@@ -859,15 +1075,36 @@ function updateClipTrim(project2, clipId, {
       endOffsetMs: overlapEnd - start
     }, nextClip)];
   });
+  const imageAssets = (project2.imageAssets || []).flatMap((asset) => {
+    if (asset.clipId !== clipId) {
+      return [asset];
+    }
+    const assetSourceStart = current.sourceStartMs + asset.startOffsetMs;
+    const assetSourceEnd = current.sourceStartMs + asset.endOffsetMs;
+    const overlapStart = Math.max(start, assetSourceStart);
+    const overlapEnd = Math.min(end, assetSourceEnd);
+    if (overlapEnd - overlapStart < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    const next = normalizeImageAsset({
+      ...asset,
+      startOffsetMs: overlapStart - start,
+      endOffsetMs: overlapEnd - start
+    }, nextClip);
+    return next ? [next] : [];
+  });
   const selectedCueId = subtitles.some((cue) => cue.id === project2.selectedCueId) ? project2.selectedCueId : null;
   const selectedAudioRegionId = audioRegions.some((region) => region.id === project2.selectedAudioRegionId) ? project2.selectedAudioRegionId : null;
+  const selectedImageAssetId = imageAssets.some((asset) => asset.id === project2.selectedImageAssetId) ? project2.selectedImageAssetId : null;
   return {
     ...project2,
     clips,
     subtitles,
     audioRegions,
+    imageAssets,
     selectedCueId,
     selectedAudioRegionId,
+    selectedImageAssetId,
     updatedAt: nowIso()
   };
 }
@@ -30848,6 +31085,7 @@ var OUTPUT_AUDIO_CHANNELS = 2;
 var OUTPUT_AUDIO_SAMPLE_RATE = 48e3;
 var OUTPUT_AUDIO_BITRATE = 16e4;
 var FRAME_INDEX_EPSILON = 1e-7;
+var MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES = 256 * 1024 * 1024;
 function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw new DOMException("\uC791\uC5C5\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError");
@@ -31115,6 +31353,208 @@ function clampSamplePosition(value, length) {
 function activeCuesAt(project2, outputSeconds) {
   const outputMs = outputSeconds * 1e3;
   return project2.subtitles.map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ cue, range }) => range && cue.text.trim() && outputMs >= range.startMs && outputMs < range.endMs).sort((a, b) => (Number(a.cue.lane) || 0) - (Number(b.cue.lane) || 0) || a.range.startMs - b.range.startMs || String(a.cue.id).localeCompare(String(b.cue.id))).map(({ cue }) => cue);
+}
+function activeImageAssetsAt(project2, outputSeconds) {
+  return imageAssetsAtTimeline(project2, Number(outputSeconds) * 1e3);
+}
+function imageAssetDrawRect(canvas, asset, image) {
+  const canvasWidth = Math.max(1, Number(canvas?.width) || 1);
+  const canvasHeight = Math.max(1, Number(canvas?.height) || 1);
+  const naturalWidth = Math.max(
+    1,
+    Number(asset?.naturalWidth) || Number(image?.width) || 1
+  );
+  const naturalHeight = Math.max(
+    1,
+    Number(asset?.naturalHeight) || Number(image?.height) || 1
+  );
+  const baseFit = Math.min(
+    1,
+    canvasWidth * 0.35 / naturalWidth,
+    canvasHeight * 0.35 / naturalHeight
+  );
+  const requestedScale = Number(asset?.scale);
+  const scale = clamp(Number.isFinite(requestedScale) ? requestedScale : 1, 0.05, 5);
+  const width = naturalWidth * baseFit * scale;
+  const height = naturalHeight * baseFit * scale;
+  const requestedX = Number(asset?.x);
+  const requestedY = Number(asset?.y);
+  const centerX = canvasWidth * clamp(Number.isFinite(requestedX) ? requestedX : 0.5, 0, 1);
+  const centerY = canvasHeight * clamp(Number.isFinite(requestedY) ? requestedY : 0.5, 0, 1);
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height
+  };
+}
+function drawImageAsset(context, canvas, asset, image) {
+  if (!context || !asset || !image) {
+    return;
+  }
+  const rect = imageAssetDrawRect(canvas, asset, image);
+  context.save();
+  context.globalAlpha = clamp(
+    Number.isFinite(Number(asset.opacity)) ? Number(asset.opacity) : 1,
+    0,
+    1
+  );
+  context.globalCompositeOperation = "source-over";
+  context.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+  context.restore();
+}
+async function imageAssetBlob(asset, resolveImageAsset, fetchImageAsset) {
+  if (asset.source?.kind === "data-url") {
+    if (typeof fetchImageAsset !== "function") {
+      throw new Error(`\u2018${asset.name}\u2019 \uC774\uBBF8\uC9C0 \uB370\uC774\uD130\uB97C \uC77D\uC744 \uC218 \uC788\uB294 fetch \uAD6C\uD604\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.`);
+    }
+    const response = await fetchImageAsset(asset.source.value);
+    if (!response.ok) {
+      throw new Error(`\u2018${asset.name}\u2019 \uC774\uBBF8\uC9C0 \uB370\uC774\uD130\uB97C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.`);
+    }
+    return response.blob();
+  }
+  if (asset.source?.kind === "blob-key") {
+    if (typeof resolveImageAsset !== "function") {
+      throw new Error(`\u2018${asset.name}\u2019 \uB85C\uCEEC \uC774\uBBF8\uC9C0 \uC800\uC7A5\uC18C\uB97C \uC5F0\uACB0\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.`);
+    }
+    const resolved = await resolveImageAsset(asset.source, asset);
+    if (!(resolved instanceof Blob)) {
+      throw new Error(`\u2018${asset.name}\u2019 \uB85C\uCEEC \uC774\uBBF8\uC9C0 \uB370\uC774\uD130\uB97C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.`);
+    }
+    return resolved;
+  }
+  throw new Error(`\u2018${asset.name}\u2019 \uC774\uBBF8\uC9C0 \uCC38\uC870\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+}
+function decodedImageRgbaBytes(image) {
+  const width = Number(image?.width);
+  const height = Number(image?.height);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new Error("\uB514\uCF54\uB529\uD55C \uC774\uBBF8\uC9C0 \uC5D0\uC14B\uC758 \uD06C\uAE30\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  return Math.ceil(width) * Math.ceil(height) * 4;
+}
+function imageAssetMetadataRgbaBytes(asset) {
+  const width = Number(asset?.naturalWidth);
+  const height = Number(asset?.naturalHeight);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    return null;
+  }
+  return Math.ceil(width) * Math.ceil(height) * 4;
+}
+function decodedMemoryLimitLabel(bytes2) {
+  if (bytes2 >= 1024 * 1024) {
+    return `${Math.round(bytes2 / (1024 * 1024))} MiB`;
+  }
+  return `${bytes2} B`;
+}
+function decodedMemoryLimitError(memoryLimit) {
+  return new Error(
+    `\uB3D9\uC2DC\uC5D0 \uD45C\uC2DC\uB418\uB294 \uC774\uBBF8\uC9C0 \uC5D0\uC14B\uC758 \uB514\uCF54\uB4DC \uBA54\uBAA8\uB9AC\uAC00 ${decodedMemoryLimitLabel(memoryLimit)}\uB97C \uB118\uC2B5\uB2C8\uB2E4. \uC774\uBBF8\uC9C0 \uD06C\uAE30\uB098 \uACB9\uCE58\uB294 \uC5D0\uC14B \uC218\uB97C \uC904\uC5EC \uC8FC\uC138\uC694.`
+  );
+}
+function createImageAssetRenderCache(project2, {
+  resolveImageAsset = null,
+  fetchImageAsset = globalThis.fetch?.bind(globalThis),
+  decodeImageAsset = globalThis.createImageBitmap?.bind(globalThis),
+  maxDecodedBytes = MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES,
+  signal
+} = {}) {
+  const memoryLimit = Number(maxDecodedBytes);
+  if (!Number.isFinite(memoryLimit) || memoryLimit <= 0) {
+    throw new TypeError("\uC774\uBBF8\uC9C0 \uC5D0\uC14B \uB514\uCF54\uB4DC \uBA54\uBAA8\uB9AC \uC0C1\uD55C\uC740 0\uBCF4\uB2E4 \uCEE4\uC57C \uD569\uB2C8\uB2E4.");
+  }
+  const decoded = /* @__PURE__ */ new Map();
+  let decodedBytes = 0;
+  const closeEntry = (assetId) => {
+    const entry = decoded.get(assetId);
+    if (!entry) {
+      return;
+    }
+    decoded.delete(assetId);
+    decodedBytes = Math.max(0, decodedBytes - entry.bytes);
+    entry.image.close?.();
+  };
+  const closeAll = () => {
+    for (const assetId of [...decoded.keys()]) {
+      closeEntry(assetId);
+    }
+  };
+  const releaseThrough = (outputSeconds) => {
+    const outputMs = Math.round(Number(outputSeconds) * 1e3);
+    if (!Number.isFinite(outputMs)) {
+      return;
+    }
+    for (const [assetId, entry] of decoded) {
+      if (entry.endMs <= outputMs) {
+        closeEntry(assetId);
+      }
+    }
+  };
+  const prepareAt = async (outputSeconds) => {
+    throwIfAborted(signal);
+    releaseThrough(outputSeconds);
+    const activeAssets = activeImageAssetsAt(project2, outputSeconds);
+    try {
+      for (const asset of activeAssets) {
+        if (decoded.has(asset.id)) {
+          continue;
+        }
+        if (typeof decodeImageAsset !== "function") {
+          throw new Error("\uC774\uBBF8\uC9C0 \uC5D0\uC14B\uC744 \uB514\uCF54\uB529\uD560 \uC218 \uC788\uB294 \uBE0C\uB77C\uC6B0\uC800 \uAE30\uB2A5\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+        }
+        const metadataBytes = imageAssetMetadataRgbaBytes(asset);
+        if (metadataBytes !== null && decodedBytes + metadataBytes > memoryLimit) {
+          throw decodedMemoryLimitError(memoryLimit);
+        }
+        const blob = await imageAssetBlob(asset, resolveImageAsset, fetchImageAsset);
+        throwIfAborted(signal);
+        if (blob.type && asset.mimeType && blob.type !== asset.mimeType) {
+          throw new Error(`\u2018${asset.name}\u2019 \uC774\uBBF8\uC9C0 \uD615\uC2DD\uC774 \uC800\uC7A5 \uC815\uBCF4\uC640 \uB2E4\uB985\uB2C8\uB2E4.`);
+        }
+        const image = await decodeImageAsset(blob);
+        try {
+          throwIfAborted(signal);
+          const bytes2 = decodedImageRgbaBytes(image);
+          if (decodedBytes + bytes2 > memoryLimit) {
+            throw decodedMemoryLimitError(memoryLimit);
+          }
+          const range = imageAssetTimelineRange(project2, asset);
+          if (!range) {
+            image?.close?.();
+            continue;
+          }
+          decoded.set(asset.id, {
+            image,
+            bytes: bytes2,
+            endMs: range.endMs
+          });
+          decodedBytes += bytes2;
+        } catch (error) {
+          image?.close?.();
+          throw error;
+        }
+      }
+    } catch (error) {
+      closeAll();
+      throw error;
+    }
+    return activeAssets.map((asset) => ({
+      asset,
+      image: decoded.get(asset.id)?.image
+    })).filter(({ image }) => Boolean(image));
+  };
+  return {
+    prepareAt,
+    releaseThrough,
+    closeAll,
+    get decodedBytes() {
+      return decodedBytes;
+    },
+    get decodedCount() {
+      return decoded.size;
+    }
+  };
 }
 function wrapCaption(context, text, maxWidth) {
   const paragraphs = String(text).split(/\r?\n/);
@@ -31490,12 +31930,14 @@ async function renderProjectVideo(file, project2, {
   fileHandle = null,
   onProgress = () => {
   },
+  resolveImageAsset = null,
   signal
 } = {}) {
   throwIfAborted(signal);
   const input = createInput(file);
   let output = null;
   let fileTransaction = null;
+  let imageAssetCache = null;
   let completed = false;
   try {
     const source = await prepareRenderSource(input, project2);
@@ -31512,6 +31954,10 @@ async function renderProjectVideo(file, project2, {
       frameRate,
       videoBitrate
     } = settings;
+    imageAssetCache = createImageAssetRenderCache(project2, {
+      resolveImageAsset,
+      signal
+    });
     const outputCodecs = await chooseOutputCodecs(settings);
     let target;
     if (fileHandle) {
@@ -31588,6 +32034,11 @@ async function renderProjectVideo(file, project2, {
             context.fillStyle = "#000";
             context.fillRect(0, 0, width, height);
             sourceSample?.drawWithFit(context, { fit: "contain" });
+            const activeImageAssets = await imageAssetCache.prepareAt(timing.outputTimestamp);
+            for (const { asset, image } of activeImageAssets) {
+              drawImageAsset(context, canvas, asset, image);
+            }
+            imageAssetCache.releaseThrough(timing.outputTimestamp + timing.duration);
             for (const cue of activeCuesAt(project2, timing.outputTimestamp)) {
               drawCaption(context, canvas, project2, cue);
             }
@@ -31711,6 +32162,7 @@ async function renderProjectVideo(file, project2, {
     throw error;
   } finally {
     input.dispose();
+    imageAssetCache?.closeAll();
     if (!completed && fileTransaction && !fileTransaction.settled) {
       await fileTransaction.abort().catch(() => {
       });
@@ -31720,38 +32172,119 @@ async function renderProjectVideo(file, project2, {
 
 // src/editor/project-store.js
 var DATABASE_NAME = EDITOR_DATABASE_NAME;
-var DATABASE_VERSION = 1;
+var DATABASE_VERSION = 2;
 var PROJECTS = "projects";
 var HANDLES = "media-handles";
+var IMAGE_ASSETS = "image-assets";
 var databasePromise = null;
-function openDatabase() {
-  if (!databasePromise) {
-    databasePromise = new Promise((resolve, reject) => {
-      const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-      request.onerror = () => reject(request.error);
-      request.onupgradeneeded = () => {
-        const database = request.result;
-        if (!database.objectStoreNames.contains(PROJECTS)) {
-          database.createObjectStore(PROJECTS, { keyPath: "id" });
-        }
-        if (!database.objectStoreNames.contains(HANDLES)) {
-          database.createObjectStore(HANDLES);
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-    });
+var activeDatabase = null;
+function clearCachedDatabase(database, attempt) {
+  if (activeDatabase === database) {
+    activeDatabase = null;
   }
-  return databasePromise;
+  if (databasePromise === attempt) {
+    databasePromise = null;
+  }
 }
-async function transaction(storeName, mode, operation) {
-  const database = await openDatabase();
+function openDatabase() {
+  if (databasePromise) {
+    return databasePromise;
+  }
+  let resolveAttempt;
+  let rejectAttempt;
+  let settled = false;
+  const attempt = new Promise((resolve, reject) => {
+    resolveAttempt = resolve;
+    rejectAttempt = reject;
+  });
+  databasePromise = attempt;
+  const rejectOpen = (error) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    if (databasePromise === attempt) {
+      databasePromise = null;
+    }
+    rejectAttempt(error);
+  };
+  let request;
+  try {
+    request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+  } catch (error) {
+    rejectOpen(error);
+    return attempt;
+  }
+  request.onerror = () => rejectOpen(
+    request.error || new Error("\uD3B8\uC9D1\uAE30 \uC800\uC7A5\uC18C\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.")
+  );
+  request.onblocked = () => rejectOpen(new Error(
+    "\uB2E4\uB978 \uD3B8\uC9D1\uAE30 \uD0ED\uC774 \uC800\uC7A5\uC18C \uC5C5\uADF8\uB808\uC774\uB4DC\uB97C \uB9C9\uACE0 \uC788\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uD3B8\uC9D1\uAE30 \uD0ED\uC744 \uB2EB\uACE0 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694."
+  ));
+  request.onupgradeneeded = () => {
+    const database = request.result;
+    if (!database.objectStoreNames.contains(PROJECTS)) {
+      database.createObjectStore(PROJECTS, { keyPath: "id" });
+    }
+    if (!database.objectStoreNames.contains(HANDLES)) {
+      database.createObjectStore(HANDLES);
+    }
+    if (!database.objectStoreNames.contains(IMAGE_ASSETS)) {
+      database.createObjectStore(IMAGE_ASSETS);
+    }
+  };
+  request.onsuccess = () => {
+    const database = request.result;
+    if (settled) {
+      database.close();
+      return;
+    }
+    settled = true;
+    activeDatabase = database;
+    database.onversionchange = () => {
+      database.close();
+      clearCachedDatabase(database, attempt);
+    };
+    database.onclose = () => clearCachedDatabase(database, attempt);
+    resolveAttempt(database);
+  };
+  return attempt;
+}
+function isClosedDatabaseError(error) {
+  return error?.name === "InvalidStateError";
+}
+function discardDatabase(database) {
+  if (activeDatabase === database) {
+    activeDatabase = null;
+    databasePromise = null;
+  }
+  try {
+    database?.close();
+  } catch {
+  }
+}
+function runTransaction(database, storeNames, mode, operation) {
   return new Promise((resolve, reject) => {
-    const tx = database.transaction(storeName, mode);
-    const store = tx.objectStore(storeName);
+    const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+    let tx;
+    try {
+      tx = database.transaction(storeNames, mode);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const stores = Object.fromEntries(
+      names.map((storeName) => [storeName, tx.objectStore(storeName)])
+    );
+    const operationTarget = Array.isArray(storeNames) ? stores : stores[storeNames];
     let result;
     try {
-      result = operation(store);
+      result = operation(operationTarget, tx);
     } catch (error) {
+      try {
+        tx.abort();
+      } catch {
+      }
       reject(error);
       return;
     }
@@ -31759,6 +32292,18 @@ async function transaction(storeName, mode, operation) {
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error("\uC800\uC7A5 \uC791\uC5C5\uC774 \uC911\uB2E8\uB418\uC5C8\uC2B5\uB2C8\uB2E4."));
   });
+}
+async function transaction(storeNames, mode, operation, retryClosedDatabase = true) {
+  const database = await openDatabase();
+  try {
+    return await runTransaction(database, storeNames, mode, operation);
+  } catch (error) {
+    if (retryClosedDatabase && isClosedDatabaseError(error)) {
+      discardDatabase(database);
+      return transaction(storeNames, mode, operation, false);
+    }
+    throw error;
+  }
 }
 async function loadProject(projectId) {
   return transaction(PROJECTS, "readonly", (store) => store.get(projectId));
@@ -31809,6 +32354,82 @@ async function getFileFromStoredHandle(projectId) {
     return { handle: null, file: null, permission: "error", error: error.message };
   }
 }
+var imageAssetKey = (projectId, assetId) => [
+  String(projectId || ""),
+  String(assetId || "")
+];
+async function saveProjectWithImageAssetBlob(project2, assetId, blob) {
+  if (!(blob instanceof Blob) || blob.size === 0) {
+    throw new TypeError("\uC800\uC7A5\uD560 \uC774\uBBF8\uC9C0 \uC5D0\uC14B Blob\uC774 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.");
+  }
+  await transaction(
+    [PROJECTS, IMAGE_ASSETS],
+    "readwrite",
+    (stores) => {
+      stores[PROJECTS].put(project2);
+      stores[IMAGE_ASSETS].put(blob, imageAssetKey(project2?.id, assetId));
+      return {
+        get result() {
+          return project2;
+        }
+      };
+    }
+  );
+  return project2;
+}
+async function loadImageAssetBlob(projectId, assetId) {
+  const value = await transaction(
+    IMAGE_ASSETS,
+    "readonly",
+    (store) => store.get(imageAssetKey(projectId, assetId))
+  );
+  return value instanceof Blob ? value : null;
+}
+async function pruneImageAssetBlobs(projectId, keepAssetIds = []) {
+  const targetProjectId = String(projectId || "");
+  const requestedKeep = new Set(
+    Array.from(keepAssetIds || [], (assetId) => String(assetId || ""))
+  );
+  const deletedCount = await transaction(
+    [PROJECTS, IMAGE_ASSETS],
+    "readwrite",
+    (stores) => {
+      let count = 0;
+      const projectRequest = stores[PROJECTS].get(targetProjectId);
+      projectRequest.onsuccess = () => {
+        const keep = new Set(requestedKeep);
+        for (const asset of projectRequest.result?.imageAssets || []) {
+          if (asset?.source?.kind !== "blob-key") {
+            continue;
+          }
+          const blobKey = String(asset.source.value || asset.id || "");
+          if (blobKey) {
+            keep.add(blobKey);
+          }
+        }
+        const request = stores[IMAGE_ASSETS].openKeyCursor();
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            return;
+          }
+          const key = cursor.primaryKey ?? cursor.key;
+          if (Array.isArray(key) && key.length >= 2 && String(key[0]) === targetProjectId && !keep.has(String(key[1]))) {
+            stores[IMAGE_ASSETS].delete(key);
+            count += 1;
+          }
+          cursor.continue();
+        };
+      };
+      return {
+        get result() {
+          return count;
+        }
+      };
+    }
+  );
+  return Number(deletedCount) || 0;
+}
 
 // src/editor/main.js
 var elements = Object.fromEntries([
@@ -31835,6 +32456,7 @@ var elements = Object.fromEntries([
   "stage-empty",
   "pick-media-empty",
   "subtitle-overlays",
+  "image-asset-overlays",
   "previous-clip",
   "play-toggle",
   "next-clip",
@@ -31843,10 +32465,12 @@ var elements = Object.fromEntries([
   "toggle-mute",
   "volume",
   "caption-mode-tab",
+  "asset-mode-tab",
   "audio-mode-tab",
   "inspector-overline",
   "inspector-title",
   "caption-inspector-content",
+  "asset-inspector-content",
   "audio-inspector-content",
   "add-cue-top",
   "asr-model",
@@ -31872,6 +32496,24 @@ var elements = Object.fromEntries([
   "reset-font-color",
   "delete-cue",
   "cue-list",
+  "asset-empty",
+  "asset-editor",
+  "asset-thumbnail",
+  "asset-name",
+  "asset-meta",
+  "asset-start",
+  "asset-end",
+  "asset-x",
+  "asset-y",
+  "asset-x-value",
+  "asset-y-value",
+  "asset-scale",
+  "asset-scale-value",
+  "asset-opacity",
+  "asset-opacity-value",
+  "asset-paste",
+  "asset-pick-file",
+  "delete-asset",
   "audio-empty",
   "audio-editor",
   "audio-region-label",
@@ -31888,6 +32530,7 @@ var elements = Object.fromEntries([
   "reset-audio-region",
   "delete-audio-region",
   "add-audio-region",
+  "paste-image-asset",
   "add-cue",
   "subtitle-lane-count",
   "add-subtitle-lane",
@@ -31897,16 +32540,21 @@ var elements = Object.fromEntries([
   "timeline-content",
   "timeline-ruler",
   "video-track",
+  "asset-track",
   "audio-track",
   "caption-tracks",
   "playhead",
   "timeline-context-menu",
   "context-add-cue",
+  "context-paste-asset",
+  "context-pick-asset",
   "context-add-audio",
   "context-delete-cue",
+  "context-delete-asset",
   "context-delete-audio",
   "context-add-lane",
   "media-input",
+  "asset-input",
   "job-dialog",
   "job-title",
   "job-message",
@@ -31924,6 +32572,7 @@ var mediaUrl = null;
 var sourceBindingConnected = false;
 var pixelsPerSecond = 70;
 var saveTimer = null;
+var imageAssetPruneTimer = null;
 var toastTimer = null;
 var activeClipId = null;
 var undoStack = [];
@@ -31945,7 +32594,22 @@ var propertyInspectorMode = "caption";
 var previewVolume = 1;
 var previewMuted = false;
 var timelineContext = null;
+var pendingAssetTimelineMs = null;
+var imageAssetRenderSequence = 0;
+var imageAssetObjectUrls = /* @__PURE__ */ new Map();
 var EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
+var MAX_IMAGE_ASSET_BYTES = 25 * 1024 * 1024;
+var MAX_IMAGE_ASSET_DIMENSION = 8192;
+var MAX_IMAGE_ASSET_PIXELS = 4e7;
+var ASSET_TRACK_BASE_HEIGHT_PX = 54;
+var ASSET_SUBROW_STRIDE_PX = 47;
+var ASSET_BLOCK_TOP_PX = 7;
+var ALLOWED_IMAGE_ASSET_TYPES = /* @__PURE__ */ new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif"
+]);
 var cloneProject = (value) => structuredClone(value);
 function formatTime(milliseconds, { compact = false } = {}) {
   const value = Math.max(0, Math.round(Number(milliseconds) || 0));
@@ -32015,7 +32679,7 @@ function showToast(message, type = "info", timeout = 3600) {
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    void saveProject(project).catch((error) => {
+    void saveProject(project).then(() => scheduleImageAssetBlobPrune()).catch((error) => {
       showToast(`\uD504\uB85C\uC81D\uD2B8 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
     });
   }, 180);
@@ -32023,7 +32687,60 @@ function scheduleSave() {
 function flushSave() {
   clearTimeout(saveTimer);
   saveTimer = null;
-  return project ? saveProject(project) : Promise.resolve();
+  if (!project) {
+    return Promise.resolve();
+  }
+  return saveProject(project).then((savedProject) => {
+    scheduleImageAssetBlobPrune();
+    return savedProject;
+  });
+}
+function collectImageAssetBlobKeys(candidateProject, keys) {
+  for (const asset of candidateProject?.imageAssets || []) {
+    if (asset.source?.kind === "blob-key" && asset.source.value) {
+      keys.add(String(asset.source.value));
+    }
+  }
+}
+async function pruneUnusedImageAssetBlobs() {
+  if (!project?.id) {
+    return 0;
+  }
+  const projectId = project.id;
+  const editorUrl = chrome.runtime.getURL("editor.html");
+  const editorTabs = await chrome.tabs.query({});
+  const sameProjectTabs = editorTabs.filter((tab) => {
+    if (!String(tab.url || "").startsWith(editorUrl)) {
+      return false;
+    }
+    try {
+      return new URL(tab.url).searchParams.get("project") === projectId;
+    } catch {
+      return false;
+    }
+  });
+  if (sameProjectTabs.length > 1) {
+    return 0;
+  }
+  const keep = /* @__PURE__ */ new Set();
+  collectImageAssetBlobKeys(project, keep);
+  for (const snapshot of undoStack) {
+    collectImageAssetBlobKeys(snapshot, keep);
+  }
+  for (const snapshot of redoStack) {
+    collectImageAssetBlobKeys(snapshot, keep);
+  }
+  collectImageAssetBlobKeys(fieldEditSession?.snapshot, keep);
+  return pruneImageAssetBlobs(projectId, keep);
+}
+function scheduleImageAssetBlobPrune() {
+  clearTimeout(imageAssetPruneTimer);
+  imageAssetPruneTimer = setTimeout(() => {
+    imageAssetPruneTimer = null;
+    void pruneUnusedImageAssetBlobs().catch((error) => {
+      console.warn("\uC0AC\uC6A9\uD558\uC9C0 \uC54A\uB294 \uC774\uBBF8\uC9C0 \uC5D0\uC14B \uB370\uC774\uD130\uB97C \uC815\uB9AC\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", error);
+    });
+  }, 3e3);
 }
 function pushUndo(snapshot) {
   undoStack.push(snapshot);
@@ -32119,6 +32836,61 @@ function selectedCue() {
 function selectedAudioRegion() {
   return project.audioRegions.find((region) => region.id === project.selectedAudioRegionId) || null;
 }
+function selectedImageAsset() {
+  return (project.imageAssets || []).find((asset) => asset.id === project.selectedImageAssetId) || null;
+}
+function formatFileSize(bytes2) {
+  const value = Math.max(0, Number(bytes2) || 0);
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1)}MB`;
+  }
+  return `${Math.max(1, Math.round(value / 1024))}KB`;
+}
+function releaseImageAssetObjectUrl(assetId) {
+  const cached = imageAssetObjectUrls.get(assetId);
+  if (cached?.url) {
+    URL.revokeObjectURL(cached.url);
+  }
+  imageAssetObjectUrls.delete(assetId);
+}
+function releaseAllImageAssetObjectUrls() {
+  for (const assetId of imageAssetObjectUrls.keys()) {
+    releaseImageAssetObjectUrl(assetId);
+  }
+}
+async function resolveImageAssetUrl(asset) {
+  if (!asset?.source) {
+    return null;
+  }
+  if (asset.source.kind === "data-url") {
+    return /^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(asset.source.value) ? asset.source.value : null;
+  }
+  if (asset.source.kind !== "blob-key") {
+    return null;
+  }
+  const sourceKey = `${asset.source.kind}:${asset.source.value}`;
+  const cached = imageAssetObjectUrls.get(asset.id);
+  if (cached?.sourceKey === sourceKey) {
+    return cached.url;
+  }
+  releaseImageAssetObjectUrl(asset.id);
+  const blob = await loadImageAssetBlob(project.id, asset.source.value);
+  if (!(blob instanceof Blob) || !ALLOWED_IMAGE_ASSET_TYPES.has(blob.type)) {
+    return null;
+  }
+  const afterLoad = imageAssetObjectUrls.get(asset.id);
+  if (afterLoad?.sourceKey === sourceKey) {
+    return afterLoad.url;
+  }
+  const assetStillPresent = project.imageAssets?.some((candidate) => candidate.id === asset.id && candidate.source?.kind === asset.source.kind && candidate.source?.value === asset.source.value);
+  if (!assetStillPresent) {
+    return null;
+  }
+  releaseImageAssetObjectUrl(asset.id);
+  const url2 = URL.createObjectURL(blob);
+  imageAssetObjectUrls.set(asset.id, { sourceKey, url: url2 });
+  return url2;
+}
 function renderHeader() {
   if (elements.project_name.value !== project.name && document.activeElement !== elements.project_name) {
     elements.project_name.value = project.name;
@@ -32211,6 +32983,56 @@ function renderCueInspector() {
   const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
 }
+function renderImageAssetInspector() {
+  const asset = selectedImageAsset();
+  elements.asset_empty.hidden = Boolean(asset);
+  elements.asset_editor.hidden = !asset;
+  if (!asset) {
+    elements.asset_thumbnail.removeAttribute("src");
+    elements.asset_thumbnail.alt = "";
+    return;
+  }
+  const range = imageAssetTimelineRange(project, asset);
+  elements.asset_name.textContent = asset.name;
+  elements.asset_meta.textContent = [
+    asset.naturalWidth && asset.naturalHeight ? `${asset.naturalWidth}\xD7${asset.naturalHeight}` : null,
+    asset.mimeType?.replace("image/", "").toUpperCase(),
+    asset.mimeType === "image/png" || asset.mimeType === "image/webp" ? "\uD22C\uBA85 \uBC30\uACBD \uC9C0\uC6D0" : null
+  ].filter(Boolean).join(" \xB7 ");
+  if (document.activeElement !== elements.asset_start) {
+    elements.asset_start.value = formatTime(range?.startMs || 0, { compact: true });
+  }
+  if (document.activeElement !== elements.asset_end) {
+    elements.asset_end.value = formatTime(range?.endMs || 0, { compact: true });
+  }
+  const xPercent = Math.round(asset.x * 100);
+  const yPercent = Math.round(asset.y * 100);
+  const scalePercent = Math.round(asset.scale * 100);
+  const opacityPercent = Math.round(asset.opacity * 100);
+  elements.asset_x.value = String(xPercent);
+  elements.asset_y.value = String(yPercent);
+  elements.asset_x_value.textContent = `${xPercent}%`;
+  elements.asset_y_value.textContent = `${yPercent}%`;
+  elements.asset_scale.value = String(scalePercent);
+  elements.asset_scale_value.textContent = `${scalePercent}%`;
+  elements.asset_opacity.value = String(opacityPercent);
+  elements.asset_opacity_value.textContent = `${opacityPercent}%`;
+  elements.asset_thumbnail.alt = `${asset.name} \uBBF8\uB9AC\uBCF4\uAE30`;
+  const selectedId = asset.id;
+  void resolveImageAssetUrl(asset).then((url2) => {
+    if (selectedImageAsset()?.id !== selectedId) {
+      return;
+    }
+    if (url2) {
+      elements.asset_thumbnail.src = url2;
+    } else {
+      elements.asset_thumbnail.removeAttribute("src");
+    }
+  }).catch((error) => {
+    console.warn("\uC774\uBBF8\uC9C0 \uC5D0\uC14B \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", error);
+    elements.asset_thumbnail.removeAttribute("src");
+  });
+}
 function renderAudioInspector() {
   const region = selectedAudioRegion();
   elements.audio_empty.hidden = Boolean(region);
@@ -32244,18 +33066,25 @@ function renderAudioInspector() {
 }
 function renderPropertyInspector() {
   const showingAudio = propertyInspectorMode === "audio";
-  elements.caption_mode_tab.classList.toggle("active", !showingAudio);
-  elements.caption_mode_tab.setAttribute("aria-selected", String(!showingAudio));
-  elements.caption_mode_tab.tabIndex = showingAudio ? -1 : 0;
+  const showingAsset = propertyInspectorMode === "asset";
+  const showingCaption = !showingAudio && !showingAsset;
+  elements.caption_mode_tab.classList.toggle("active", showingCaption);
+  elements.caption_mode_tab.setAttribute("aria-selected", String(showingCaption));
+  elements.caption_mode_tab.tabIndex = showingCaption ? 0 : -1;
+  elements.asset_mode_tab.classList.toggle("active", showingAsset);
+  elements.asset_mode_tab.setAttribute("aria-selected", String(showingAsset));
+  elements.asset_mode_tab.tabIndex = showingAsset ? 0 : -1;
   elements.audio_mode_tab.classList.toggle("active", showingAudio);
   elements.audio_mode_tab.setAttribute("aria-selected", String(showingAudio));
   elements.audio_mode_tab.tabIndex = showingAudio ? 0 : -1;
-  elements.caption_inspector_content.hidden = showingAudio;
+  elements.caption_inspector_content.hidden = !showingCaption;
+  elements.asset_inspector_content.hidden = !showingAsset;
   elements.audio_inspector_content.hidden = !showingAudio;
-  elements.inspector_overline.textContent = showingAudio ? "VOICE" : "CAPTIONS";
-  elements.inspector_title.textContent = showingAudio ? "\uAD6C\uAC04\uBCC4 \uC74C\uC131" : "\uD55C\uAE00 \uC790\uB9C9";
-  elements.add_cue_top.hidden = showingAudio;
+  elements.inspector_overline.textContent = showingAudio ? "VOICE" : showingAsset ? "IMAGE ASSETS" : "CAPTIONS";
+  elements.inspector_title.textContent = showingAudio ? "\uAD6C\uAC04\uBCC4 \uC74C\uC131" : showingAsset ? "\uC601\uC0C1 \uC704 \uC774\uBBF8\uC9C0" : "\uD55C\uAE00 \uC790\uB9C9";
+  elements.add_cue_top.hidden = !showingCaption;
   renderCueInspector();
+  renderImageAssetInspector();
   renderAudioInspector();
 }
 function renderCueList() {
@@ -32290,6 +33119,32 @@ function timelineWidth() {
 }
 function timelineX(milliseconds) {
   return milliseconds / 1e3 * pixelsPerSecond;
+}
+function layoutImageAssetSubrows(candidateProject) {
+  const entries = (candidateProject.imageAssets || []).map((asset, assetIndex) => ({
+    asset,
+    assetIndex,
+    range: imageAssetTimelineRange(candidateProject, asset)
+  })).filter((entry) => entry.range).sort((first, second) => first.range.startMs - second.range.startMs || first.range.endMs - second.range.endMs || first.assetIndex - second.assetIndex);
+  const subrowEndTimes = [];
+  const byAssetId = /* @__PURE__ */ new Map();
+  entries.forEach((entry) => {
+    let subrow = subrowEndTimes.findIndex((endMs) => endMs <= entry.range.startMs);
+    if (subrow === -1) {
+      subrow = subrowEndTimes.length;
+      subrowEndTimes.push(entry.range.endMs);
+    } else {
+      subrowEndTimes[subrow] = entry.range.endMs;
+    }
+    byAssetId.set(entry.asset.id, {
+      range: entry.range,
+      subrow
+    });
+  });
+  return {
+    byAssetId,
+    subrowCount: Math.max(1, subrowEndTimes.length)
+  };
 }
 function renderRuler(width) {
   elements.timeline_ruler.replaceChildren();
@@ -32334,9 +33189,9 @@ function makeHandle(side, onStart, onNudge, {
     }
     event.preventDefault();
     event.stopPropagation();
-    const owner = handle.closest(".clip-block, .cue-block, .audio-block");
+    const owner = handle.closest(".clip-block, .asset-block, .cue-block, .audio-block");
     const ownerId = owner?.dataset.id;
-    const ownerClass = owner?.classList.contains("clip-block") ? "clip-block" : owner?.classList.contains("audio-block") ? "audio-block" : "cue-block";
+    const ownerClass = owner?.classList.contains("clip-block") ? "clip-block" : owner?.classList.contains("asset-block") ? "asset-block" : owner?.classList.contains("audio-block") ? "audio-block" : "cue-block";
     const amount = event.shiftKey ? 1e3 : 100;
     onNudge(event.key === "ArrowLeft" ? -amount : amount);
     queueMicrotask(() => {
@@ -32404,6 +33259,15 @@ function bindCueTrim(handle, cue, side, event) {
   event.preventDefault();
   event.stopPropagation();
   beginPointerHistory();
+  propertyInspectorMode = "caption";
+  inspectorMode = "selected";
+  const originalProject = {
+    ...project,
+    selectedCueId: cue.id,
+    selectedClipId: cue.clipId
+  };
+  project = originalProject;
+  handle.closest(".cue-block")?.classList.add("selected");
   const startX = event.clientX;
   const originalStart = cue.startOffsetMs;
   const originalEnd = cue.endOffsetMs;
@@ -32420,7 +33284,7 @@ function bindCueTrim(handle, cue, side, event) {
     const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1e3);
     const startOffsetMs = side === "left" ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta)) : originalStart;
     const endOffsetMs = side === "right" ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta)) : originalEnd;
-    const nextProject = updateSubtitleCue(project, cue.id, { startOffsetMs, endOffsetMs });
+    const nextProject = updateSubtitleCue(originalProject, cue.id, { startOffsetMs, endOffsetMs });
     if (cueHasOverlap(nextProject, cue.id)) {
       overlapBlocked = true;
       return;
@@ -32448,6 +33312,58 @@ function bindCueTrim(handle, cue, side, event) {
     if (overlapBlocked) {
       showToast("\uAC19\uC740 \uC790\uB9C9 \uB808\uC778 \uC548\uC5D0\uC11C\uB294 \uC790\uB9C9\uC774 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
     }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+function bindImageAssetTrim(handle, asset, side, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  beginPointerHistory();
+  propertyInspectorMode = "asset";
+  const originalProject = {
+    ...project,
+    selectedImageAssetId: asset.id,
+    selectedClipId: asset.clipId
+  };
+  project = originalProject;
+  handle.closest(".asset-block")?.classList.add("selected");
+  const startX = event.clientX;
+  const originalStart = asset.startOffsetMs;
+  const originalEnd = asset.endOffsetMs;
+  const clip = project.clips.find((candidate) => candidate.id === asset.clipId);
+  const duration = clipDurationMs(clip);
+  const pointerId = event.pointerId;
+  const block = handle.closest(".asset-block");
+  handle.setPointerCapture(pointerId);
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1e3);
+    const startOffsetMs = side === "left" ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta)) : originalStart;
+    const endOffsetMs = side === "right" ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta)) : originalEnd;
+    project = updateImageAsset(originalProject, asset.id, { startOffsetMs, endOffsetMs });
+    const nextAsset = selectedImageAsset();
+    const range = imageAssetTimelineRange(project, nextAsset);
+    if (block && range) {
+      block.style.left = `${timelineX(range.startMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    }
+    renderImageAssetInspector();
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    endPointerHistory();
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", finish);
@@ -32515,16 +33431,22 @@ function renderTimeline({ keepScroll = false } = {}) {
   const scrollLeft = elements.timeline_scroll.scrollLeft;
   const width = timelineWidth();
   const laneCount = Math.max(2, project.subtitleLaneCount || 2);
+  const assetLayout = layoutImageAssetSubrows(project);
+  const assetTrackHeight = ASSET_TRACK_BASE_HEIGHT_PX + (assetLayout.subrowCount - 1) * ASSET_SUBROW_STRIDE_PX;
   document.documentElement.style.setProperty("--subtitle-lane-count", String(laneCount));
+  document.documentElement.style.setProperty("--asset-track-height", `${assetTrackHeight}px`);
   elements.subtitle_lane_count.textContent = String(laneCount);
   elements.add_subtitle_lane.disabled = laneCount >= MAX_SUBTITLE_LANES;
   elements.timeline_content.style.width = `${width}px`;
   elements.video_track.style.width = `${width}px`;
+  elements.asset_track.style.width = `${width}px`;
   elements.audio_track.style.width = `${width}px`;
   elements.video_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+  elements.asset_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
   elements.audio_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
   renderRuler(width);
   elements.video_track.replaceChildren();
+  elements.asset_track.replaceChildren();
   elements.audio_track.replaceChildren();
   elements.caption_tracks.replaceChildren();
   const captionRows = Array.from({ length: laneCount }, (_, lane) => {
@@ -32609,6 +33531,70 @@ function renderTimeline({ keepScroll = false } = {}) {
       addAudioRegionAtTimeline(timelineMs);
     });
     elements.audio_track.append(audioSource);
+  });
+  (project.imageAssets || []).forEach((asset, assetIndex) => {
+    const layout = assetLayout.byAssetId.get(asset.id);
+    if (!layout) {
+      return;
+    }
+    const { range, subrow } = layout;
+    const block = document.createElement("div");
+    block.className = "asset-block";
+    block.classList.toggle("selected", asset.id === project.selectedImageAssetId);
+    block.dataset.id = asset.id;
+    block.dataset.subrow = String(subrow);
+    block.style.left = `${timelineX(range.startMs)}px`;
+    block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    block.style.setProperty(
+      "--asset-block-top",
+      `${ASSET_BLOCK_TOP_PX + subrow * ASSET_SUBROW_STRIDE_PX}px`
+    );
+    block.style.zIndex = asset.id === project.selectedImageAssetId ? "12" : "2";
+    const body = document.createElement("button");
+    body.type = "button";
+    body.className = "asset-block-body";
+    body.textContent = asset.name || `\uC774\uBBF8\uC9C0 ${assetIndex + 1}`;
+    body.title = `${asset.name || "\uC774\uBBF8\uC9C0 \uC5D0\uC14B"} \xB7 \uACB9\uCE5C \uC774\uBBF8\uC9C0\uB294 \uC5D0\uC14B \uD2B8\uB799\uC758 \uBCC4\uB3C4 \uC904\uC5D0 \uD45C\uC2DC\uB429\uB2C8\uB2E4.`;
+    body.addEventListener("click", () => selectImageAsset(asset.id, { seek: true }));
+    const assetClip = project.clips.find((candidate) => candidate.id === asset.clipId);
+    const nudgeAsset = (side, delta) => {
+      const current = project.imageAssets.find((candidate) => candidate.id === asset.id);
+      const currentClip = project.clips.find((candidate) => candidate.id === current.clipId);
+      const duration = clipDurationMs(currentClip);
+      const startOffsetMs = side === "left" ? Math.max(0, Math.min(current.endOffsetMs - 100, current.startOffsetMs + delta)) : current.startOffsetMs;
+      const endOffsetMs = side === "right" ? Math.min(duration, Math.max(current.startOffsetMs + 100, current.endOffsetMs + delta)) : current.endOffsetMs;
+      applyProject(
+        updateImageAsset(project, asset.id, { startOffsetMs, endOffsetMs }),
+        { render: false }
+      );
+      renderAll({ keepScroll: true });
+    };
+    block.append(
+      makeHandle(
+        "left",
+        (event) => bindImageAssetTrim(event.currentTarget, asset, "left", event),
+        (delta) => nudgeAsset("left", delta),
+        {
+          label: `${assetIndex + 1}\uBC88 \uC774\uBBF8\uC9C0 \uC5D0\uC14B \uC2DC\uC791 \uC2DC\uAC01`,
+          valueMs: range.startMs,
+          minMs: assetClip.timelineStartMs,
+          maxMs: range.endMs - 100
+        }
+      ),
+      body,
+      makeHandle(
+        "right",
+        (event) => bindImageAssetTrim(event.currentTarget, asset, "right", event),
+        (delta) => nudgeAsset("right", delta),
+        {
+          label: `${assetIndex + 1}\uBC88 \uC774\uBBF8\uC9C0 \uC5D0\uC14B \uB05D \uC2DC\uAC01`,
+          valueMs: range.endMs,
+          minMs: range.startMs + 100,
+          maxMs: assetClip.timelineStartMs + clipDurationMs(assetClip)
+        }
+      )
+    );
+    elements.asset_track.append(block);
   });
   project.audioRegions.forEach((region, regionIndex) => {
     const range = audioRegionTimelineRange(project, region);
@@ -32754,6 +33740,54 @@ function videoContentRect() {
     height
   };
 }
+async function renderImageAssetOverlays() {
+  const sequence = ++imageAssetRenderSequence;
+  elements.image_asset_overlays.replaceChildren();
+  const assets = mediaFile ? imageAssetsAtTimeline(project, project.playheadMs) : [];
+  if (assets.length === 0) {
+    return;
+  }
+  const resolved = await Promise.all(assets.map(async (asset) => ({
+    asset,
+    url: await resolveImageAssetUrl(asset)
+  })));
+  if (sequence !== imageAssetRenderSequence) {
+    return;
+  }
+  const contentRect = videoContentRect();
+  resolved.forEach(({ asset, url: url2 }) => {
+    if (!url2) {
+      return;
+    }
+    const naturalWidth = Math.max(1, asset.naturalWidth || 512);
+    const naturalHeight = Math.max(1, asset.naturalHeight || 512);
+    const baseFit = Math.min(
+      1,
+      contentRect.width * 0.35 / naturalWidth,
+      contentRect.height * 0.35 / naturalHeight
+    );
+    const overlay = document.createElement("button");
+    overlay.type = "button";
+    overlay.className = "image-asset-overlay";
+    overlay.classList.toggle("selected", asset.id === project.selectedImageAssetId);
+    overlay.dataset.assetId = asset.id;
+    overlay.setAttribute("aria-label", `\uC774\uBBF8\uC9C0 \uC5D0\uC14B: ${asset.name}`);
+    overlay.style.left = `${contentRect.left + contentRect.width * asset.x}px`;
+    overlay.style.top = `${contentRect.top + contentRect.height * asset.y}px`;
+    overlay.style.width = `${Math.max(1, naturalWidth * baseFit * asset.scale)}px`;
+    overlay.style.height = `${Math.max(1, naturalHeight * baseFit * asset.scale)}px`;
+    overlay.style.opacity = String(asset.opacity);
+    const image = document.createElement("img");
+    image.src = url2;
+    image.alt = "";
+    image.draggable = false;
+    const indicator = document.createElement("i");
+    indicator.className = "asset-drag-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    overlay.append(image, indicator);
+    elements.image_asset_overlays.append(overlay);
+  });
+}
 function renderSubtitleOverlay() {
   elements.subtitle_overlays.replaceChildren();
   const cues = mediaFile ? cuesAtTimeline(project, project.playheadMs) : [];
@@ -32839,6 +33873,9 @@ function updatePlayhead() {
   elements.playhead.setAttribute("aria-valuetext", formatTime(project.playheadMs));
   elements.current_time.textContent = formatTime(project.playheadMs);
   elements.duration_time.textContent = `/ ${formatTime(duration)}`;
+  void renderImageAssetOverlays().catch((error) => {
+    console.warn("\uC774\uBBF8\uC9C0 \uC5D0\uC14B \uC624\uBC84\uB808\uC774\uB97C \uADF8\uB9AC\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", error);
+  });
   renderSubtitleOverlay();
   applyPreviewAudioSettings();
 }
@@ -33077,6 +34114,158 @@ function selectAudioRegion(regionId, { seek = false } = {}) {
   renderAll({ keepScroll: true });
   scheduleSave();
 }
+function selectImageAsset(assetId, { seek = false } = {}) {
+  const asset = (project.imageAssets || []).find((candidate) => candidate.id === assetId);
+  if (!asset) {
+    return;
+  }
+  project = {
+    ...project,
+    selectedImageAssetId: asset.id,
+    selectedClipId: asset.clipId
+  };
+  propertyInspectorMode = "asset";
+  const range = imageAssetTimelineRange(project, asset);
+  if (seek && range) {
+    void seekTimeline(range.startMs);
+  }
+  renderAll({ keepScroll: true });
+  scheduleSave();
+}
+async function inspectImageAssetBlob(blob) {
+  if (!(blob instanceof Blob) || blob.size === 0) {
+    throw new Error("\uD074\uB9BD\uBCF4\uB4DC\uB098 \uD30C\uC77C\uC5D0 \uC774\uBBF8\uC9C0 \uB370\uC774\uD130\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  if (!ALLOWED_IMAGE_ASSET_TYPES.has(blob.type)) {
+    throw new Error("PNG, JPEG, WebP \uB610\uB294 GIF \uC774\uBBF8\uC9C0\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4. SVG\uB294 \uC548\uC804\uC744 \uC704\uD574 \uC81C\uC678\uD569\uB2C8\uB2E4.");
+  }
+  if (blob.size > MAX_IMAGE_ASSET_BYTES) {
+    throw new Error(`\uC774\uBBF8\uC9C0 \uD55C \uC7A5\uC740 ${formatFileSize(MAX_IMAGE_ASSET_BYTES)} \uC774\uD558\uC5EC\uC57C \uD569\uB2C8\uB2E4.`);
+  }
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(blob);
+    const width = bitmap.width;
+    const height = bitmap.height;
+    if (width <= 0 || height <= 0 || width > MAX_IMAGE_ASSET_DIMENSION || height > MAX_IMAGE_ASSET_DIMENSION || width * height > MAX_IMAGE_ASSET_PIXELS) {
+      throw new Error(
+        `\uC774\uBBF8\uC9C0\uAC00 \uB108\uBB34 \uD07D\uB2C8\uB2E4. \uCD5C\uB300 ${MAX_IMAGE_ASSET_DIMENSION}px, ${Math.round(MAX_IMAGE_ASSET_PIXELS / 1e6)}\uBA54\uAC00\uD53D\uC140\uAE4C\uC9C0 \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.`
+      );
+    }
+    return { width, height };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("\uC774\uBBF8\uC9C0\uAC00 \uB108\uBB34 \uD07D\uB2C8\uB2E4")) {
+      throw error;
+    }
+    throw new Error("\uC190\uC0C1\uB418\uC5C8\uAC70\uB098 \uBE0C\uB77C\uC6B0\uC800\uAC00 \uC77D\uC744 \uC218 \uC5C6\uB294 \uC774\uBBF8\uC9C0\uC785\uB2C8\uB2E4.");
+  } finally {
+    bitmap?.close();
+  }
+}
+function pastedImageName(mimeType) {
+  const extension = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif"
+  }[mimeType] || "image";
+  return `\uBD99\uC5EC\uB123\uC740 \uC774\uBBF8\uC9C0.${extension}`;
+}
+async function addImageAssetFromBlob(blob, {
+  timelineMs = project.playheadMs,
+  name = pastedImageName(blob?.type)
+} = {}) {
+  if (projectMutationLockCount > 0) {
+    showToast("\uB2E4\uB978 \uBBF8\uB514\uC5B4 \uC791\uC5C5\uC774 \uB05D\uB09C \uB4A4 \uC774\uBBF8\uC9C0\uB97C \uCD94\uAC00\uD574 \uC8FC\uC138\uC694.", "error");
+    return null;
+  }
+  const mapping = mapTimelineToSource(project, timelineMs);
+  if (!mapping) {
+    showToast("\uC774\uBBF8\uC9C0\uB97C \uCD94\uAC00\uD560 \uC601\uC0C1 \uAD6C\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+    return null;
+  }
+  let dimensions;
+  try {
+    dimensions = await inspectImageAssetBlob(blob);
+  } catch (error) {
+    showToast(error.message, "error", 0);
+    return null;
+  }
+  const clip = project.clips.find((candidate) => candidate.id === mapping.clipId);
+  const startOffsetMs = mapping.clipOffsetMs;
+  const endOffsetMs = Math.min(clipDurationMs(clip), startOffsetMs + 2e3);
+  if (endOffsetMs - startOffsetMs < 100) {
+    showToast("\uCEF7 \uB05D\uC5D0\uC11C \uCD5C\uC18C 0.1\uCD08 \uC55E\uCABD\uC5D0 \uC774\uBBF8\uC9C0\uB97C \uCD94\uAC00\uD574 \uC8FC\uC138\uC694.", "error");
+    return null;
+  }
+  const id = `asset-${crypto.randomUUID()}`;
+  const asset = createImageAsset(project, {
+    id,
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    name: String(name || pastedImageName(blob.type)).slice(0, 160),
+    mimeType: blob.type,
+    source: { kind: "blob-key", value: id },
+    naturalWidth: dimensions.width,
+    naturalHeight: dimensions.height
+  });
+  const nextProject = {
+    ...project,
+    imageAssets: [...project.imageAssets || [], asset],
+    selectedImageAssetId: asset.id,
+    selectedClipId: clip.id
+  };
+  try {
+    await saveProjectWithImageAssetBlob(nextProject, asset.id, blob);
+  } catch (error) {
+    showToast(`\uC774\uBBF8\uC9C0 \uC5D0\uC14B\uC744 \uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${error.message}`, "error", 0);
+    return null;
+  }
+  propertyInspectorMode = "asset";
+  applyProject(nextProject, { save: false });
+  await seekTimeline(mapping.timelineMs);
+  showToast(
+    `${asset.name}\uC744 \uC5D0\uC14B \uD2B8\uB799\uC5D0 \uCD94\uAC00\uD588\uC2B5\uB2C8\uB2E4.${blob.type === "image/png" || blob.type === "image/webp" ? " \uD22C\uBA85 \uBC30\uACBD\uB3C4 \uC720\uC9C0\uB429\uB2C8\uB2E4." : ""}`,
+    "success"
+  );
+  return asset;
+}
+function imageBlobFromPasteEvent(event) {
+  const items = [...event.clipboardData?.items || []];
+  const imageItem = items.find((item) => item.kind === "file" && ALLOWED_IMAGE_ASSET_TYPES.has(item.type));
+  return imageItem?.getAsFile() || null;
+}
+async function pasteImageFromSystemClipboard(timelineMs = project.playheadMs) {
+  if (!navigator.clipboard?.read) {
+    elements.stage.focus({ preventScroll: true });
+    showToast("\uD3B8\uC9D1\uAE30\uC5D0\uC11C Ctrl/Cmd+V\uB97C \uB20C\uB7EC \uC774\uBBF8\uC9C0\uB97C \uBD99\uC5EC\uB123\uC5B4 \uC8FC\uC138\uC694.");
+    return false;
+  }
+  try {
+    const clipboardItems = await navigator.clipboard.read();
+    for (const item of clipboardItems) {
+      const type = item.types.find((candidate) => ALLOWED_IMAGE_ASSET_TYPES.has(candidate));
+      if (type) {
+        const blob = await item.getType(type);
+        return Boolean(await addImageAssetFromBlob(blob, { timelineMs }));
+      }
+    }
+    showToast("\uD074\uB9BD\uBCF4\uB4DC\uC5D0 PNG, JPEG, WebP \uB610\uB294 GIF \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+    return false;
+  } catch (error) {
+    elements.stage.focus({ preventScroll: true });
+    showToast(
+      error.name === "NotAllowedError" ? "\uD074\uB9BD\uBCF4\uB4DC \uC77D\uAE30\uAC00 \uCC28\uB2E8\uB410\uC2B5\uB2C8\uB2E4. \uC6F9\uC5D0\uC11C \u2018\uC774\uBBF8\uC9C0 \uBCF5\uC0AC\u2019 \uD6C4 \uD3B8\uC9D1\uAE30\uC5D0\uC11C Ctrl/Cmd+V\uB97C \uB20C\uB7EC \uC8FC\uC138\uC694." : `\uD074\uB9BD\uBCF4\uB4DC \uC774\uBBF8\uC9C0\uB97C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${error.message}`,
+      error.name === "NotAllowedError" ? "info" : "error"
+    );
+    return false;
+  }
+}
+function openImageAssetFilePicker(timelineMs = project.playheadMs) {
+  pendingAssetTimelineMs = timelineMs;
+  elements.asset_input.click();
+}
 function addCueAtPlayhead({ timelineMs = project.playheadMs, lane: requestedLane = null } = {}) {
   const mapping = mapTimelineToSource(project, timelineMs);
   if (!mapping) {
@@ -33189,6 +34378,31 @@ function updateSelectedAudioRegion(patch) {
   applyProject(next);
   applyPreviewAudioSettings();
   return true;
+}
+function updateSelectedImageAsset(patch, { fieldKey = null } = {}) {
+  const asset = selectedImageAsset();
+  if (!asset) {
+    return false;
+  }
+  const next = updateImageAsset(project, asset.id, patch);
+  if (fieldKey) {
+    applyFieldProject(next, fieldKey);
+  } else {
+    applyProject(next);
+  }
+  return true;
+}
+function deleteSelectedImageAsset(assetId = selectedImageAsset()?.id) {
+  if (!assetId) {
+    return;
+  }
+  const asset = project.imageAssets.find((candidate) => candidate.id === assetId);
+  if (!asset) {
+    return;
+  }
+  applyProject(deleteImageAsset(project, asset.id));
+  releaseImageAssetObjectUrl(asset.id);
+  showToast("\uC774\uBBF8\uC9C0 \uC5D0\uC14B\uC744 \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4. \uC2E4\uD589 \uCDE8\uC18C\uB85C \uB418\uB3CC\uB9B4 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
 }
 async function chooseMediaFile() {
   if (projectMutationLockCount > 0) {
@@ -33738,6 +34952,7 @@ async function exportVideo() {
       const result = await renderProjectVideo(mediaFile, exportProject, {
         fileHandle: handle,
         signal: controller.signal,
+        resolveImageAsset: (source) => loadImageAssetBlob(exportProject.id, source.value),
         onProgress: (progress, stage) => {
           const label = stage === "finalize" ? "\uD30C\uC77C\uC744 \uB9C8\uBB34\uB9AC\uD558\uB294 \uC911 \xB7 \uC774 \uB2E8\uACC4\uB294 \uCDE8\uC18C\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4" : "\uCEF7 \uC5F0\uACB0\uACFC \uC790\uB9C9 \uD569\uC131 \uC911";
           if (stage === "finalize") {
@@ -33885,16 +35100,75 @@ function bindOverlayDrag() {
     window.addEventListener("pointercancel", finish);
   });
 }
+function bindImageAssetOverlayDrag() {
+  elements.image_asset_overlays.addEventListener("pointerdown", (event) => {
+    const overlay = event.target.closest(".image-asset-overlay");
+    const assetId = overlay?.dataset.assetId;
+    const asset = project.imageAssets.find((candidate) => candidate.id === assetId);
+    if (!overlay || !asset) {
+      return;
+    }
+    event.preventDefault();
+    project = {
+      ...project,
+      selectedImageAssetId: asset.id,
+      selectedClipId: asset.clipId
+    };
+    propertyInspectorMode = "asset";
+    elements.image_asset_overlays.querySelectorAll(".image-asset-overlay").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate === overlay);
+    });
+    elements.asset_track.querySelectorAll(".asset-block").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate.dataset.id === asset.id);
+    });
+    renderPropertyInspector();
+    beginPointerHistory();
+    const pointerId = event.pointerId;
+    overlay.setPointerCapture(pointerId);
+    elements.stage.classList.add("dragging-asset");
+    const move = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) {
+        return;
+      }
+      const rect = elements.stage.getBoundingClientRect();
+      const content = videoContentRect();
+      const x = Math.max(0, Math.min(1, (moveEvent.clientX - rect.left - content.left) / content.width));
+      const y = Math.max(0, Math.min(1, (moveEvent.clientY - rect.top - content.top) / content.height));
+      project = updateImageAsset(project, asset.id, { x, y });
+      renderImageAssetInspector();
+      overlay.style.left = `${content.left + content.width * x}px`;
+      overlay.style.top = `${content.top + content.height * y}px`;
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
+        return;
+      }
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (overlay.hasPointerCapture(pointerId)) {
+        overlay.releasePointerCapture(pointerId);
+      }
+      elements.stage.classList.remove("dragging-asset");
+      endPointerHistory();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
+}
 function closeTimelineContextMenu() {
   elements.timeline_context_menu.hidden = true;
   timelineContext = null;
 }
 function openTimelineContextMenu(event) {
   const cueBlock = event.target.closest(".cue-block");
+  const assetBlock = event.target.closest(".asset-block");
   const audioBlock = event.target.closest(".audio-block");
   const captionRow = event.target.closest(".caption-track-row");
+  const inAssetTrack = Boolean(event.target.closest("#asset-track"));
   const inAudioTrack = Boolean(event.target.closest("#audio-track"));
-  if (!cueBlock && !audioBlock && !captionRow && !inAudioTrack) {
+  if (!cueBlock && !assetBlock && !audioBlock && !captionRow && !inAssetTrack && !inAudioTrack) {
     return;
   }
   event.preventDefault();
@@ -33906,14 +35180,19 @@ function openTimelineContextMenu(event) {
     timelineMs,
     lane: laneValue === void 0 ? null : Number(laneValue),
     cueId: cueBlock?.dataset.id || null,
+    imageAssetId: assetBlock?.dataset.id || null,
     audioRegionId: audioBlock?.dataset.id || null,
-    kind: cueBlock || captionRow ? "caption" : "audio"
+    kind: cueBlock || captionRow ? "caption" : assetBlock || inAssetTrack ? "asset" : "audio"
   };
   const captionContext = timelineContext.kind === "caption";
+  const assetContext = timelineContext.kind === "asset";
   elements.context_add_cue.hidden = !captionContext;
   elements.context_delete_cue.hidden = !timelineContext.cueId;
   elements.context_add_lane.hidden = !captionContext || project.subtitleLaneCount >= MAX_SUBTITLE_LANES;
-  elements.context_add_audio.hidden = captionContext;
+  elements.context_paste_asset.hidden = !assetContext;
+  elements.context_pick_asset.hidden = !assetContext;
+  elements.context_delete_asset.hidden = !timelineContext.imageAssetId;
+  elements.context_add_audio.hidden = timelineContext.kind !== "audio";
   elements.context_delete_audio.hidden = !timelineContext.audioRegionId;
   elements.timeline_context_menu.hidden = false;
   elements.timeline_context_menu.style.left = `${event.clientX}px`;
@@ -33990,6 +35269,33 @@ function bindActions() {
     }
     elements.media_input.value = "";
   });
+  elements.asset_input.addEventListener("change", () => {
+    const [file] = elements.asset_input.files;
+    const timelineMs = pendingAssetTimelineMs ?? project.playheadMs;
+    pendingAssetTimelineMs = null;
+    elements.asset_input.value = "";
+    if (file) {
+      void addImageAssetFromBlob(file, {
+        timelineMs,
+        name: file.name || pastedImageName(file.type)
+      });
+    }
+  });
+  const pasteAtPlayhead = () => void pasteImageFromSystemClipboard(project.playheadMs);
+  elements.asset_paste.addEventListener("click", pasteAtPlayhead);
+  elements.paste_image_asset.addEventListener("click", pasteAtPlayhead);
+  elements.asset_pick_file.addEventListener("click", () => openImageAssetFilePicker(project.playheadMs));
+  document.addEventListener("paste", (event) => {
+    const blob = imageBlobFromPasteEvent(event);
+    if (!blob) {
+      return;
+    }
+    event.preventDefault();
+    void addImageAssetFromBlob(blob, {
+      timelineMs: project.playheadMs,
+      name: pastedImageName(blob.type)
+    });
+  });
   elements.export_video.addEventListener("click", () => void exportVideoWithLock());
   elements.apply_source_offset.addEventListener("click", () => {
     const seconds = Number(elements.source_offset.value);
@@ -34046,7 +35352,10 @@ function bindActions() {
   elements.preview_video.addEventListener("timeupdate", handleVideoTimeUpdate);
   elements.preview_video.addEventListener("play", () => elements.play_toggle.classList.add("playing"));
   elements.preview_video.addEventListener("pause", () => elements.play_toggle.classList.remove("playing"));
-  elements.preview_video.addEventListener("loadedmetadata", renderSubtitleOverlay);
+  elements.preview_video.addEventListener("loadedmetadata", () => {
+    void renderImageAssetOverlays();
+    renderSubtitleOverlay();
+  });
   elements.toggle_mute.addEventListener("click", () => {
     previewMuted = !previewMuted;
     applyPreviewAudioSettings();
@@ -34060,17 +35369,27 @@ function bindActions() {
     propertyInspectorMode = "caption";
     renderPropertyInspector();
   });
+  elements.asset_mode_tab.addEventListener("click", () => {
+    propertyInspectorMode = "asset";
+    renderPropertyInspector();
+  });
   elements.audio_mode_tab.addEventListener("click", () => {
     propertyInspectorMode = "audio";
     renderPropertyInspector();
   });
-  for (const tab of [elements.caption_mode_tab, elements.audio_mode_tab]) {
+  const propertyTabs = [
+    elements.caption_mode_tab,
+    elements.asset_mode_tab,
+    elements.audio_mode_tab
+  ];
+  for (const [tabIndex, tab] of propertyTabs.entries()) {
     tab.addEventListener("keydown", (event) => {
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
         return;
       }
       event.preventDefault();
-      const next = event.key === "ArrowLeft" || event.key === "Home" ? elements.caption_mode_tab : elements.audio_mode_tab;
+      const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? propertyTabs.length - 1 : (tabIndex + (event.key === "ArrowLeft" ? -1 : 1) + propertyTabs.length) % propertyTabs.length;
+      const next = propertyTabs[nextIndex];
       next.click();
       next.focus();
     });
@@ -34213,6 +35532,69 @@ function bindActions() {
       next.focus();
     });
   }
+  const restoreAssetTimeFields = () => {
+    const asset = selectedImageAsset();
+    const range = asset ? imageAssetTimelineRange(project, asset) : null;
+    if (!range) {
+      renderImageAssetInspector();
+      return;
+    }
+    elements.asset_start.value = formatTime(range.startMs, { compact: true });
+    elements.asset_end.value = formatTime(range.endMs, { compact: true });
+  };
+  elements.asset_start.addEventListener("change", () => {
+    const asset = selectedImageAsset();
+    const clip = project.clips.find((candidate) => candidate.id === asset?.clipId);
+    const timelineMs = parseTime(elements.asset_start.value);
+    if (!asset || !clip || timelineMs === null) {
+      restoreAssetTimeFields();
+      showToast("\uC5D0\uC14B \uC2DC\uC791 \uC2DC\uAC01 \uD615\uC2DD\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error");
+      return;
+    }
+    updateSelectedImageAsset({ startOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAssetTimeFields();
+  });
+  elements.asset_end.addEventListener("change", () => {
+    const asset = selectedImageAsset();
+    const clip = project.clips.find((candidate) => candidate.id === asset?.clipId);
+    const timelineMs = parseTime(elements.asset_end.value);
+    if (!asset || !clip || timelineMs === null) {
+      restoreAssetTimeFields();
+      showToast("\uC5D0\uC14B \uC885\uB8CC \uC2DC\uAC01 \uD615\uC2DD\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error");
+      return;
+    }
+    updateSelectedImageAsset({ endOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAssetTimeFields();
+  });
+  elements.asset_x.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { x: Number(elements.asset_x.value) / 100 },
+      { fieldKey: "asset-x" }
+    );
+  });
+  elements.asset_y.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { y: Number(elements.asset_y.value) / 100 },
+      { fieldKey: "asset-y" }
+    );
+  });
+  elements.asset_scale.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { scale: Number(elements.asset_scale.value) / 100 },
+      { fieldKey: "asset-scale" }
+    );
+  });
+  elements.asset_opacity.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { opacity: Number(elements.asset_opacity.value) / 100 },
+      { fieldKey: "asset-opacity" }
+    );
+  });
+  elements.asset_x.addEventListener("change", () => endFieldEdit("asset-x"));
+  elements.asset_y.addEventListener("change", () => endFieldEdit("asset-y"));
+  elements.asset_scale.addEventListener("change", () => endFieldEdit("asset-scale"));
+  elements.asset_opacity.addEventListener("change", () => endFieldEdit("asset-opacity"));
+  elements.delete_asset.addEventListener("click", () => deleteSelectedImageAsset());
   const restoreAudioTimeFields = () => {
     const region = selectedAudioRegion();
     const range = region ? audioRegionTimelineRange(project, region) : null;
@@ -34334,12 +35716,27 @@ function bindActions() {
     renderTimeline();
   });
   elements.caption_tracks.addEventListener("contextmenu", openTimelineContextMenu);
+  elements.asset_track.addEventListener("contextmenu", openTimelineContextMenu);
   elements.audio_track.addEventListener("contextmenu", openTimelineContextMenu);
   elements.context_add_cue.addEventListener("click", () => {
     const context = timelineContext;
     closeTimelineContextMenu();
     if (context) {
       addCueAtPlayhead({ timelineMs: context.timelineMs, lane: context.lane });
+    }
+  });
+  elements.context_paste_asset.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      void pasteImageFromSystemClipboard(context.timelineMs);
+    }
+  });
+  elements.context_pick_asset.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      openImageAssetFilePicker(context.timelineMs);
     }
   });
   elements.context_add_audio.addEventListener("click", () => {
@@ -34354,6 +35751,13 @@ function bindActions() {
     closeTimelineContextMenu();
     if (context?.cueId) {
       applyProject(deleteSubtitleCue(project, context.cueId));
+    }
+  });
+  elements.context_delete_asset.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context?.imageAssetId) {
+      deleteSelectedImageAsset(context.imageAssetId);
     }
   });
   elements.context_delete_audio.addEventListener("click", () => {
@@ -34378,9 +35782,11 @@ function bindActions() {
   elements.timeline_scroll.addEventListener("scroll", closeTimelineContextMenu, { passive: true });
   window.addEventListener("blur", closeTimelineContextMenu);
   bindOverlayDrag();
+  bindImageAssetOverlayDrag();
   bindTimelineSeeking();
   window.addEventListener("resize", () => {
     renderTimeline({ keepScroll: true });
+    void renderImageAssetOverlays();
     renderSubtitleOverlay();
   });
   window.addEventListener("keydown", (event) => {
@@ -34483,6 +35889,7 @@ async function initialize() {
     project.selectedClipId = project.clips[0].id;
   }
   await saveProject(project);
+  scheduleImageAssetBlobPrune();
   await initializeSourceBinding();
   renderAll();
   if (document.fonts?.load) {
@@ -34550,6 +35957,7 @@ window.addEventListener("beforeunload", () => {
   if (mediaUrl) {
     URL.revokeObjectURL(mediaUrl);
   }
+  releaseAllImageAssetObjectUrls();
   cancelActiveJob();
 });
 window.addEventListener("pagehide", () => {

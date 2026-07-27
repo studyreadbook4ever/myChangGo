@@ -179,8 +179,10 @@ assert(
 );
 for (const id of [
   "preview-video",
+  "image-asset-overlays",
   "subtitle-overlays",
   "video-track",
+  "asset-track",
   "audio-track",
   "caption-tracks",
   "add-audio-region",
@@ -192,6 +194,15 @@ for (const id of [
   "cue-x",
   "cue-y",
   "font-color",
+  "asset-mode-tab",
+  "asset-paste",
+  "asset-input",
+  "asset-start",
+  "asset-end",
+  "asset-x",
+  "asset-y",
+  "asset-scale",
+  "asset-opacity",
   "audio-volume",
   "audio-mute",
   "generate-captions",
@@ -214,6 +225,22 @@ assert(editorScript.includes("openTimelineContextMenu"), "자막·음성 우클�
 assert(editorScript.includes("updateAudioRegion"), "구간별 음성 설정 저장 경로가 없습니다.");
 assert(editorScript.includes("applyAudioAutomationToSample"), "구간별 음성 설정 렌더 경로가 없습니다.");
 assert(editorScript.includes("findAudioRegionOverlaps"), "겹치는 음성 설정 구간 방지가 없습니다.");
+assert(editorScript.includes("imageAssetsAtTimeline"), "이미지 에셋 미리보기 경로가 없습니다.");
+assert(
+  editorScript.includes("saveProjectWithImageAssetBlob"),
+  "이미지 에셋 Blob과 프로젝트의 원자적 IndexedDB 저장 경로가 없습니다."
+);
+assert(editorScript.includes("loadImageAssetBlob"), "저장된 이미지 에셋 Blob 복원 경로가 없습니다.");
+assert(editorScript.includes("resolveImageAsset"), "이미지 에셋을 영상 렌더러로 전달하는 경로가 없습니다.");
+assert(
+  editorScript.includes('addEventListener("paste"') &&
+    editorScript.includes("ALLOWED_IMAGE_ASSET_TYPES"),
+  "웹 이미지 복사·붙여넣기의 안전한 이미지 전용 경로가 없습니다."
+);
+assert(
+  editorScript.includes("updateSubtitleCue(originalProject"),
+  "자막 양끝 손잡이가 drag 시작 시점 기준으로 안정적으로 움직이지 않습니다."
+);
 assert(
   editorScript.includes("pendingPreviewSeek") &&
     editorScript.includes("retryWhenAvailable"),
