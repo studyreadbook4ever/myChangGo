@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { AudioSample } from "mediabunny";
+
 import {
   activeCuesAt,
+  applyAudioAutomationToSample,
+  audioAutomationGainAt,
   audioTrimFrameRange,
+  buildAudioAutomation,
   buildRenderEncodingSettings,
   cfrFrameRange,
   cfrFrameTiming,
@@ -11,6 +16,7 @@ import {
   clampCaptionBoxCenter,
   createFileWriteTransaction,
   normalizeMediaTimeline,
+  validateRenderTimeline,
   validateRenderClips,
   wrapCaption
 } from "../src/editor/media-engine.js";
@@ -183,6 +189,160 @@ test("오디오 경계는 가장 가까운 PCM 프레임으로 자른다", () =>
     audioTrimFrameRange(sample, 9, 11),
     { frameStart: 0, frameEnd: 4_800 }
   );
+});
+
+test("렌더 검증은 다른 자막 레인의 동시 자막을 허용하고 같은 레인·음성 구간 충돌만 막는다", () => {
+  const clips = [{
+    id: "clip",
+    sourceStartMs: 0,
+    sourceEndMs: 4_000,
+    timelineStartMs: 0,
+    enabled: true
+  }];
+  const simultaneousCaptions = {
+    clips,
+    subtitles: [
+      {
+        id: "top",
+        clipId: "clip",
+        startOffsetMs: 0,
+        endOffsetMs: 2_000,
+        lane: 0
+      },
+      {
+        id: "bottom",
+        clipId: "clip",
+        startOffsetMs: 500,
+        endOffsetMs: 1_500,
+        lane: 1
+      }
+    ],
+    audioRegions: []
+  };
+  assert.doesNotThrow(() => validateRenderTimeline(simultaneousCaptions));
+  assert.throws(
+    () => validateRenderTimeline({
+      ...simultaneousCaptions,
+      subtitles: simultaneousCaptions.subtitles.map((cue) => ({ ...cue, lane: 0 }))
+    }),
+    /같은 자막 레인/
+  );
+  assert.throws(
+    () => validateRenderTimeline({
+      ...simultaneousCaptions,
+      audioRegions: [
+        {
+          id: "first",
+          clipId: "clip",
+          startOffsetMs: 0,
+          endOffsetMs: 2_000
+        },
+        {
+          id: "second",
+          clipId: "clip",
+          startOffsetMs: 1_000,
+          endOffsetMs: 3_000
+        }
+      ]
+    }),
+    /겹치는 음성/
+  );
+});
+
+test("음성 자동화는 컷 타임라인에 맞춰 볼륨·뮤트와 양쪽 페이드를 계산한다", () => {
+  const project = {
+    clips: [{
+      id: "clip",
+      timelineStartMs: 2_000,
+      enabled: true
+    }],
+    audioRegions: [{
+      id: "quiet",
+      clipId: "clip",
+      startOffsetMs: 1_000,
+      endOffsetMs: 5_000,
+      gain: 0.25,
+      muted: false,
+      fadeInMs: 1_000,
+      fadeOutMs: 2_000
+    }]
+  };
+  const automation = buildAudioAutomation(project);
+  assert.deepEqual(automation, [{
+    id: "quiet",
+    startSeconds: 3,
+    endSeconds: 7,
+    targetGain: 0.25,
+    fadeInSeconds: 1,
+    fadeOutSeconds: 2
+  }]);
+  assert.equal(audioAutomationGainAt(automation, 2.9), 1);
+  assert.equal(audioAutomationGainAt(automation, 3), 1);
+  assert.equal(audioAutomationGainAt(automation, 3.5), 0.625);
+  assert.equal(audioAutomationGainAt(automation, 4), 0.25);
+  assert.equal(audioAutomationGainAt(automation, 5), 0.25);
+  assert.equal(audioAutomationGainAt(automation, 6), 0.625);
+  assert.equal(audioAutomationGainAt(automation, 7), 1);
+
+  const muted = buildAudioAutomation({
+    ...project,
+    audioRegions: [{
+      ...project.audioRegions[0],
+      muted: true,
+      gain: 1,
+      fadeInMs: 0,
+      fadeOutMs: 0
+    }]
+  });
+  assert.equal(audioAutomationGainAt(muted, 4), 0);
+});
+
+test("PCM 샘플에는 설정 구간의 프레임만 모든 채널에 동일하게 반영한다", () => {
+  const sourceData = new Float32Array([
+    1, -1,
+    1, -1,
+    1, -1,
+    1, -1,
+    1, -1,
+    1, -1,
+    1, -1,
+    1, -1
+  ]);
+  const source = new AudioSample({
+    data: sourceData,
+    format: "f32",
+    numberOfChannels: 2,
+    sampleRate: 4,
+    timestamp: 0
+  });
+  const automation = [{
+    id: "quiet",
+    startSeconds: 0.5,
+    endSeconds: 1.5,
+    targetGain: 0.25,
+    fadeInSeconds: 0,
+    fadeOutSeconds: 0
+  }];
+  const rendered = applyAudioAutomationToSample(source, automation);
+  try {
+    assert.notEqual(rendered, source);
+    const actual = new Float32Array(sourceData.length);
+    rendered.copyTo(actual, { planeIndex: 0, format: "f32" });
+    assert.deepEqual([...actual], [
+      1, -1,
+      1, -1,
+      0.25, -0.25,
+      0.25, -0.25,
+      0.25, -0.25,
+      0.25, -0.25,
+      1, -1,
+      1, -1
+    ]);
+    assert.equal(applyAudioAutomationToSample(source, []), source);
+  } finally {
+    rendered.close();
+    source.close();
+  }
 });
 
 test("코덱 probe는 실제 출력 크기·비트레이트를 쓰고 무음 영상에서 오디오를 요구하지 않는다", async () => {

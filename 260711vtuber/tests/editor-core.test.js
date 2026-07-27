@@ -3,13 +3,22 @@ import test from "node:test";
 
 import {
   EDITOR_SCHEMA,
+  MAX_SUBTITLE_LANES,
+  MIN_SUBTITLE_LANES,
+  addSubtitleLane,
   applyMediaAlignmentOffset,
+  audioRegionAtTimeline,
+  audioRegionTimelineRange,
   captureStateSourceConflict,
   captureProjectId,
+  createAudioRegion,
   createEditorProjectFromCapture,
   createSubtitleCue,
+  cuesAtTimeline,
   cueAtTimeline,
   cueTimelineRange,
+  deleteAudioRegion,
+  findAudioRegionOverlaps,
   findSubtitleOverlaps,
   mapTimelineToSource,
   mergeCaptureIntoEditorProject,
@@ -20,6 +29,7 @@ import {
   serializeSrt,
   sourceSessionIdentity,
   transcriptChunksToCueDrafts,
+  updateAudioRegion,
   updateClipTrim,
   updateSubtitleCue
 } from "../extension/lib/editor-core.js";
@@ -110,6 +120,92 @@ test("캡처 상태를 사용자 권위 컷이 있는 편집 프로젝트로 만
   assert.equal(captureProjectId(captureState), captureProjectId(captureState));
 });
 
+test("새 프로젝트는 자막 2개 레인과 고정 음성 레인 데이터를 준비한다", () => {
+  const project = createEditorProjectFromCapture(captureState);
+  assert.equal(project.subtitleLaneCount, MIN_SUBTITLE_LANES);
+  assert.equal(project.subtitleLaneCount, 2);
+  assert.deepEqual(project.audioRegions, []);
+  assert.equal(project.selectedAudioRegionId, null);
+});
+
+test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v2로 이관한다", () => {
+  const current = createEditorProjectFromCapture(captureState, {
+    id: "legacy-project",
+    createdAt: "2026-07-27T09:00:00.000Z"
+  });
+  const legacyCue = createSubtitleCue(current, {
+    id: "legacy-cue",
+    clipId: "clip-first",
+    startOffsetMs: 700,
+    endOffsetMs: 2_100,
+    text: "기존 검수 자막",
+    x: 0.31,
+    y: 0.73,
+    origin: "ai"
+  });
+  const { lane: _lane, color: _color, ...cueWithoutV2Fields } = legacyCue;
+  const {
+    subtitleLaneCount: _subtitleLaneCount,
+    audioRegions: _audioRegions,
+    selectedAudioRegionId: _selectedAudioRegionId,
+    ...legacy
+  } = {
+    ...current,
+    schema: "chzzk-kirinuki-editor/v1",
+    name: "이어 편집할 프로젝트",
+    clips: current.clips.map((clip, index) => (
+      index === 0
+        ? { ...clip, sourceStartMs: 10_500, sourceEndMs: 15_000 }
+        : clip
+    )),
+    subtitles: [{ ...cueWithoutV2Fields, humanEdited: true }],
+    selectedCueId: "legacy-cue",
+    subtitleDefaults: {
+      ...current.subtitleDefaults,
+      color: "#F2C14E",
+      backgroundColor: "rgba(0, 0, 0, 0.72)"
+    }
+  };
+
+  const migrated = normalizeEditorProject(legacy);
+  assert.equal(migrated.schema, EDITOR_SCHEMA);
+  assert.equal(migrated.id, "legacy-project");
+  assert.equal(migrated.name, "이어 편집할 프로젝트");
+  assert.equal(migrated.clips[0].sourceStartMs, 10_500);
+  assert.equal(migrated.clips[0].sourceEndMs, 15_000);
+  assert.equal(migrated.subtitleLaneCount, 2);
+  assert.deepEqual(migrated.audioRegions, []);
+  assert.equal(migrated.selectedCueId, "legacy-cue");
+  assert.deepEqual(
+    {
+      id: migrated.subtitles[0].id,
+      text: migrated.subtitles[0].text,
+      startOffsetMs: migrated.subtitles[0].startOffsetMs,
+      endOffsetMs: migrated.subtitles[0].endOffsetMs,
+      x: migrated.subtitles[0].x,
+      y: migrated.subtitles[0].y,
+      lane: migrated.subtitles[0].lane,
+      color: migrated.subtitles[0].color,
+      humanEdited: migrated.subtitles[0].humanEdited
+    },
+    {
+      id: "legacy-cue",
+      text: "기존 검수 자막",
+      startOffsetMs: 700,
+      endOffsetMs: 2_100,
+      x: 0.31,
+      y: 0.73,
+      lane: 0,
+      color: "#f2c14e",
+      humanEdited: true
+    }
+  );
+  assert.equal(migrated.subtitleDefaults.color, "#f2c14e");
+  assert.equal(migrated.subtitleDefaults.fontFamily, "Pretendard");
+  assert.equal(migrated.subtitleDefaults.fontWeight, 800);
+  assert.equal(migrated.subtitleDefaults.backgroundColor, "transparent");
+});
+
 test("이전 프로젝트의 미디어 자산에 PTS 원점과 CFR 메타데이터 기본값을 보완한다", () => {
   const raw = createEditorProjectFromCapture(captureState);
   raw.mediaAsset = {
@@ -190,6 +286,108 @@ test("자막 텍스트·표시 구간·위치는 사용자 수정 상태로 보�
     endMs: 2_900
   });
   assert.equal(cueAtTimeline(project, 1_000)?.id, "cue-1");
+});
+
+test("자막마다 색상을 따로 정규화하고 수정한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  const cue = createSubtitleCue(project, {
+    id: "colored-cue",
+    clipId: "clip-first",
+    startOffsetMs: 0,
+    endOffsetMs: 1_000,
+    text: "강조 자막",
+    color: "#F0A"
+  });
+  project = { ...project, subtitles: [cue] };
+
+  assert.equal(project.subtitles[0].color, "#ff00aa");
+  assert.equal(project.subtitleDefaults.color, "#ffffff");
+
+  project = updateSubtitleCue(project, "colored-cue", { color: "#12AB34" });
+  assert.equal(project.subtitles[0].color, "#12ab34");
+  assert.equal(project.subtitles[0].humanEdited, true);
+  assert.equal(project.subtitleDefaults.color, "#ffffff");
+});
+
+test("자막 레인을 클릭으로 늘리고 프로젝트가 허용한 범위 안에서 cue 레인을 정규화한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = addSubtitleLane(project);
+  assert.equal(project.subtitleLaneCount, 3);
+
+  const cue = createSubtitleCue(project, {
+    id: "third-lane",
+    clipId: "clip-first",
+    startOffsetMs: 0,
+    endOffsetMs: 1_000,
+    text: "세 번째 레인",
+    lane: 2
+  });
+  project = { ...project, subtitles: [cue] };
+  project = updateSubtitleCue(project, "third-lane", { lane: 99 });
+  assert.equal(project.subtitles[0].lane, 2);
+
+  for (let index = project.subtitleLaneCount; index < MAX_SUBTITLE_LANES + 2; index += 1) {
+    project = addSubtitleLane(project);
+  }
+  assert.equal(project.subtitleLaneCount, MAX_SUBTITLE_LANES);
+  assert.equal(addSubtitleLane(project), project);
+});
+
+test("저장된 cue가 가리키는 레인을 정규화 중 잃지 않고 레인 수를 복구한다", () => {
+  const raw = createEditorProjectFromCapture(captureState);
+  raw.subtitleLaneCount = 2;
+  raw.subtitles = [
+    createSubtitleCue({ ...raw, subtitleLaneCount: 5 }, {
+      id: "restored-lane",
+      clipId: "clip-first",
+      startOffsetMs: 0,
+      endOffsetMs: 1_000,
+      text: "복구",
+      lane: 4
+    })
+  ];
+  const normalized = normalizeEditorProject(raw);
+  assert.equal(normalized.subtitleLaneCount, 5);
+  assert.equal(normalized.subtitles[0].lane, 4);
+});
+
+test("같은 시각의 자막은 다른 레인에서는 허용하고 같은 레인에서만 충돌시킨다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    subtitles: [
+      createSubtitleCue(project, {
+        id: "lower-cue",
+        clipId: "clip-first",
+        startOffsetMs: 500,
+        endOffsetMs: 2_000,
+        text: "아래 자막",
+        lane: 0
+      }),
+      createSubtitleCue(project, {
+        id: "upper-cue",
+        clipId: "clip-first",
+        startOffsetMs: 500,
+        endOffsetMs: 2_000,
+        text: "위 자막",
+        lane: 1
+      })
+    ]
+  };
+
+  assert.deepEqual(findSubtitleOverlaps(project), []);
+  assert.deepEqual(
+    cuesAtTimeline(project, 1_000).map((cue) => cue.id),
+    ["lower-cue", "upper-cue"]
+  );
+
+  project = updateSubtitleCue(project, "upper-cue", { lane: 0 });
+  assert.deepEqual(findSubtitleOverlaps(project), [{
+    firstCueId: "lower-cue",
+    secondCueId: "upper-cue",
+    startMs: 500,
+    endMs: 2_000
+  }]);
 });
 
 test("AI 재실행은 사람이 수정한 AI 자막을 덮어쓰지 않는다", () => {
@@ -295,6 +493,130 @@ test("컷 trim은 남은 자막의 원본 발화 시각을 보존하고 잘려�
   assert.equal(project.selectedCueId, null);
 });
 
+test("음성 구간을 생성·선택·수정·삭제하고 타임라인 시각으로 찾는다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  const region = createAudioRegion(project, {
+    id: "voice-focus",
+    clipId: "clip-first",
+    startOffsetMs: 500,
+    endOffsetMs: 2_500,
+    gain: 2,
+    fadeInMs: 300,
+    fadeOutMs: 400
+  });
+  project = {
+    ...project,
+    audioRegions: [region],
+    selectedAudioRegionId: "voice-focus"
+  };
+
+  assert.equal(region.gain, 1);
+  assert.deepEqual(audioRegionTimelineRange(project, region), {
+    startMs: 500,
+    endMs: 2_500
+  });
+  assert.equal(audioRegionAtTimeline(project, 1_000)?.id, "voice-focus");
+  assert.equal(audioRegionAtTimeline(project, 2_500), null);
+
+  project = updateAudioRegion(project, "voice-focus", {
+    gain: 0.35,
+    muted: true,
+    fadeInMs: 600,
+    fadeOutMs: 700
+  });
+  assert.deepEqual(
+    {
+      gain: project.audioRegions[0].gain,
+      muted: project.audioRegions[0].muted,
+      fadeInMs: project.audioRegions[0].fadeInMs,
+      fadeOutMs: project.audioRegions[0].fadeOutMs,
+      selectedAudioRegionId: project.selectedAudioRegionId
+    },
+    {
+      gain: 0.35,
+      muted: true,
+      fadeInMs: 600,
+      fadeOutMs: 700,
+      selectedAudioRegionId: "voice-focus"
+    }
+  );
+
+  const deleted = deleteAudioRegion(project, "voice-focus");
+  assert.deepEqual(deleted.audioRegions, []);
+  assert.equal(deleted.selectedAudioRegionId, null);
+});
+
+test("한 음성 레인의 겹치는 설정 구간을 식별한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    audioRegions: [
+      createAudioRegion(project, {
+        id: "audio-a",
+        clipId: "clip-first",
+        startOffsetMs: 0,
+        endOffsetMs: 1_500
+      }),
+      createAudioRegion(project, {
+        id: "audio-b",
+        clipId: "clip-first",
+        startOffsetMs: 1_000,
+        endOffsetMs: 2_000
+      })
+    ]
+  };
+  assert.deepEqual(findAudioRegionOverlaps(project), [{
+    firstRegionId: "audio-a",
+    secondRegionId: "audio-b",
+    startMs: 1_000,
+    endMs: 1_500
+  }]);
+
+  project = updateAudioRegion(project, "audio-b", { startOffsetMs: 1_500 });
+  assert.deepEqual(findAudioRegionOverlaps(project), []);
+});
+
+test("컷 trim은 음성 설정의 원본 시각을 보존해 자르고 범위 밖 설정을 제거한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    audioRegions: [
+      createAudioRegion(project, {
+        id: "kept-audio",
+        clipId: "clip-first",
+        startOffsetMs: 500,
+        endOffsetMs: 4_000,
+        gain: 0.4
+      }),
+      createAudioRegion(project, {
+        id: "removed-audio",
+        clipId: "clip-first",
+        startOffsetMs: 4_500,
+        endOffsetMs: 5_300,
+        muted: true
+      })
+    ],
+    selectedAudioRegionId: "removed-audio"
+  };
+
+  project = updateClipTrim(project, "clip-first", {
+    sourceStartMs: 11_000,
+    sourceEndMs: 13_000
+  });
+  assert.deepEqual(project.audioRegions.map((region) => ({
+    id: region.id,
+    startOffsetMs: region.startOffsetMs,
+    endOffsetMs: region.endOffsetMs,
+    gain: region.gain
+  })), [{
+    id: "kept-audio",
+    startOffsetMs: 0,
+    endOffsetMs: 2_000,
+    gain: 0.4
+  }]);
+  assert.equal(project.selectedAudioRegionId, null);
+});
+
 test("기존 편집 순서와 trim을 유지하면서 새 사용자 선택을 동기화한다", () => {
   let project = createEditorProjectFromCapture(captureState);
   const cue = createSubtitleCue(project, {
@@ -327,6 +649,50 @@ test("기존 편집 순서와 trim을 유지하면서 새 사용자 선택을 �
   assert.equal(merged.clips[1].sourceEndMs, 15_000);
   assert.equal(merged.clips[1].selectionStartMs, 9_000);
   assert.equal(merged.clips[1].selectionEndMs, 16_000);
+});
+
+test("캡처 구간 갱신은 음성 설정을 새 컷 경계로 자르고 선택 상태를 보존한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    audioRegions: [
+      createAudioRegion(project, {
+        id: "merged-audio",
+        clipId: "clip-first",
+        startOffsetMs: 500,
+        endOffsetMs: 5_000,
+        gain: 0.55
+      }),
+      createAudioRegion(project, {
+        id: "discarded-audio",
+        clipId: "clip-first",
+        startOffsetMs: 0,
+        endOffsetMs: 500,
+        muted: true
+      })
+    ],
+    selectedAudioRegionId: "merged-audio"
+  };
+
+  const merged = mergeCaptureIntoEditorProject(project, {
+    ...captureState,
+    segments: [
+      { ...captureState.segments[0], startSeconds: 12, endSeconds: 14 },
+      ...captureState.segments.slice(1)
+    ]
+  });
+  assert.deepEqual(merged.audioRegions.map((region) => ({
+    id: region.id,
+    startOffsetMs: region.startOffsetMs,
+    endOffsetMs: region.endOffsetMs,
+    gain: region.gain
+  })), [{
+    id: "merged-audio",
+    startOffsetMs: 0,
+    endOffsetMs: 2_000,
+    gain: 0.55
+  }]);
+  assert.equal(merged.selectedAudioRegionId, "merged-audio");
 });
 
 test("동일한 캡처를 다시 열어도 편집기에서 확장한 컷과 그 자막을 되돌리지 않는다", () => {

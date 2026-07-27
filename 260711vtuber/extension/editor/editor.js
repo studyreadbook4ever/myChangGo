@@ -1,9 +1,12 @@
 // extension/lib/editor-core.js
-var EDITOR_SCHEMA = "chzzk-kirinuki-editor/v1";
+var EDITOR_SCHEMA = "chzzk-kirinuki-editor/v2";
 var EDITOR_SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 var EDITOR_DATABASE_NAME = "chzzk-kirinuki-studio";
+var MIN_SUBTITLE_LANES = 2;
+var MAX_SUBTITLE_LANES = 8;
 var MIN_CLIP_DURATION_MS = 100;
 var MIN_CUE_DURATION_MS = 100;
+var LEGACY_EDITOR_SCHEMA = "chzzk-kirinuki-editor/v1";
 var nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
 var makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 var finiteNumber = (value, fallback = 0) => {
@@ -12,6 +15,16 @@ var finiteNumber = (value, fallback = 0) => {
 };
 var secondsToMilliseconds = (seconds) => Math.max(0, Math.round(finiteNumber(seconds) * 1e3));
 var clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+function normalizeHexColor(value, fallback = "#ffffff") {
+  const candidate = String(value || "").trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/u.test(candidate)) {
+    return candidate;
+  }
+  if (/^#[0-9a-f]{3}$/u.test(candidate)) {
+    return `#${[...candidate.slice(1)].map((character) => character.repeat(2)).join("")}`;
+  }
+  return fallback;
+}
 function normalizeMediaAsset(raw) {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -135,18 +148,23 @@ function createEditorProjectFromCapture(captureState = {}, {
     mediaAsset: null,
     clips,
     subtitles: [],
+    subtitleLaneCount: MIN_SUBTITLE_LANES,
+    audioRegions: [],
     selectedClipId: clips[0]?.id || null,
     selectedCueId: null,
+    selectedAudioRegionId: null,
     playheadMs: 0,
     subtitleDefaults: {
       x: 0.5,
       y: 0.84,
       maxWidth: 0.86,
       fontScale: 0.052,
+      fontFamily: "Pretendard",
+      fontWeight: 800,
       color: "#ffffff",
-      outlineColor: "#111318",
-      outlineWidth: 4e-3,
-      backgroundColor: "rgba(0, 0, 0, 0.58)",
+      outlineColor: "#111111",
+      outlineWidth: 6e-3,
+      backgroundColor: "transparent",
       align: "center"
     },
     ai: {
@@ -167,30 +185,81 @@ function createEditorProjectFromCapture(captureState = {}, {
   };
 }
 function normalizeEditorProject(raw) {
-  if (!raw || raw.schema !== EDITOR_SCHEMA) {
+  if (!raw || ![EDITOR_SCHEMA, LEGACY_EDITOR_SCHEMA].includes(raw.schema)) {
     return null;
   }
+  const migratingLegacyProject = raw.schema === LEGACY_EDITOR_SCHEMA;
   const clips = reflowClips(Array.isArray(raw.clips) ? raw.clips : []);
   const defaults = createEditorProjectFromCapture({}, {
     id: raw.id || makeId("project"),
     createdAt: raw.createdAt || nowIso()
   });
   const clipIds = new Set(clips.map((clip) => clip.id));
-  const subtitles = (Array.isArray(raw.subtitles) ? raw.subtitles : []).filter((cue) => cue && clipIds.has(cue.clipId)).map((cue) => normalizeSubtitleCue(cue, clips.find((clip) => clip.id === cue.clipId)));
+  const rawSubtitles = (Array.isArray(raw.subtitles) ? raw.subtitles : []).filter((cue) => cue && clipIds.has(cue.clipId));
+  const subtitleColor = normalizeHexColor(
+    raw.subtitleDefaults?.color,
+    defaults.subtitleDefaults.color
+  );
+  const requestedLaneCount = clamp(
+    Math.max(
+      Math.round(finiteNumber(raw.subtitleLaneCount, MIN_SUBTITLE_LANES)),
+      ...rawSubtitles.map((cue) => Math.round(finiteNumber(cue?.lane)) + 1),
+      MIN_SUBTITLE_LANES
+    ),
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  const subtitles = rawSubtitles.map((cue) => normalizeSubtitleCue(
+    {
+      ...cue,
+      color: cue.color ?? subtitleColor
+    },
+    clips.find((clip) => clip.id === cue.clipId),
+    requestedLaneCount
+  ));
+  const subtitleLaneCount = clamp(
+    Math.max(
+      requestedLaneCount,
+      ...subtitles.map((cue) => cue.lane + 1),
+      MIN_SUBTITLE_LANES
+    ),
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  const audioRegions = (Array.isArray(raw.audioRegions) ? raw.audioRegions : []).filter((region) => region && clipIds.has(region.clipId)).map((region) => normalizeAudioRegion(
+    region,
+    clips.find((clip) => clip.id === region.clipId)
+  ));
+  const subtitleDefaults = {
+    ...defaults.subtitleDefaults,
+    ...raw.subtitleDefaults || {},
+    fontFamily: "Pretendard",
+    fontWeight: 800,
+    color: subtitleColor,
+    outlineColor: normalizeHexColor(
+      raw.subtitleDefaults?.outlineColor,
+      defaults.subtitleDefaults.outlineColor
+    ),
+    backgroundColor: migratingLegacyProject ? "transparent" : String(raw.subtitleDefaults?.backgroundColor || defaults.subtitleDefaults.backgroundColor)
+  };
   return {
     ...defaults,
     ...raw,
+    schema: EDITOR_SCHEMA,
     source: { ...defaults.source, ...raw.source || {} },
     broadcastSession: { ...defaults.broadcastSession, ...raw.broadcastSession || {} },
     mediaAsset: normalizeMediaAsset(raw.mediaAsset),
-    subtitleDefaults: { ...defaults.subtitleDefaults, ...raw.subtitleDefaults || {} },
+    subtitleDefaults,
     ai: { ...defaults.ai, ...raw.ai || {} },
     history: {
       undo: Array.isArray(raw.history?.undo) ? raw.history.undo : [],
       redo: Array.isArray(raw.history?.redo) ? raw.history.redo : []
     },
     clips,
-    subtitles
+    subtitles,
+    subtitleLaneCount,
+    audioRegions,
+    selectedAudioRegionId: audioRegions.some((region) => region.id === raw.selectedAudioRegionId) ? raw.selectedAudioRegionId : null
   };
 }
 function mergeCaptureIntoEditorProject(project2, captureState = {}) {
@@ -267,6 +336,25 @@ function mergeCaptureIntoEditorProject(project2, captureState = {}) {
       ...cue,
       startOffsetMs: overlapStartMs - nextClip.sourceStartMs,
       endOffsetMs: overlapEndMs - nextClip.sourceStartMs
+    }, nextClip, normalized.subtitleLaneCount)];
+  });
+  const audioRegions = normalized.audioRegions.flatMap((region) => {
+    const previousClip = previousClipsById.get(region.clipId);
+    const nextClip = nextClipsById.get(region.clipId);
+    if (!previousClip || !nextClip) {
+      return [];
+    }
+    const regionSourceStartMs = previousClip.sourceStartMs + region.startOffsetMs;
+    const regionSourceEndMs = previousClip.sourceStartMs + region.endOffsetMs;
+    const overlapStartMs = Math.max(nextClip.sourceStartMs, regionSourceStartMs);
+    const overlapEndMs = Math.min(nextClip.sourceEndMs, regionSourceEndMs);
+    if (overlapEndMs - overlapStartMs < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    return [normalizeAudioRegion({
+      ...region,
+      startOffsetMs: overlapStartMs - nextClip.sourceStartMs,
+      endOffsetMs: overlapEndMs - nextClip.sourceStartMs
     }, nextClip)];
   });
   const source = { ...normalized.source, ...captureState.source || {} };
@@ -286,8 +374,10 @@ function mergeCaptureIntoEditorProject(project2, captureState = {}) {
     },
     clips: reflowedClips,
     subtitles,
+    audioRegions,
     selectedClipId: nextClipIds.has(normalized.selectedClipId) ? normalized.selectedClipId : nextClips[0]?.id || null,
     selectedCueId: subtitles.some((cue) => cue.id === normalized.selectedCueId) ? normalized.selectedCueId : null,
+    selectedAudioRegionId: audioRegions.some((region) => region.id === normalized.selectedAudioRegionId) ? normalized.selectedAudioRegionId : null,
     updatedAt: nowIso()
   };
 }
@@ -316,7 +406,7 @@ function mapTimelineToSource(project2, timelineMs) {
     sourceMs: clip.sourceStartMs + offsetMs
   };
 }
-function normalizeSubtitleCue(cue, clip) {
+function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
   const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
   const startOffsetMs = clamp(Math.round(finiteNumber(cue.startOffsetMs)), 0, Math.max(0, duration - MIN_CUE_DURATION_MS));
   const endOffsetMs = clamp(
@@ -330,6 +420,12 @@ function normalizeSubtitleCue(cue, clip) {
     startOffsetMs,
     endOffsetMs,
     text: String(cue.text || "").trim(),
+    lane: clamp(
+      Math.round(finiteNumber(cue.lane)),
+      0,
+      Math.max(0, Math.min(MAX_SUBTITLE_LANES, laneCount) - 1)
+    ),
+    color: normalizeHexColor(cue.color, "#ffffff"),
     x: clamp(finiteNumber(cue.x, 0.5), 0.05, 0.95),
     y: clamp(finiteNumber(cue.y, 0.84), 0.05, 0.95),
     origin: cue.origin === "ai" ? "ai" : "human",
@@ -345,6 +441,8 @@ function createSubtitleCue(project2, {
   startOffsetMs = 0,
   endOffsetMs = 2e3,
   text = "",
+  lane = 0,
+  color,
   x,
   y,
   origin = "human",
@@ -361,13 +459,106 @@ function createSubtitleCue(project2, {
     startOffsetMs,
     endOffsetMs,
     text,
+    lane,
+    color: color ?? project2.subtitleDefaults?.color,
     x: x ?? project2.subtitleDefaults?.x,
     y: y ?? project2.subtitleDefaults?.y,
     origin,
     confidence,
     createdAt,
     updatedAt: createdAt
+  }, clip, project2.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
+}
+function normalizeAudioRegion(region, clip) {
+  const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
+  const startOffsetMs = clamp(
+    Math.round(finiteNumber(region.startOffsetMs)),
+    0,
+    Math.max(0, duration - MIN_CUE_DURATION_MS)
+  );
+  const endOffsetMs = clamp(
+    Math.round(finiteNumber(region.endOffsetMs, startOffsetMs + 2e3)),
+    startOffsetMs + MIN_CUE_DURATION_MS,
+    duration
+  );
+  const maximumFadeMs = Math.max(0, endOffsetMs - startOffsetMs);
+  return {
+    id: region.id || makeId("audio"),
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    gain: clamp(finiteNumber(region.gain, 1), 0, 1),
+    muted: Boolean(region.muted),
+    fadeInMs: clamp(
+      Math.round(finiteNumber(region.fadeInMs)),
+      0,
+      maximumFadeMs
+    ),
+    fadeOutMs: clamp(
+      Math.round(finiteNumber(region.fadeOutMs)),
+      0,
+      maximumFadeMs
+    ),
+    createdAt: region.createdAt || nowIso(),
+    updatedAt: region.updatedAt || region.createdAt || nowIso()
+  };
+}
+function createAudioRegion(project2, {
+  id,
+  clipId,
+  startOffsetMs = 0,
+  endOffsetMs = 2e3,
+  gain = 1,
+  muted = false,
+  fadeInMs = 0,
+  fadeOutMs = 0,
+  createdAt = nowIso()
+} = {}) {
+  const clip = project2?.clips?.find((candidate) => candidate.id === clipId) || project2?.clips?.[0];
+  if (!clip) {
+    throw new Error("\uC74C\uC131\uC744 \uC870\uC808\uD560 \uC601\uC0C1 \uAD6C\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  return normalizeAudioRegion({
+    id,
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    gain,
+    muted,
+    fadeInMs,
+    fadeOutMs,
+    createdAt,
+    updatedAt: createdAt
   }, clip);
+}
+function updateAudioRegion(project2, regionId, patch = {}) {
+  const index = project2.audioRegions.findIndex((region) => region.id === regionId);
+  if (index < 0) {
+    return project2;
+  }
+  const current = project2.audioRegions[index];
+  const clip = project2.clips.find((candidate) => candidate.id === current.clipId);
+  const next = normalizeAudioRegion({
+    ...current,
+    ...patch,
+    updatedAt: nowIso()
+  }, clip);
+  const audioRegions = [...project2.audioRegions];
+  audioRegions[index] = next;
+  return {
+    ...project2,
+    audioRegions,
+    selectedAudioRegionId: regionId,
+    updatedAt: nowIso()
+  };
+}
+function deleteAudioRegion(project2, regionId) {
+  return {
+    ...project2,
+    audioRegions: project2.audioRegions.filter((region) => region.id !== regionId),
+    selectedAudioRegionId: project2.selectedAudioRegionId === regionId ? null : project2.selectedAudioRegionId,
+    updatedAt: nowIso()
+  };
 }
 function cueTimelineRange(project2, cue) {
   const clip = project2?.clips?.find((candidate) => candidate.id === cue?.clipId);
@@ -379,9 +570,19 @@ function cueTimelineRange(project2, cue) {
     endMs: clip.timelineStartMs + cue.endOffsetMs
   };
 }
-function cueAtTimeline(project2, timelineMs) {
+function audioRegionTimelineRange(project2, region) {
+  const clip = project2?.clips?.find((candidate) => candidate.id === region?.clipId);
+  if (!clip || clip.enabled === false) {
+    return null;
+  }
+  return {
+    startMs: clip.timelineStartMs + region.startOffsetMs,
+    endMs: clip.timelineStartMs + region.endOffsetMs
+  };
+}
+function cuesAtTimeline(project2, timelineMs) {
   const target = Math.round(finiteNumber(timelineMs));
-  return (project2?.subtitles || []).map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ range }) => range && target >= range.startMs && target < range.endMs).sort((a, b) => a.range.startMs - b.range.startMs)[0]?.cue || null;
+  return (project2?.subtitles || []).map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ range }) => range && target >= range.startMs && target < range.endMs).sort((a, b) => a.cue.lane - b.cue.lane || a.range.startMs - b.range.startMs || a.cue.id.localeCompare(b.cue.id)).map(({ cue }) => cue);
 }
 function findSubtitleOverlaps(project2) {
   const cues = (project2?.subtitles || []).map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ range }) => range).sort((a, b) => a.range.startMs - b.range.startMs);
@@ -393,7 +594,7 @@ function findSubtitleOverlaps(project2) {
       if (right.range.startMs >= left.range.endMs) {
         break;
       }
-      if (right.range.endMs > left.range.startMs) {
+      if (right.cue.lane === left.cue.lane && right.range.endMs > left.range.startMs) {
         overlaps.push({
           firstCueId: left.cue.id,
           secondCueId: right.cue.id,
@@ -404,6 +605,43 @@ function findSubtitleOverlaps(project2) {
     }
   }
   return overlaps;
+}
+function audioRegionAtTimeline(project2, timelineMs) {
+  const target = Math.round(finiteNumber(timelineMs));
+  return (project2?.audioRegions || []).map((region) => ({ region, range: audioRegionTimelineRange(project2, region) })).find(({ range }) => range && target >= range.startMs && target < range.endMs)?.region || null;
+}
+function findAudioRegionOverlaps(project2) {
+  const regions = (project2?.audioRegions || []).map((region) => ({ region, range: audioRegionTimelineRange(project2, region) })).filter(({ range }) => range).sort((a, b) => a.range.startMs - b.range.startMs);
+  const overlaps = [];
+  for (let leftIndex = 0; leftIndex < regions.length; leftIndex += 1) {
+    const left = regions[leftIndex];
+    for (let rightIndex = leftIndex + 1; rightIndex < regions.length; rightIndex += 1) {
+      const right = regions[rightIndex];
+      if (right.range.startMs >= left.range.endMs) {
+        break;
+      }
+      if (right.region.clipId === left.region.clipId && right.range.endMs > left.range.startMs) {
+        overlaps.push({
+          firstRegionId: left.region.id,
+          secondRegionId: right.region.id,
+          startMs: Math.max(left.range.startMs, right.range.startMs),
+          endMs: Math.min(left.range.endMs, right.range.endMs)
+        });
+      }
+    }
+  }
+  return overlaps;
+}
+function addSubtitleLane(project2) {
+  const subtitleLaneCount = clamp(
+    Math.round(finiteNumber(project2?.subtitleLaneCount, MIN_SUBTITLE_LANES)) + 1,
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  if (subtitleLaneCount === project2.subtitleLaneCount) {
+    return project2;
+  }
+  return { ...project2, subtitleLaneCount, updatedAt: nowIso() };
 }
 function updateSubtitleCue(project2, cueId, patch = {}, { markHuman = true } = {}) {
   const index = project2.subtitles.findIndex((cue) => cue.id === cueId);
@@ -417,7 +655,7 @@ function updateSubtitleCue(project2, cueId, patch = {}, { markHuman = true } = {
     ...patch,
     humanEdited: markHuman ? true : current.humanEdited,
     updatedAt: nowIso()
-  }, clip);
+  }, clip, project2.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
   const subtitles = [...project2.subtitles];
   subtitles[index] = next;
   return { ...project2, subtitles, selectedCueId: cueId, updatedAt: nowIso() };
@@ -436,11 +674,12 @@ function replaceAiSubtitleDraft(project2, clipId, drafts = []) {
     return project2;
   }
   const preserved = project2.subtitles.filter((cue) => cue.clipId !== clipId || cue.origin !== "ai" || cue.humanEdited);
-  const protectedInClip = preserved.filter((cue) => cue.clipId === clipId);
+  const protectedInClip = preserved.filter((cue) => cue.clipId === clipId && cue.lane === 0);
   const overlapsProtectedCue = (draft) => protectedInClip.some((cue) => Math.max(finiteNumber(draft.startOffsetMs), cue.startOffsetMs) < Math.min(finiteNumber(draft.endOffsetMs), cue.endOffsetMs));
   const normalizedDrafts = drafts.filter((draft) => String(draft?.text || "").trim()).map((draft) => createSubtitleCue(project2, {
     ...draft,
     clipId,
+    lane: 0,
     origin: "ai"
   })).sort((a, b) => a.startOffsetMs - b.startOffsetMs || a.endOffsetMs - b.endOffsetMs);
   const aiCues = [];
@@ -601,14 +840,34 @@ function updateClipTrim(project2, clipId, {
       ...cue,
       startOffsetMs: overlapStart - start,
       endOffsetMs: overlapEnd - start
+    }, nextClip, project2.subtitleLaneCount ?? MIN_SUBTITLE_LANES)];
+  });
+  const audioRegions = project2.audioRegions.flatMap((region) => {
+    if (region.clipId !== clipId) {
+      return [region];
+    }
+    const regionSourceStart = current.sourceStartMs + region.startOffsetMs;
+    const regionSourceEnd = current.sourceStartMs + region.endOffsetMs;
+    const overlapStart = Math.max(start, regionSourceStart);
+    const overlapEnd = Math.min(end, regionSourceEnd);
+    if (overlapEnd - overlapStart < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    return [normalizeAudioRegion({
+      ...region,
+      startOffsetMs: overlapStart - start,
+      endOffsetMs: overlapEnd - start
     }, nextClip)];
   });
   const selectedCueId = subtitles.some((cue) => cue.id === project2.selectedCueId) ? project2.selectedCueId : null;
+  const selectedAudioRegionId = audioRegions.some((region) => region.id === project2.selectedAudioRegionId) ? project2.selectedAudioRegionId : null;
   return {
     ...project2,
     clips,
     subtitles,
+    audioRegions,
     selectedCueId,
+    selectedAudioRegionId,
     updatedAt: nowIso()
   };
 }
@@ -30855,7 +31114,7 @@ function clampSamplePosition(value, length) {
 }
 function activeCuesAt(project2, outputSeconds) {
   const outputMs = outputSeconds * 1e3;
-  return project2.subtitles.map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ cue, range }) => range && cue.text.trim() && outputMs >= range.startMs && outputMs < range.endMs).sort((a, b) => a.range.startMs - b.range.startMs).map(({ cue }) => cue);
+  return project2.subtitles.map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ cue, range }) => range && cue.text.trim() && outputMs >= range.startMs && outputMs < range.endMs).sort((a, b) => (Number(a.cue.lane) || 0) - (Number(b.cue.lane) || 0) || a.range.startMs - b.range.startMs || String(a.cue.id).localeCompare(String(b.cue.id))).map(({ cue }) => cue);
 }
 function wrapCaption(context, text, maxWidth) {
   const paragraphs = String(text).split(/\r?\n/);
@@ -30908,6 +31167,8 @@ function drawCaption(context, canvas, project2, cue) {
   }
   const defaults = project2.subtitleDefaults;
   let fontSize = Math.max(18, Math.round(canvas.height * (defaults.fontScale || 0.052)));
+  const fontFamily = String(defaults.fontFamily || "Pretendard").replace(/["\\]/gu, "");
+  const fontWeight = clamp(Math.round(Number(defaults.fontWeight) || 800), 100, 900);
   const requestedX = canvas.width * cue.x;
   const requestedY = canvas.height * cue.y;
   const maxWidth = canvas.width * (defaults.maxWidth || 0.86);
@@ -30919,7 +31180,7 @@ function drawCaption(context, canvas, project2, cue) {
   let lines = [];
   const maximumCaptionHeight = canvas.height * 0.9;
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    context.font = `760 ${fontSize}px Pretendard, "Noto Sans KR", sans-serif`;
+    context.font = `${fontWeight} ${fontSize}px "${fontFamily}", "Noto Sans KR", sans-serif`;
     lines = wrapCaption(context, cue.text, maxWidth);
     const measuredHeight = lines.length * fontSize * 1.28 + fontSize * 0.3;
     if (measuredHeight <= maximumCaptionHeight || fontSize <= 1) {
@@ -30942,21 +31203,24 @@ function drawCaption(context, canvas, project2, cue) {
     canvasHeight: canvas.height,
     safeInset
   });
-  context.fillStyle = defaults.backgroundColor || "rgba(0, 0, 0, 0.58)";
-  context.beginPath();
-  context.roundRect(
-    x - boxWidth / 2,
-    y - boxHeight / 2,
-    boxWidth,
-    boxHeight,
-    Math.max(5, fontSize * 0.14)
-  );
-  context.fill();
+  const backgroundColor = String(defaults.backgroundColor || "transparent").trim();
+  if (backgroundColor && backgroundColor !== "transparent" && !/^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/iu.test(backgroundColor)) {
+    context.fillStyle = backgroundColor;
+    context.beginPath();
+    context.roundRect(
+      x - boxWidth / 2,
+      y - boxHeight / 2,
+      boxWidth,
+      boxHeight,
+      Math.max(5, fontSize * 0.14)
+    );
+    context.fill();
+  }
   const firstY = y - (lines.length - 1) * lineHeight / 2;
   const textX = context.textAlign === "left" ? x - boxWidth / 2 + fontSize * 0.36 : context.textAlign === "right" ? x + boxWidth / 2 - fontSize * 0.36 : x;
   context.lineWidth = outlineWidth;
-  context.strokeStyle = defaults.outlineColor || "#111318";
-  context.fillStyle = defaults.color || "#ffffff";
+  context.strokeStyle = defaults.outlineColor || "#111111";
+  context.fillStyle = cue.color || defaults.color || "#ffffff";
   lines.forEach((line, index) => {
     const lineY = firstY + index * lineHeight;
     context.strokeText(line, textX, lineY, maxWidth);
@@ -31032,10 +31296,7 @@ function scaledDimensions(width, height) {
   };
 }
 async function prepareRenderSource(input, project2) {
-  const subtitleOverlaps = findSubtitleOverlaps(project2);
-  if (subtitleOverlaps.length > 0) {
-    throw new Error("\uC11C\uB85C \uACB9\uCE58\uB294 \uC790\uB9C9\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uD0C0\uC784\uB77C\uC778\uC5D0\uC11C \uC790\uB9C9 \uC2DC\uC791\xB7\uB05D\uC744 \uACB9\uCE58\uC9C0 \uC54A\uAC8C \uC870\uC815\uD574 \uC8FC\uC138\uC694.");
-  }
+  validateRenderTimeline(project2);
   const [videoTrack, audioTrack] = await Promise.all([
     input.getPrimaryVideoTrack(),
     input.getPrimaryAudioTrack()
@@ -31073,6 +31334,20 @@ async function prepareRenderSource(input, project2) {
     settings,
     clips
   };
+}
+function validateRenderTimeline(project2) {
+  const subtitleOverlaps = findSubtitleOverlaps(project2);
+  if (subtitleOverlaps.length > 0) {
+    throw new Error(
+      "\uAC19\uC740 \uC790\uB9C9 \uB808\uC778\uC5D0\uC11C \uC11C\uB85C \uACB9\uCE58\uB294 \uC790\uB9C9\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uC790\uB9C9 \uC2DC\uC791\xB7\uB05D \uB610\uB294 \uB808\uC778\uC744 \uC870\uC815\uD574 \uC8FC\uC138\uC694."
+    );
+  }
+  const audioOverlaps = findAudioRegionOverlaps(project2);
+  if (audioOverlaps.length > 0) {
+    throw new Error(
+      "\uC11C\uB85C \uACB9\uCE58\uB294 \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uC74C\uC131 \uAD6C\uAC04 \uC2DC\uC791\xB7\uB05D\uC744 \uACB9\uCE58\uC9C0 \uC54A\uAC8C \uC870\uC815\uD574 \uC8FC\uC138\uC694."
+    );
+  }
 }
 async function getPreferredOutputProfile(file, project2) {
   const input = createInput(file);
@@ -31137,6 +31412,79 @@ function audioTrimFrameRange(sample, startSeconds, endSeconds) {
     )
   );
   return { frameStart, frameEnd };
+}
+function buildAudioAutomation(project2) {
+  return (project2?.audioRegions || []).map((region) => {
+    const range = audioRegionTimelineRange(project2, region);
+    if (!range) {
+      return null;
+    }
+    return {
+      id: region.id,
+      startSeconds: range.startMs / 1e3,
+      endSeconds: range.endMs / 1e3,
+      targetGain: region.muted ? 0 : clamp(Number.isFinite(Number(region.gain)) ? Number(region.gain) : 1, 0, 1),
+      fadeInSeconds: clamp(
+        (Number.isFinite(Number(region.fadeInMs)) ? Number(region.fadeInMs) : 0) / 1e3,
+        0,
+        Math.max(0, (range.endMs - range.startMs) / 1e3)
+      ),
+      fadeOutSeconds: clamp(
+        (Number.isFinite(Number(region.fadeOutMs)) ? Number(region.fadeOutMs) : 0) / 1e3,
+        0,
+        Math.max(0, (range.endMs - range.startMs) / 1e3)
+      )
+    };
+  }).filter(Boolean).sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
+}
+function audioAutomationGainAt(automation, outputSeconds) {
+  const time = Number(outputSeconds);
+  if (!Number.isFinite(time)) {
+    return 1;
+  }
+  const segment = automation.find((candidate) => time >= candidate.startSeconds && time < candidate.endSeconds);
+  if (!segment) {
+    return 1;
+  }
+  let blend = 1;
+  if (segment.fadeInSeconds > 0) {
+    blend = Math.min(
+      blend,
+      clamp((time - segment.startSeconds) / segment.fadeInSeconds, 0, 1)
+    );
+  }
+  if (segment.fadeOutSeconds > 0) {
+    blend = Math.min(
+      blend,
+      clamp((segment.endSeconds - time) / segment.fadeOutSeconds, 0, 1)
+    );
+  }
+  return 1 + (segment.targetGain - 1) * blend;
+}
+function applyAudioAutomationToSample(sample, automation) {
+  const sampleStart = sample.timestamp;
+  const sampleEnd = sample.timestamp + sample.duration;
+  const relevantAutomation = automation.filter((segment) => segment.targetGain !== 1 && segment.startSeconds < sampleEnd && segment.endSeconds > sampleStart);
+  if (relevantAutomation.length === 0) {
+    return sample;
+  }
+  const data = new Float32Array(sample.numberOfFrames * sample.numberOfChannels);
+  sample.copyTo(data, { planeIndex: 0, format: "f32" });
+  for (let frameIndex = 0; frameIndex < sample.numberOfFrames; frameIndex += 1) {
+    const outputSeconds = sample.timestamp + frameIndex / sample.sampleRate;
+    const gain = audioAutomationGainAt(relevantAutomation, outputSeconds);
+    const frameOffset = frameIndex * sample.numberOfChannels;
+    for (let channel = 0; channel < sample.numberOfChannels; channel += 1) {
+      data[frameOffset + channel] *= gain;
+    }
+  }
+  return new AudioSample({
+    data,
+    format: "f32",
+    numberOfChannels: sample.numberOfChannels,
+    sampleRate: sample.sampleRate,
+    timestamp: sample.timestamp
+  });
 }
 async function renderProjectVideo(file, project2, {
   fileHandle = null,
@@ -31209,6 +31557,7 @@ async function renderProjectVideo(file, project2, {
     }
     const videoSink = new VideoSampleSink(videoTrack);
     const audioSink = audioTrack && audioSource ? new AudioSampleSink(audioTrack) : null;
+    const audioAutomation = buildAudioAutomation(project2);
     const pumpState = {
       stopped: false,
       primaryError: null
@@ -31291,7 +31640,14 @@ async function renderProjectVideo(file, project2, {
             const trimmed = sourceSample.trim(frameStart, frameEnd);
             try {
               trimmed.setTimestamp(timelineStart + trimmed.timestamp - start);
-              await audioSource.add(trimmed);
+              const automated = applyAudioAutomationToSample(trimmed, audioAutomation);
+              try {
+                await audioSource.add(automated);
+              } finally {
+                if (automated !== trimmed) {
+                  automated.close();
+                }
+              }
             } finally {
               trimmed.close();
             }
@@ -31478,7 +31834,7 @@ var elements = Object.fromEntries([
   "preview-video",
   "stage-empty",
   "pick-media-empty",
-  "subtitle-overlay",
+  "subtitle-overlays",
   "previous-clip",
   "play-toggle",
   "next-clip",
@@ -31486,6 +31842,12 @@ var elements = Object.fromEntries([
   "duration-time",
   "toggle-mute",
   "volume",
+  "caption-mode-tab",
+  "audio-mode-tab",
+  "inspector-overline",
+  "inspector-title",
+  "caption-inspector-content",
+  "audio-inspector-content",
   "add-cue-top",
   "asr-model",
   "generate-captions",
@@ -31507,17 +31869,43 @@ var elements = Object.fromEntries([
   "cue-y-value",
   "font-size",
   "font-color",
+  "reset-font-color",
   "delete-cue",
   "cue-list",
+  "audio-empty",
+  "audio-editor",
+  "audio-region-label",
+  "audio-start",
+  "audio-end",
+  "audio-volume",
+  "audio-volume-value",
+  "audio-mute",
+  "audio-mute-label",
+  "audio-fade-in",
+  "audio-fade-in-value",
+  "audio-fade-out",
+  "audio-fade-out-value",
+  "reset-audio-region",
+  "delete-audio-region",
+  "add-audio-region",
   "add-cue",
+  "subtitle-lane-count",
+  "add-subtitle-lane",
   "fit-timeline",
   "timeline-zoom",
   "timeline-scroll",
   "timeline-content",
   "timeline-ruler",
   "video-track",
-  "caption-track",
+  "audio-track",
+  "caption-tracks",
   "playhead",
+  "timeline-context-menu",
+  "context-add-cue",
+  "context-add-audio",
+  "context-delete-cue",
+  "context-delete-audio",
+  "context-add-lane",
   "media-input",
   "job-dialog",
   "job-title",
@@ -31553,6 +31941,10 @@ var exportRequestPending = false;
 var activeJobCancelable = false;
 var previewSeekSequence = 0;
 var pendingPreviewSeek = null;
+var propertyInspectorMode = "caption";
+var previewVolume = 1;
+var previewMuted = false;
+var timelineContext = null;
 var EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
 var cloneProject = (value) => structuredClone(value);
 function formatTime(milliseconds, { compact = false } = {}) {
@@ -31724,6 +32116,9 @@ function redo() {
 function selectedCue() {
   return project.subtitles.find((cue) => cue.id === project.selectedCueId) || null;
 }
+function selectedAudioRegion() {
+  return project.audioRegions.find((region) => region.id === project.selectedAudioRegionId) || null;
+}
 function renderHeader() {
   if (elements.project_name.value !== project.name && document.activeElement !== elements.project_name) {
     elements.project_name.value = project.name;
@@ -31812,9 +32207,56 @@ function renderCueInspector() {
   elements.cue_x_value.textContent = `${Math.round(cue.x * 100)}%`;
   elements.cue_y_value.textContent = `${Math.round(cue.y * 100)}%`;
   elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.052) * 100);
-  elements.font_color.value = project.subtitleDefaults.color || "#ffffff";
+  elements.font_color.value = cue.color || project.subtitleDefaults.color || "#ffffff";
   const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
+}
+function renderAudioInspector() {
+  const region = selectedAudioRegion();
+  elements.audio_empty.hidden = Boolean(region);
+  elements.audio_editor.hidden = !region;
+  if (!region) {
+    return;
+  }
+  const range = audioRegionTimelineRange(project, region);
+  const clipIndex = project.clips.findIndex((clip) => clip.id === region.clipId);
+  elements.audio_region_label.textContent = `${clipIndex + 1}\uBC88 \uCEF7 \xB7 \uC74C\uC131 \uC124\uC815`;
+  if (document.activeElement !== elements.audio_start) {
+    elements.audio_start.value = formatTime(range.startMs, { compact: true });
+  }
+  if (document.activeElement !== elements.audio_end) {
+    elements.audio_end.value = formatTime(range.endMs, { compact: true });
+  }
+  const gainPercent = Math.round(region.gain * 100);
+  elements.audio_volume.value = String(gainPercent);
+  elements.audio_volume_value.textContent = `${gainPercent}%`;
+  elements.audio_mute.classList.toggle("active", region.muted);
+  elements.audio_mute.setAttribute("aria-pressed", String(region.muted));
+  elements.audio_mute_label.textContent = region.muted ? "\uC774 \uAD6C\uAC04 \uC74C\uC18C\uAC70 \uD574\uC81C" : "\uC774 \uAD6C\uAC04 \uC74C\uC18C\uAC70";
+  const durationMs = Math.max(0, region.endOffsetMs - region.startOffsetMs);
+  const maximumFadeMs = Math.min(3e3, durationMs);
+  elements.audio_fade_in.max = String(maximumFadeMs);
+  elements.audio_fade_out.max = String(maximumFadeMs);
+  elements.audio_fade_in.value = String(Math.min(region.fadeInMs, maximumFadeMs));
+  elements.audio_fade_out.value = String(Math.min(region.fadeOutMs, maximumFadeMs));
+  elements.audio_fade_in_value.textContent = `${(region.fadeInMs / 1e3).toFixed(1)}\uCD08`;
+  elements.audio_fade_out_value.textContent = `${(region.fadeOutMs / 1e3).toFixed(1)}\uCD08`;
+}
+function renderPropertyInspector() {
+  const showingAudio = propertyInspectorMode === "audio";
+  elements.caption_mode_tab.classList.toggle("active", !showingAudio);
+  elements.caption_mode_tab.setAttribute("aria-selected", String(!showingAudio));
+  elements.caption_mode_tab.tabIndex = showingAudio ? -1 : 0;
+  elements.audio_mode_tab.classList.toggle("active", showingAudio);
+  elements.audio_mode_tab.setAttribute("aria-selected", String(showingAudio));
+  elements.audio_mode_tab.tabIndex = showingAudio ? 0 : -1;
+  elements.caption_inspector_content.hidden = showingAudio;
+  elements.audio_inspector_content.hidden = !showingAudio;
+  elements.inspector_overline.textContent = showingAudio ? "VOICE" : "CAPTIONS";
+  elements.inspector_title.textContent = showingAudio ? "\uAD6C\uAC04\uBCC4 \uC74C\uC131" : "\uD55C\uAE00 \uC790\uB9C9";
+  elements.add_cue_top.hidden = showingAudio;
+  renderCueInspector();
+  renderAudioInspector();
 }
 function renderCueList() {
   elements.cue_list.replaceChildren();
@@ -31834,7 +32276,7 @@ function renderCueList() {
     button.classList.toggle("selected", cue.id === project.selectedCueId);
     button.dataset.id = cue.id;
     const time = document.createElement("time");
-    time.textContent = formatTime(range.startMs, { compact: true }).slice(0, -4);
+    time.textContent = `L${cue.lane + 1} \xB7 ${formatTime(range.startMs, { compact: true }).slice(0, -4)}`;
     const text = document.createElement("span");
     text.textContent = cue.text || "(\uBE48 \uC790\uB9C9)";
     button.append(time, text);
@@ -31892,9 +32334,9 @@ function makeHandle(side, onStart, onNudge, {
     }
     event.preventDefault();
     event.stopPropagation();
-    const owner = handle.closest(".clip-block, .cue-block");
+    const owner = handle.closest(".clip-block, .cue-block, .audio-block");
     const ownerId = owner?.dataset.id;
-    const ownerClass = owner?.classList.contains("clip-block") ? "clip-block" : "cue-block";
+    const ownerClass = owner?.classList.contains("clip-block") ? "clip-block" : owner?.classList.contains("audio-block") ? "audio-block" : "cue-block";
     const amount = event.shiftKey ? 1e3 : 100;
     onNudge(event.key === "ArrowLeft" ? -amount : amount);
     queueMicrotask(() => {
@@ -32004,7 +32446,65 @@ function bindCueTrim(handle, cue, side, event) {
     }
     endPointerHistory();
     if (overlapBlocked) {
-      showToast("\uC790\uB9C9\uB07C\uB9AC\uB294 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+      showToast("\uAC19\uC740 \uC790\uB9C9 \uB808\uC778 \uC548\uC5D0\uC11C\uB294 \uC790\uB9C9\uC774 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+    }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+function audioRegionHasOverlap(candidateProject, regionId) {
+  return findAudioRegionOverlaps(candidateProject).some((overlap) => overlap.firstRegionId === regionId || overlap.secondRegionId === regionId);
+}
+function bindAudioTrim(handle, region, side, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  beginPointerHistory();
+  const startX = event.clientX;
+  const originalStart = region.startOffsetMs;
+  const originalEnd = region.endOffsetMs;
+  const clip = project.clips.find((candidate) => candidate.id === region.clipId);
+  const duration = clipDurationMs(clip);
+  const pointerId = event.pointerId;
+  const block = handle.closest(".audio-block");
+  let overlapBlocked = false;
+  handle.setPointerCapture(pointerId);
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1e3);
+    const startOffsetMs = side === "left" ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta)) : originalStart;
+    const endOffsetMs = side === "right" ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta)) : originalEnd;
+    const nextProject = updateAudioRegion(project, region.id, { startOffsetMs, endOffsetMs });
+    if (audioRegionHasOverlap(nextProject, region.id)) {
+      overlapBlocked = true;
+      return;
+    }
+    overlapBlocked = false;
+    project = nextProject;
+    const nextRegion = selectedAudioRegion();
+    const range = audioRegionTimelineRange(project, nextRegion);
+    if (block && range) {
+      block.style.left = `${timelineX(range.startMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    }
+    renderAudioInspector();
+    applyPreviewAudioSettings();
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    endPointerHistory();
+    if (overlapBlocked) {
+      showToast("\uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uB07C\uB9AC\uB294 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
     }
   };
   window.addEventListener("pointermove", move);
@@ -32014,14 +32514,29 @@ function bindCueTrim(handle, cue, side, event) {
 function renderTimeline({ keepScroll = false } = {}) {
   const scrollLeft = elements.timeline_scroll.scrollLeft;
   const width = timelineWidth();
+  const laneCount = Math.max(2, project.subtitleLaneCount || 2);
+  document.documentElement.style.setProperty("--subtitle-lane-count", String(laneCount));
+  elements.subtitle_lane_count.textContent = String(laneCount);
+  elements.add_subtitle_lane.disabled = laneCount >= MAX_SUBTITLE_LANES;
   elements.timeline_content.style.width = `${width}px`;
   elements.video_track.style.width = `${width}px`;
-  elements.caption_track.style.width = `${width}px`;
+  elements.audio_track.style.width = `${width}px`;
   elements.video_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
-  elements.caption_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+  elements.audio_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
   renderRuler(width);
   elements.video_track.replaceChildren();
-  elements.caption_track.replaceChildren();
+  elements.audio_track.replaceChildren();
+  elements.caption_tracks.replaceChildren();
+  const captionRows = Array.from({ length: laneCount }, (_, lane) => {
+    const row = document.createElement("div");
+    row.className = "timeline-track caption-track-row";
+    row.dataset.lane = String(lane);
+    row.setAttribute("aria-label", `\uC790\uB9C9 ${lane + 1} \uB808\uC778`);
+    row.style.width = `${width}px`;
+    row.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+    elements.caption_tracks.append(row);
+    return row;
+  });
   project.clips.filter((clip) => clip.enabled !== false).forEach((clip, index) => {
     const block = document.createElement("div");
     block.className = "clip-block";
@@ -32080,6 +32595,80 @@ function renderTimeline({ keepScroll = false } = {}) {
       )
     );
     elements.video_track.append(block);
+    const audioSource = document.createElement("button");
+    audioSource.type = "button";
+    audioSource.className = "audio-source-block";
+    audioSource.dataset.clipId = clip.id;
+    audioSource.style.left = `${timelineX(clip.timelineStartMs)}px`;
+    audioSource.style.width = `${Math.max(8, timelineX(clipDurationMs(clip)))}px`;
+    audioSource.textContent = `${index + 1} \xB7 \uC6D0\uBCF8 \uC74C\uC131`;
+    audioSource.title = "\uD074\uB9AD\uD558\uBA74 \uC774 \uC704\uCE58\uC5D0 \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uC744 \uB9CC\uB4ED\uB2C8\uB2E4.";
+    audioSource.addEventListener("click", (event) => {
+      const rect = elements.timeline_content.getBoundingClientRect();
+      const timelineMs = (event.clientX - rect.left) / pixelsPerSecond * 1e3;
+      addAudioRegionAtTimeline(timelineMs);
+    });
+    elements.audio_track.append(audioSource);
+  });
+  project.audioRegions.forEach((region, regionIndex) => {
+    const range = audioRegionTimelineRange(project, region);
+    if (!range) {
+      return;
+    }
+    const block = document.createElement("div");
+    block.className = "audio-block";
+    block.classList.toggle("selected", region.id === project.selectedAudioRegionId);
+    block.classList.toggle("muted", region.muted);
+    block.dataset.id = region.id;
+    block.style.left = `${timelineX(range.startMs)}px`;
+    block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    const body = document.createElement("button");
+    body.type = "button";
+    body.className = "audio-block-body";
+    body.textContent = region.muted ? "\uC74C\uC18C\uAC70" : `\uC74C\uB7C9 ${Math.round(region.gain * 100)}%`;
+    body.addEventListener("click", () => selectAudioRegion(region.id, { seek: true }));
+    const regionClip = project.clips.find((candidate) => candidate.id === region.clipId);
+    const nudgeRegion = (side, delta) => {
+      const current = project.audioRegions.find((candidate) => candidate.id === region.id);
+      const currentClip = project.clips.find((candidate) => candidate.id === current.clipId);
+      const duration = clipDurationMs(currentClip);
+      const startOffsetMs = side === "left" ? Math.max(0, Math.min(current.endOffsetMs - 100, current.startOffsetMs + delta)) : current.startOffsetMs;
+      const endOffsetMs = side === "right" ? Math.min(duration, Math.max(current.startOffsetMs + 100, current.endOffsetMs + delta)) : current.endOffsetMs;
+      const nextProject = updateAudioRegion(project, region.id, { startOffsetMs, endOffsetMs });
+      if (audioRegionHasOverlap(nextProject, region.id)) {
+        showToast("\uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uB07C\uB9AC\uB294 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+        return;
+      }
+      applyProject(nextProject, { render: false });
+      renderAll({ keepScroll: true });
+      applyPreviewAudioSettings();
+    };
+    block.append(
+      makeHandle(
+        "left",
+        (event) => bindAudioTrim(event.currentTarget, region, "left", event),
+        (delta) => nudgeRegion("left", delta),
+        {
+          label: `${regionIndex + 1}\uBC88 \uC74C\uC131 \uC124\uC815 \uC2DC\uC791 \uC2DC\uAC01`,
+          valueMs: range.startMs,
+          minMs: regionClip.timelineStartMs,
+          maxMs: range.endMs - 100
+        }
+      ),
+      body,
+      makeHandle(
+        "right",
+        (event) => bindAudioTrim(event.currentTarget, region, "right", event),
+        (delta) => nudgeRegion("right", delta),
+        {
+          label: `${regionIndex + 1}\uBC88 \uC74C\uC131 \uC124\uC815 \uB05D \uC2DC\uAC01`,
+          valueMs: range.endMs,
+          minMs: range.startMs + 100,
+          maxMs: regionClip.timelineStartMs + clipDurationMs(regionClip)
+        }
+      )
+    );
+    elements.audio_track.append(block);
   });
   project.subtitles.forEach((cue, cueIndex) => {
     const range = cueTimelineRange(project, cue);
@@ -32090,8 +32679,10 @@ function renderTimeline({ keepScroll = false } = {}) {
     block.className = `cue-block ${cue.origin === "ai" ? "ai" : "human"}${cue.humanEdited ? " human-edited" : ""}`;
     block.classList.toggle("selected", cue.id === project.selectedCueId);
     block.dataset.id = cue.id;
+    block.dataset.lane = String(cue.lane);
     block.style.left = `${timelineX(range.startMs)}px`;
     block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    block.style.setProperty("--cue-color", cue.color || "#ffffff");
     const body = document.createElement("button");
     body.type = "button";
     body.className = "cue-block-body";
@@ -32109,7 +32700,7 @@ function renderTimeline({ keepScroll = false } = {}) {
       const endOffsetMs = side === "right" ? Math.min(duration, Math.max(current.startOffsetMs + 100, current.endOffsetMs + delta)) : current.endOffsetMs;
       const nextProject = updateSubtitleCue(project, cue.id, { startOffsetMs, endOffsetMs });
       if (cueHasOverlap(nextProject, cue.id)) {
-        showToast("\uC790\uB9C9\uB07C\uB9AC\uB294 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+        showToast("\uAC19\uC740 \uC790\uB9C9 \uB808\uC778 \uC548\uC5D0\uC11C\uB294 \uC790\uB9C9\uC774 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
         return;
       }
       applyProject(nextProject, { render: false });
@@ -32140,7 +32731,7 @@ function renderTimeline({ keepScroll = false } = {}) {
         }
       )
     );
-    elements.caption_track.append(block);
+    (captionRows[cue.lane] || captionRows[0]).append(block);
   });
   updatePlayhead();
   if (keepScroll) {
@@ -32164,35 +32755,80 @@ function videoContentRect() {
   };
 }
 function renderSubtitleOverlay() {
-  const cue = cueAtTimeline(project, project.playheadMs);
-  if (!cue || !mediaFile) {
-    elements.subtitle_overlay.hidden = true;
+  elements.subtitle_overlays.replaceChildren();
+  const cues = mediaFile ? cuesAtTimeline(project, project.playheadMs) : [];
+  if (cues.length === 0) {
     return;
   }
   const contentRect = videoContentRect();
-  elements.subtitle_overlay.hidden = false;
-  elements.subtitle_overlay.querySelector("span").textContent = cue.text || " ";
-  elements.subtitle_overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
-  elements.subtitle_overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
-  elements.subtitle_overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
-  elements.subtitle_overlay.style.fontSize = `${Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.052))}px`;
-  elements.subtitle_overlay.style.color = project.subtitleDefaults.color || "#ffffff";
-  elements.subtitle_overlay.style.background = project.subtitleDefaults.backgroundColor || "rgba(0, 0, 0, 0.58)";
-  const overlayRect = elements.subtitle_overlay.getBoundingClientRect();
-  const halfWidth = Math.min(overlayRect.width / 2, contentRect.width / 2);
-  const halfHeight = Math.min(overlayRect.height / 2, contentRect.height / 2);
-  const desiredLeft = contentRect.left + contentRect.width * cue.x;
-  const desiredTop = contentRect.top + contentRect.height * cue.y;
-  elements.subtitle_overlay.style.left = `${Math.min(
-    contentRect.left + contentRect.width - halfWidth,
-    Math.max(contentRect.left + halfWidth, desiredLeft)
-  )}px`;
-  elements.subtitle_overlay.style.top = `${Math.min(
-    contentRect.top + contentRect.height - halfHeight,
-    Math.max(contentRect.top + halfHeight, desiredTop)
-  )}px`;
-  elements.subtitle_overlay.classList.toggle("selected", cue.id === project.selectedCueId);
-  elements.subtitle_overlay.dataset.cueId = cue.id;
+  cues.forEach((cue) => {
+    const overlay = document.createElement("button");
+    overlay.type = "button";
+    overlay.className = "subtitle-overlay";
+    overlay.classList.toggle("selected", cue.id === project.selectedCueId);
+    overlay.dataset.cueId = cue.id;
+    overlay.setAttribute("aria-label", `${cue.lane + 1}\uBC88 \uB808\uC778 \uC790\uB9C9: ${cue.text || "\uBE48 \uC790\uB9C9"}`);
+    const text = document.createElement("span");
+    text.textContent = cue.text || " ";
+    const indicator = document.createElement("i");
+    indicator.className = "drag-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    overlay.append(text, indicator);
+    overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
+    overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
+    overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
+    const fontSize = Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.052));
+    overlay.style.fontSize = `${fontSize}px`;
+    overlay.style.color = cue.color || project.subtitleDefaults.color || "#ffffff";
+    overlay.style.background = "transparent";
+    overlay.style.setProperty(
+      "--subtitle-stroke",
+      `${Math.max(1.5, contentRect.height * (project.subtitleDefaults.outlineWidth || 6e-3))}px`
+    );
+    overlay.style.setProperty(
+      "--subtitle-outline-color",
+      project.subtitleDefaults.outlineColor || "#111111"
+    );
+    elements.subtitle_overlays.append(overlay);
+    const overlayRect = overlay.getBoundingClientRect();
+    const halfWidth = Math.min(overlayRect.width / 2, contentRect.width / 2);
+    const halfHeight = Math.min(overlayRect.height / 2, contentRect.height / 2);
+    const desiredLeft = contentRect.left + contentRect.width * cue.x;
+    const desiredTop = contentRect.top + contentRect.height * cue.y;
+    overlay.style.left = `${Math.min(
+      contentRect.left + contentRect.width - halfWidth,
+      Math.max(contentRect.left + halfWidth, desiredLeft)
+    )}px`;
+    overlay.style.top = `${Math.min(
+      contentRect.top + contentRect.height - halfHeight,
+      Math.max(contentRect.top + halfHeight, desiredTop)
+    )}px`;
+  });
+}
+function applyPreviewAudioSettings() {
+  const video = elements.preview_video;
+  if (!video || !project) {
+    return;
+  }
+  const region = audioRegionAtTimeline(project, project.playheadMs);
+  const targetGain = region?.muted ? 0 : region?.gain ?? 1;
+  let blend = region ? 1 : 0;
+  if (region) {
+    const range = audioRegionTimelineRange(project, region);
+    const elapsedMs = Math.max(0, project.playheadMs - range.startMs);
+    const remainingMs = Math.max(0, range.endMs - project.playheadMs);
+    if (region.fadeInMs > 0) {
+      blend = Math.min(blend, Math.min(1, elapsedMs / region.fadeInMs));
+    }
+    if (region.fadeOutMs > 0) {
+      blend = Math.min(blend, Math.min(1, remainingMs / region.fadeOutMs));
+    }
+  }
+  const regionGain = 1 + (targetGain - 1) * blend;
+  video.muted = previewMuted || Boolean(region?.muted && region.fadeInMs === 0 && region.fadeOutMs === 0);
+  video.volume = Math.max(0, Math.min(1, previewVolume * regionGain));
+  elements.toggle_mute.classList.toggle("active", previewMuted);
+  elements.toggle_mute.title = region?.muted && !previewMuted ? "\uD604\uC7AC \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uC774 \uC74C\uC18C\uAC70\uB428" : previewMuted ? "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70 \uD574\uC81C" : "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70";
 }
 function updatePlayhead() {
   const duration = projectDurationMs(project);
@@ -32204,6 +32840,7 @@ function updatePlayhead() {
   elements.current_time.textContent = formatTime(project.playheadMs);
   elements.duration_time.textContent = `/ ${formatTime(duration)}`;
   renderSubtitleOverlay();
+  applyPreviewAudioSettings();
 }
 function renderTransport() {
   const clip = mapTimelineToSource(project, project.playheadMs);
@@ -32220,10 +32857,11 @@ function renderAll(options = {}) {
   renderHeader();
   renderMediaCard();
   renderClipList();
-  renderCueInspector();
+  renderPropertyInspector();
   renderCueList();
   renderTimeline(options);
   renderTransport();
+  applyPreviewAudioSettings();
 }
 function sourceMsToPreviewSeconds(sourceMs) {
   const mediaOriginMs = Number(project.mediaAsset?.mediaOriginMs) || 0;
@@ -32410,6 +33048,7 @@ function selectCue(cueId, { seek = false } = {}) {
     selectedClipId: cue.clipId
   };
   inspectorMode = "selected";
+  propertyInspectorMode = "caption";
   const range = cueTimelineRange(project, cue);
   if (seek && range) {
     void seekTimeline(range.startMs);
@@ -32420,46 +33059,108 @@ function selectCue(cueId, { seek = false } = {}) {
 function cueHasOverlap(candidateProject, cueId) {
   return findSubtitleOverlaps(candidateProject).some((overlap) => overlap.firstCueId === cueId || overlap.secondCueId === cueId);
 }
-function addCueAtPlayhead() {
-  const mapping = mapTimelineToSource(project, project.playheadMs);
+function selectAudioRegion(regionId, { seek = false } = {}) {
+  const region = project.audioRegions.find((candidate) => candidate.id === regionId);
+  if (!region) {
+    return;
+  }
+  project = {
+    ...project,
+    selectedAudioRegionId: region.id,
+    selectedClipId: region.clipId
+  };
+  propertyInspectorMode = "audio";
+  const range = audioRegionTimelineRange(project, region);
+  if (seek && range) {
+    void seekTimeline(range.startMs);
+  }
+  renderAll({ keepScroll: true });
+  scheduleSave();
+}
+function addCueAtPlayhead({ timelineMs = project.playheadMs, lane: requestedLane = null } = {}) {
+  const mapping = mapTimelineToSource(project, timelineMs);
   if (!mapping) {
     showToast("\uC790\uB9C9\uC744 \uCD94\uAC00\uD560 \uC601\uC0C1 \uAD6C\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
     return;
   }
-  const activeCue = cueAtTimeline(project, project.playheadMs);
-  if (activeCue) {
-    selectCue(activeCue.id);
-    elements.cue_text.focus();
-    showToast("\uD604\uC7AC \uC2DC\uAC01\uC5D0\uB294 \uC774\uBBF8 \uC790\uB9C9\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uAE30\uC874 \uC790\uB9C9\uC758 \uB05D\uC744 \uBA3C\uC800 \uC870\uC815\uD574 \uC8FC\uC138\uC694.", "error");
+  let workingProject = project;
+  const occupiedLanes = new Set(cuesAtTimeline(workingProject, mapping.timelineMs).map((cue2) => cue2.lane));
+  let lane = Number.isInteger(requestedLane) && requestedLane >= 0 && requestedLane < workingProject.subtitleLaneCount && !occupiedLanes.has(requestedLane) ? requestedLane : Array.from(
+    { length: workingProject.subtitleLaneCount },
+    (_, index) => index
+  ).find((candidate) => !occupiedLanes.has(candidate));
+  if (lane === void 0 && workingProject.subtitleLaneCount < MAX_SUBTITLE_LANES) {
+    workingProject = addSubtitleLane(workingProject);
+    lane = workingProject.subtitleLaneCount - 1;
+  }
+  if (lane === void 0) {
+    showToast(`\uD604\uC7AC \uC2DC\uAC01\uC758 ${MAX_SUBTITLE_LANES}\uAC1C \uC790\uB9C9 \uB808\uC778\uC774 \uBAA8\uB450 \uC0AC\uC6A9 \uC911\uC785\uB2C8\uB2E4.`, "error");
     return;
   }
-  const clip = project.clips.find((candidate) => candidate.id === mapping.clipId);
+  const clip = workingProject.clips.find((candidate) => candidate.id === mapping.clipId);
   const startOffsetMs = mapping.clipOffsetMs;
-  const nextCueStartMs = project.subtitles.filter((cue2) => cue2.clipId === clip.id && cue2.startOffsetMs > startOffsetMs).map((cue2) => cue2.startOffsetMs).sort((a, b) => a - b)[0] ?? clipDurationMs(clip);
+  const nextCueStartMs = workingProject.subtitles.filter((cue2) => cue2.clipId === clip.id && cue2.lane === lane && cue2.startOffsetMs > startOffsetMs).map((cue2) => cue2.startOffsetMs).sort((a, b) => a - b)[0] ?? clipDurationMs(clip);
   const endOffsetMs = Math.min(
     clipDurationMs(clip),
     startOffsetMs + 2e3,
     nextCueStartMs
   );
   if (endOffsetMs - startOffsetMs < 100) {
-    showToast("\uB2E4\uC74C \uC790\uB9C9\uACFC\uC758 \uAC04\uACA9\uC774 \uB108\uBB34 \uC9E7\uC2B5\uB2C8\uB2E4. \uAE30\uC874 \uC790\uB9C9 \uC2DC\uAC01\uC744 \uBA3C\uC800 \uC870\uC815\uD574 \uC8FC\uC138\uC694.", "error");
+    showToast("\uC774 \uB808\uC778\uC758 \uB2E4\uC74C \uC790\uB9C9\uACFC \uAC04\uACA9\uC774 \uB108\uBB34 \uC9E7\uC2B5\uB2C8\uB2E4.", "error");
     return;
   }
-  const cue = createSubtitleCue(project, {
+  const cue = createSubtitleCue(workingProject, {
     clipId: clip.id,
     startOffsetMs,
     endOffsetMs,
     text: "\uC0C8 \uC790\uB9C9",
+    lane,
+    y: Math.max(0.12, (workingProject.subtitleDefaults?.y || 0.84) - lane * 0.1),
     origin: "human"
   });
+  propertyInspectorMode = "caption";
+  inspectorMode = "selected";
   applyProject({
-    ...project,
-    subtitles: [...project.subtitles, cue],
+    ...workingProject,
+    subtitles: [...workingProject.subtitles, cue],
     selectedCueId: cue.id,
     selectedClipId: clip.id
   });
   elements.cue_text.focus();
   elements.cue_text.select();
+}
+function addAudioRegionAtTimeline(timelineMs = project.playheadMs) {
+  const mapping = mapTimelineToSource(project, timelineMs);
+  if (!mapping) {
+    showToast("\uC74C\uC131\uC744 \uC870\uC808\uD560 \uC601\uC0C1 \uAD6C\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+    return;
+  }
+  const activeRegion = audioRegionAtTimeline(project, mapping.timelineMs);
+  if (activeRegion) {
+    selectAudioRegion(activeRegion.id);
+    showToast("\uD604\uC7AC \uC2DC\uAC01\uC758 \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uC744 \uC120\uD0DD\uD588\uC2B5\uB2C8\uB2E4.");
+    return;
+  }
+  const clip = project.clips.find((candidate) => candidate.id === mapping.clipId);
+  const startOffsetMs = mapping.clipOffsetMs;
+  const nextRegionStartMs = project.audioRegions.filter((region2) => region2.clipId === clip.id && region2.startOffsetMs > startOffsetMs).map((region2) => region2.startOffsetMs).sort((a, b) => a - b)[0] ?? clipDurationMs(clip);
+  const endOffsetMs = Math.min(clipDurationMs(clip), startOffsetMs + 2e3, nextRegionStartMs);
+  if (endOffsetMs - startOffsetMs < 100) {
+    showToast("\uB2E4\uC74C \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uACFC \uAC04\uACA9\uC774 \uB108\uBB34 \uC9E7\uC2B5\uB2C8\uB2E4.", "error");
+    return;
+  }
+  const region = createAudioRegion(project, {
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs
+  });
+  propertyInspectorMode = "audio";
+  applyProject({
+    ...project,
+    audioRegions: [...project.audioRegions, region],
+    selectedAudioRegionId: region.id,
+    selectedClipId: clip.id
+  });
 }
 function updateSelectedCue(patch, options) {
   const cue = selectedCue();
@@ -32468,11 +33169,26 @@ function updateSelectedCue(patch, options) {
   }
   const next = updateSubtitleCue(project, cue.id, patch, options);
   if (cueHasOverlap(next, cue.id)) {
-    showToast("\uC790\uB9C9\uB07C\uB9AC\uB294 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uC2DC\uC791\xB7\uB05D \uC2DC\uAC01\uC744 \uB2E4\uC2DC \uC870\uC815\uD574 \uC8FC\uC138\uC694.", "error");
+    showToast("\uAC19\uC740 \uC790\uB9C9 \uB808\uC778 \uC548\uC5D0\uC11C\uB294 \uC790\uB9C9\uC774 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
     renderCueInspector();
     return;
   }
   applyProject(next);
+}
+function updateSelectedAudioRegion(patch) {
+  const region = selectedAudioRegion();
+  if (!region) {
+    return false;
+  }
+  const next = updateAudioRegion(project, region.id, patch);
+  if (audioRegionHasOverlap(next, region.id)) {
+    showToast("\uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uB07C\uB9AC\uB294 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+    renderAudioInspector();
+    return false;
+  }
+  applyProject(next);
+  applyPreviewAudioSettings();
+  return true;
 }
 async function chooseMediaFile() {
   if (projectMutationLockCount > 0) {
@@ -32934,7 +33650,11 @@ async function exportVideo() {
     return;
   }
   if (findSubtitleOverlaps(project).length > 0) {
-    showToast("\uC11C\uB85C \uACB9\uCE58\uB294 \uC790\uB9C9\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uC790\uB9C9 \uC2DC\uC791\xB7\uB05D \uC2DC\uAC01\uC744 \uBA3C\uC800 \uC870\uC815\uD574 \uC8FC\uC138\uC694.", "error", 0);
+    showToast("\uAC19\uC740 \uB808\uC778 \uC548\uC5D0\uC11C \uACB9\uCE58\uB294 \uC790\uB9C9\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uC790\uB9C9 \uC2DC\uAC01\uC744 \uBA3C\uC800 \uC870\uC815\uD574 \uC8FC\uC138\uC694.", "error", 0);
+    return;
+  }
+  if (findAudioRegionOverlaps(project).length > 0) {
+    showToast("\uC11C\uB85C \uACB9\uCE58\uB294 \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uAD6C\uAC04 \uC2DC\uAC01\uC744 \uBA3C\uC800 \uC870\uC815\uD574 \uC8FC\uC138\uC694.", "error", 0);
     return;
   }
   if (activeJobController || projectMutationLockCount > 0) {
@@ -32943,6 +33663,14 @@ async function exportVideo() {
   }
   lockProjectMutations();
   try {
+    if (document.fonts?.load) {
+      try {
+        await document.fonts.load('800 48px "Pretendard"');
+      } catch (error) {
+        showToast(`\uC790\uB9C9 \uD3F0\uD2B8\uB97C \uC900\uBE44\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${error.message}`, "error", 0);
+        return;
+      }
+    }
     const exportProject = cloneProject(project);
     let profile;
     try {
@@ -33100,36 +33828,106 @@ async function focusSourceTab({ seek = false } = {}) {
   }
 }
 function bindOverlayDrag() {
-  elements.subtitle_overlay.addEventListener("pointerdown", (event) => {
-    const cueId = elements.subtitle_overlay.dataset.cueId;
+  elements.subtitle_overlays.addEventListener("pointerdown", (event) => {
+    const overlay = event.target.closest(".subtitle-overlay");
+    const cueId = overlay?.dataset.cueId;
     if (!cueId) {
       return;
     }
     event.preventDefault();
-    selectCue(cueId);
+    const cue = project.subtitles.find((candidate) => candidate.id === cueId);
+    project = {
+      ...project,
+      selectedCueId: cueId,
+      selectedClipId: cue.clipId
+    };
+    propertyInspectorMode = "caption";
+    inspectorMode = "selected";
+    elements.subtitle_overlays.querySelectorAll(".subtitle-overlay").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate === overlay);
+    });
+    elements.caption_tracks.querySelectorAll(".cue-block").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate.dataset.id === cueId);
+    });
+    renderPropertyInspector();
     beginPointerHistory();
-    elements.subtitle_overlay.setPointerCapture(event.pointerId);
+    const pointerId = event.pointerId;
+    overlay.setPointerCapture(pointerId);
     elements.stage.classList.add("dragging-subtitle");
     const move = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) {
+        return;
+      }
       const rect = elements.stage.getBoundingClientRect();
       const content = videoContentRect();
       const x = Math.max(0.05, Math.min(0.95, (moveEvent.clientX - rect.left - content.left) / content.width));
       const y = Math.max(0.05, Math.min(0.95, (moveEvent.clientY - rect.top - content.top) / content.height));
       project = updateSubtitleCue(project, cueId, { x, y });
       renderCueInspector();
-      renderSubtitleOverlay();
+      overlay.style.left = `${content.left + content.width * x}px`;
+      overlay.style.top = `${content.top + content.height * y}px`;
     };
-    const finish = () => {
-      elements.subtitle_overlay.removeEventListener("pointermove", move);
-      elements.subtitle_overlay.removeEventListener("pointerup", finish);
-      elements.subtitle_overlay.removeEventListener("pointercancel", finish);
+    const finish = (finishEvent) => {
+      if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
+        return;
+      }
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (overlay.hasPointerCapture(pointerId)) {
+        overlay.releasePointerCapture(pointerId);
+      }
       elements.stage.classList.remove("dragging-subtitle");
       endPointerHistory();
     };
-    elements.subtitle_overlay.addEventListener("pointermove", move);
-    elements.subtitle_overlay.addEventListener("pointerup", finish);
-    elements.subtitle_overlay.addEventListener("pointercancel", finish);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   });
+}
+function closeTimelineContextMenu() {
+  elements.timeline_context_menu.hidden = true;
+  timelineContext = null;
+}
+function openTimelineContextMenu(event) {
+  const cueBlock = event.target.closest(".cue-block");
+  const audioBlock = event.target.closest(".audio-block");
+  const captionRow = event.target.closest(".caption-track-row");
+  const inAudioTrack = Boolean(event.target.closest("#audio-track"));
+  if (!cueBlock && !audioBlock && !captionRow && !inAudioTrack) {
+    return;
+  }
+  event.preventDefault();
+  const timelineRect = elements.timeline_content.getBoundingClientRect();
+  const rawTimelineMs = (event.clientX - timelineRect.left) / pixelsPerSecond * 1e3;
+  const timelineMs = Math.max(0, Math.min(projectDurationMs(project), Math.round(rawTimelineMs)));
+  const laneValue = cueBlock?.dataset.lane ?? captionRow?.dataset.lane;
+  timelineContext = {
+    timelineMs,
+    lane: laneValue === void 0 ? null : Number(laneValue),
+    cueId: cueBlock?.dataset.id || null,
+    audioRegionId: audioBlock?.dataset.id || null,
+    kind: cueBlock || captionRow ? "caption" : "audio"
+  };
+  const captionContext = timelineContext.kind === "caption";
+  elements.context_add_cue.hidden = !captionContext;
+  elements.context_delete_cue.hidden = !timelineContext.cueId;
+  elements.context_add_lane.hidden = !captionContext || project.subtitleLaneCount >= MAX_SUBTITLE_LANES;
+  elements.context_add_audio.hidden = captionContext;
+  elements.context_delete_audio.hidden = !timelineContext.audioRegionId;
+  elements.timeline_context_menu.hidden = false;
+  elements.timeline_context_menu.style.left = `${event.clientX}px`;
+  elements.timeline_context_menu.style.top = `${event.clientY}px`;
+  const menuRect = elements.timeline_context_menu.getBoundingClientRect();
+  elements.timeline_context_menu.style.left = `${Math.max(
+    8,
+    Math.min(event.clientX, window.innerWidth - menuRect.width - 8)
+  )}px`;
+  elements.timeline_context_menu.style.top = `${Math.max(
+    8,
+    Math.min(event.clientY, window.innerHeight - menuRect.height - 8)
+  )}px`;
+  elements.timeline_context_menu.querySelector("button:not([hidden])")?.focus({ preventScroll: true });
 }
 function bindTimelineSeeking() {
   const seekFromEvent = (event) => {
@@ -33250,14 +34048,45 @@ function bindActions() {
   elements.preview_video.addEventListener("pause", () => elements.play_toggle.classList.remove("playing"));
   elements.preview_video.addEventListener("loadedmetadata", renderSubtitleOverlay);
   elements.toggle_mute.addEventListener("click", () => {
-    elements.preview_video.muted = !elements.preview_video.muted;
-    showToast(elements.preview_video.muted ? "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70" : "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70 \uD574\uC81C");
+    previewMuted = !previewMuted;
+    applyPreviewAudioSettings();
+    showToast(previewMuted ? "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70" : "\uBBF8\uB9AC\uBCF4\uAE30 \uC74C\uC18C\uAC70 \uD574\uC81C");
   });
   elements.volume.addEventListener("input", () => {
-    elements.preview_video.volume = Number(elements.volume.value);
+    previewVolume = Number(elements.volume.value);
+    applyPreviewAudioSettings();
   });
-  elements.add_cue.addEventListener("click", addCueAtPlayhead);
-  elements.add_cue_top.addEventListener("click", addCueAtPlayhead);
+  elements.caption_mode_tab.addEventListener("click", () => {
+    propertyInspectorMode = "caption";
+    renderPropertyInspector();
+  });
+  elements.audio_mode_tab.addEventListener("click", () => {
+    propertyInspectorMode = "audio";
+    renderPropertyInspector();
+  });
+  for (const tab of [elements.caption_mode_tab, elements.audio_mode_tab]) {
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      const next = event.key === "ArrowLeft" || event.key === "Home" ? elements.caption_mode_tab : elements.audio_mode_tab;
+      next.click();
+      next.focus();
+    });
+  }
+  elements.add_cue.addEventListener("click", () => addCueAtPlayhead());
+  elements.add_cue_top.addEventListener("click", () => addCueAtPlayhead());
+  elements.add_audio_region.addEventListener("click", () => addAudioRegionAtTimeline());
+  elements.add_subtitle_lane.addEventListener("click", () => {
+    const next = addSubtitleLane(project);
+    if (next === project) {
+      showToast(`\uC790\uB9C9 \uB808\uC778\uC740 \uCD5C\uB300 ${MAX_SUBTITLE_LANES}\uAC1C\uAE4C\uC9C0 \uB9CC\uB4E4 \uC218 \uC788\uC2B5\uB2C8\uB2E4.`);
+      return;
+    }
+    applyProject(next);
+    showToast(`${next.subtitleLaneCount}\uBC88\uC9F8 \uC790\uB9C9 \uB808\uC778\uC744 \uCD94\uAC00\uD588\uC2B5\uB2C8\uB2E4.`, "success");
+  });
   elements.cue_text.addEventListener("input", () => {
     const cue = selectedCue();
     if (cue) {
@@ -33336,16 +34165,22 @@ function bindActions() {
     }, "font-size");
   });
   elements.font_color.addEventListener("input", () => {
-    applyFieldProject({
-      ...project,
-      subtitleDefaults: {
-        ...project.subtitleDefaults,
-        color: elements.font_color.value
-      }
-    }, "font-color");
+    const cue = selectedCue();
+    if (cue) {
+      applyFieldProject(
+        updateSubtitleCue(project, cue.id, { color: elements.font_color.value }),
+        "font-color"
+      );
+    }
   });
   elements.font_size.addEventListener("change", () => endFieldEdit("font-size"));
   elements.font_color.addEventListener("change", () => endFieldEdit("font-color"));
+  elements.reset_font_color.addEventListener("click", () => {
+    const cue = selectedCue();
+    if (cue) {
+      updateSelectedCue({ color: project.subtitleDefaults.color || "#ffffff" });
+    }
+  });
   elements.delete_cue.addEventListener("click", () => {
     const cue = selectedCue();
     if (cue) {
@@ -33378,6 +34213,91 @@ function bindActions() {
       next.focus();
     });
   }
+  const restoreAudioTimeFields = () => {
+    const region = selectedAudioRegion();
+    const range = region ? audioRegionTimelineRange(project, region) : null;
+    if (!range) {
+      renderAudioInspector();
+      return;
+    }
+    elements.audio_start.value = formatTime(range.startMs, { compact: true });
+    elements.audio_end.value = formatTime(range.endMs, { compact: true });
+  };
+  elements.audio_start.addEventListener("change", () => {
+    const region = selectedAudioRegion();
+    const clip = project.clips.find((candidate) => candidate.id === region?.clipId);
+    const timelineMs = parseTime(elements.audio_start.value);
+    if (!region || !clip || timelineMs === null) {
+      restoreAudioTimeFields();
+      showToast("\uC74C\uC131 \uAD6C\uAC04 \uC2DC\uC791 \uC2DC\uAC01 \uD615\uC2DD\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error");
+      return;
+    }
+    updateSelectedAudioRegion({ startOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAudioTimeFields();
+  });
+  elements.audio_end.addEventListener("change", () => {
+    const region = selectedAudioRegion();
+    const clip = project.clips.find((candidate) => candidate.id === region?.clipId);
+    const timelineMs = parseTime(elements.audio_end.value);
+    if (!region || !clip || timelineMs === null) {
+      restoreAudioTimeFields();
+      showToast("\uC74C\uC131 \uAD6C\uAC04 \uC885\uB8CC \uC2DC\uAC01 \uD615\uC2DD\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error");
+      return;
+    }
+    updateSelectedAudioRegion({ endOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAudioTimeFields();
+  });
+  elements.audio_volume.addEventListener("input", () => {
+    const region = selectedAudioRegion();
+    if (!region) {
+      return;
+    }
+    applyFieldProject(
+      updateAudioRegion(project, region.id, { gain: Number(elements.audio_volume.value) / 100 }),
+      "audio-volume"
+    );
+    applyPreviewAudioSettings();
+  });
+  elements.audio_volume.addEventListener("change", () => endFieldEdit("audio-volume"));
+  elements.audio_mute.addEventListener("click", () => {
+    const region = selectedAudioRegion();
+    if (region) {
+      updateSelectedAudioRegion({ muted: !region.muted });
+    }
+  });
+  elements.audio_fade_in.addEventListener("input", () => {
+    const region = selectedAudioRegion();
+    if (!region) {
+      return;
+    }
+    applyFieldProject(
+      updateAudioRegion(project, region.id, { fadeInMs: Number(elements.audio_fade_in.value) }),
+      "audio-fade-in"
+    );
+    applyPreviewAudioSettings();
+  });
+  elements.audio_fade_out.addEventListener("input", () => {
+    const region = selectedAudioRegion();
+    if (!region) {
+      return;
+    }
+    applyFieldProject(
+      updateAudioRegion(project, region.id, { fadeOutMs: Number(elements.audio_fade_out.value) }),
+      "audio-fade-out"
+    );
+    applyPreviewAudioSettings();
+  });
+  elements.audio_fade_in.addEventListener("change", () => endFieldEdit("audio-fade-in"));
+  elements.audio_fade_out.addEventListener("change", () => endFieldEdit("audio-fade-out"));
+  elements.reset_audio_region.addEventListener("click", () => {
+    updateSelectedAudioRegion({ gain: 1, muted: false, fadeInMs: 0, fadeOutMs: 0 });
+  });
+  elements.delete_audio_region.addEventListener("click", () => {
+    const region = selectedAudioRegion();
+    if (region) {
+      applyProject(deleteAudioRegion(project, region.id));
+    }
+  });
   elements.generate_captions.addEventListener("click", () => void generateCaptions());
   elements.asr_model.addEventListener("change", () => {
     applyProject({
@@ -33413,6 +34333,50 @@ function bindActions() {
     elements.timeline_zoom.value = String(Math.round(pixelsPerSecond));
     renderTimeline();
   });
+  elements.caption_tracks.addEventListener("contextmenu", openTimelineContextMenu);
+  elements.audio_track.addEventListener("contextmenu", openTimelineContextMenu);
+  elements.context_add_cue.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      addCueAtPlayhead({ timelineMs: context.timelineMs, lane: context.lane });
+    }
+  });
+  elements.context_add_audio.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      addAudioRegionAtTimeline(context.timelineMs);
+    }
+  });
+  elements.context_delete_cue.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context?.cueId) {
+      applyProject(deleteSubtitleCue(project, context.cueId));
+    }
+  });
+  elements.context_delete_audio.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context?.audioRegionId) {
+      applyProject(deleteAudioRegion(project, context.audioRegionId));
+    }
+  });
+  elements.context_add_lane.addEventListener("click", () => {
+    closeTimelineContextMenu();
+    const next = addSubtitleLane(project);
+    if (next !== project) {
+      applyProject(next);
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!elements.timeline_context_menu.hidden && !event.target.closest("#timeline-context-menu")) {
+      closeTimelineContextMenu();
+    }
+  });
+  elements.timeline_scroll.addEventListener("scroll", closeTimelineContextMenu, { passive: true });
+  window.addEventListener("blur", closeTimelineContextMenu);
   bindOverlayDrag();
   bindTimelineSeeking();
   window.addEventListener("resize", () => {
@@ -33424,6 +34388,11 @@ function bindActions() {
     const interactive = Boolean(event.target.closest(
       "button, a, input, textarea, select, [contenteditable='true'], [role='slider'], [role='tab']"
     ));
+    if (event.key === "Escape" && !elements.timeline_context_menu.hidden) {
+      event.preventDefault();
+      closeTimelineContextMenu();
+      return;
+    }
     if (!elements.job_dialog.hidden) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -33516,13 +34485,25 @@ async function initialize() {
   await saveProject(project);
   await initializeSourceBinding();
   renderAll();
+  if (document.fonts?.load) {
+    void document.fonts.load('800 48px "Pretendard"').then(renderSubtitleOverlay).catch((error) => {
+      console.warn("Pretendard \uD3F0\uD2B8\uB97C \uBBF8\uB9AC \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", error);
+    });
+  }
   if (seedMergeError) {
     showToast(`\uCD5C\uC2E0 \uC120\uD0DD \uAD6C\uAC04\uC744 \uBC18\uC601\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${seedMergeError.message}`, "error", 0);
   }
   await restoreMedia();
   if (findSubtitleOverlaps(project).length > 0) {
     showToast(
-      "\uC774 \uD504\uB85C\uC81D\uD2B8\uC5D0\uB294 \uC11C\uB85C \uACB9\uCE58\uB294 \uC790\uB9C9\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uB0B4\uBCF4\uB0B4\uAE30 \uC804\uC5D0 \uC790\uB9C9 \uC2DC\uC791\xB7\uB05D \uC2DC\uAC01\uC744 \uC870\uC815\uD574 \uC8FC\uC138\uC694.",
+      "\uC774 \uD504\uB85C\uC81D\uD2B8\uC5D0\uB294 \uAC19\uC740 \uB808\uC778 \uC548\uC5D0\uC11C \uACB9\uCE58\uB294 \uC790\uB9C9\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uC790\uB9C9 \uC2DC\uAC01\uC744 \uC870\uC815\uD574 \uC8FC\uC138\uC694.",
+      "error",
+      0
+    );
+  }
+  if (findAudioRegionOverlaps(project).length > 0) {
+    showToast(
+      "\uC774 \uD504\uB85C\uC81D\uD2B8\uC5D0\uB294 \uC11C\uB85C \uACB9\uCE58\uB294 \uC74C\uC131 \uC124\uC815 \uAD6C\uAC04\uC774 \uC788\uC2B5\uB2C8\uB2E4. \uAD6C\uAC04 \uC2DC\uAC01\uC744 \uC870\uC815\uD574 \uC8FC\uC138\uC694.",
       "error",
       0
     );

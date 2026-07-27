@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -12,6 +13,7 @@ import {
   resolveCreatorPolicies
 } from "../extension/lib/core.js";
 import { EXTENSION_PACKAGE_FILES } from "./extension-package-files.mjs";
+import { PRETENDARD_FONT } from "./pretendard-font.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const extensionRoot = path.join(root, "extension");
@@ -46,6 +48,7 @@ const referencedFiles = [
   "editor.html",
   "editor/editor.css",
   "editor/editor.js",
+  PRETENDARD_FONT.extensionFontPath,
   "editor/asr-worker.js",
   "editor/vendor/ort-wasm-simd-threaded.jsep.mjs",
   "editor/vendor/ort-wasm-simd-threaded.jsep.wasm",
@@ -60,6 +63,7 @@ const referencedFiles = [
   "licenses/MEDIABUNNY-MPL-2.0.txt",
   "licenses/TRANSFORMERS-APACHE-2.0.txt",
   "licenses/ONNXRUNTIME-MIT.txt",
+  PRETENDARD_FONT.extensionLicensePath,
   ...EXTENSION_PACKAGE_FILES
 ].filter(Boolean);
 
@@ -70,6 +74,26 @@ for (const relativePath of uniqueReferencedFiles) {
   } catch {
     errors.push(`필수 파일이 없습니다: ${relativePath}`);
   }
+}
+
+for (const [relativePath, expectedSha256] of [
+  [PRETENDARD_FONT.extensionFontPath, PRETENDARD_FONT.fontSha256],
+  [PRETENDARD_FONT.extensionLicensePath, PRETENDARD_FONT.licenseSha256]
+]) {
+  let file;
+  try {
+    file = await readFile(path.join(extensionRoot, relativePath));
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      errors.push(`Pretendard 배포 파일 읽기 실패: ${relativePath} (${error.message})`);
+    }
+    continue;
+  }
+  const actualSha256 = createHash("sha256").update(file).digest("hex");
+  assert(
+    actualSha256 === expectedSha256,
+    `Pretendard 배포 파일 무결성 검증 실패: ${relativePath} (${actualSha256})`
+  );
 }
 
 const [html, panelScript, contentScript, editorHtml, editorScript, asrWorker, serviceWorker, editingGuide, policyGuide, codexAgentGuide, policyIndexText, charonSnapshot] = await Promise.all([
@@ -155,14 +179,21 @@ assert(
 );
 for (const id of [
   "preview-video",
-  "subtitle-overlay",
+  "subtitle-overlays",
   "video-track",
-  "caption-track",
+  "audio-track",
+  "caption-tracks",
+  "add-audio-region",
+  "add-subtitle-lane",
+  "timeline-context-menu",
   "cue-text",
   "cue-start",
   "cue-end",
   "cue-x",
   "cue-y",
+  "font-color",
+  "audio-volume",
+  "audio-mute",
   "generate-captions",
   "export-video",
   "source-offset",
@@ -177,6 +208,12 @@ assert(editorScript.includes("chooseUniqueExportBaseName"), "내보내기 파일
 assert(editorScript.includes("navigator.locks"), "여러 편집기 탭의 동시 내보내기 직렬화가 없습니다.");
 assert(editorScript.includes("fileHandleStored"), "원본 파일 핸들 복구 상태를 검증하지 않습니다.");
 assert(editorScript.includes("findSubtitleOverlaps"), "겹치는 자막 내보내기 방지가 없습니다.");
+assert(editorScript.includes("cuesAtTimeline"), "다른 레인의 동시 자막 미리보기 경로가 없습니다.");
+assert(editorScript.includes("addSubtitleLane"), "자막 레인 증설 경로가 없습니다.");
+assert(editorScript.includes("openTimelineContextMenu"), "자막·음성 우클릭 편집 경로가 없습니다.");
+assert(editorScript.includes("updateAudioRegion"), "구간별 음성 설정 저장 경로가 없습니다.");
+assert(editorScript.includes("applyAudioAutomationToSample"), "구간별 음성 설정 렌더 경로가 없습니다.");
+assert(editorScript.includes("findAudioRegionOverlaps"), "겹치는 음성 설정 구간 방지가 없습니다.");
 assert(
   editorScript.includes("pendingPreviewSeek") &&
     editorScript.includes("retryWhenAvailable"),

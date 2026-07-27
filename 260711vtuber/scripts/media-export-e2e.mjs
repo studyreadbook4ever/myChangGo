@@ -21,9 +21,14 @@ const SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 const PROJECT_ID = "e2e-media-export";
 const PROJECT_NAME = "Media Export E2E";
 const CAPTION_TEXT = "사람이 확인한 내보내기 자막";
+const SECOND_CAPTION_TEXT = "동시에 보이는 두 번째 자막";
+const FIRST_CAPTION_COLOR = "#ff2020";
+const SECOND_CAPTION_COLOR = "#20ff40";
 const PREEXISTING_SIDECAR_TEXT = "do-not-overwrite-existing-sidecar\n";
 const EXPECTED_DURATION_SECONDS = 4;
 const EXPECTED_FRAME_RATE = 30;
+const FRAME_WIDTH = 640;
+const FRAME_HEIGHT = 360;
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const extensionRoot = path.resolve(process.argv[2] || path.join(root, "extension"));
@@ -273,9 +278,10 @@ async function clearAndType(selector, text) {
   });
 }
 
-async function clickTimelineRulerAtClipMidpoint(clipId) {
+async function clickTimelineRulerAtClipFraction(clipId, fraction = 0.5) {
   const target = await executeSync(`
     const clipId = arguments[0];
+    const fraction = arguments[1];
     const ruler = document.querySelector("#timeline-ruler");
     const block = document.querySelector(
       '.clip-block[data-id="' + CSS.escape(clipId) + '"]'
@@ -294,14 +300,14 @@ async function clickTimelineRulerAtClipMidpoint(clipId) {
       });
     }, { capture: true });
     return {
-      x: Math.round(blockRect.left + blockRect.width / 2),
+      x: Math.round(blockRect.left + blockRect.width * fraction),
       y: Math.round(rulerRect.top + rulerRect.height / 2),
       blockLeft: blockRect.left,
       blockWidth: blockRect.width,
       rulerLeft: rulerRect.left,
       rulerWidth: rulerRect.width
     };
-  `, [clipId]);
+  `, [clipId, fraction]);
   assert(
     target &&
       Number.isFinite(target.x) &&
@@ -334,6 +340,23 @@ async function clickTimelineRulerAtClipMidpoint(clipId) {
   return target;
 }
 
+async function clickTimelineRulerAtClipMidpoint(clipId) {
+  return clickTimelineRulerAtClipFraction(clipId, 0.5);
+}
+
+async function seekTimelineAtClipFraction(clipId, fraction, expectedSeconds) {
+  const pointerTarget = await clickTimelineRulerAtClipFraction(clipId, fraction);
+  const playhead = await waitUntil(async () => {
+    const state = await readPlayheadUiState();
+    return (
+      Number.isFinite(Number(state.value)) &&
+      Math.abs(Number(state.value) - expectedSeconds) <= 0.05 &&
+      state.paused
+    ) ? state : false;
+  }, `${clipId} ${fraction} 위치로 타임라인 이동`);
+  return { pointerTarget, playhead };
+}
+
 async function readPlayheadUiState() {
   return executeSync(`
     const video = document.querySelector("#preview-video");
@@ -353,6 +376,27 @@ async function readPlayheadUiState() {
       pointerEvents: globalThis.__kirinukiE2eTimelinePointer || []
     };
   `);
+}
+
+async function setControlValue(selector, value) {
+  const result = await executeSync(`
+    const element = document.querySelector(arguments[0]);
+    if (!element) {
+      return null;
+    }
+    element.value = String(arguments[1]);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return {
+      value: element.value,
+      disabled: element.disabled
+    };
+  `, [selector, value]);
+  assert(
+    result && result.value === String(value) && result.disabled === false,
+    `${selector} 값을 ${value}(으)로 설정하지 못했습니다: ${JSON.stringify(result)}`
+  );
+  return result;
 }
 
 async function setFileInput(selector, filePath) {
@@ -845,6 +889,59 @@ async function sampleFrameRgb(ffmpeg, filePath, timestamp) {
   };
 }
 
+async function sampleFrameRgbPixels(ffmpeg, filePath, timestamp) {
+  const output = await runCommand(ffmpeg, [
+    "-hide_banner",
+    "-loglevel", "error",
+    "-i", filePath,
+    "-ss", String(timestamp),
+    "-frames:v", "1",
+    "-vf", `scale=${FRAME_WIDTH}:${FRAME_HEIGHT}:flags=neighbor`,
+    "-pix_fmt", "rgb24",
+    "-f", "rawvideo",
+    "pipe:1"
+  ], { binary: true });
+  const expectedBytes = FRAME_WIDTH * FRAME_HEIGHT * 3;
+  assert(
+    output.byteLength === expectedBytes,
+    `${timestamp}초 전체 프레임 RGB 크기가 다릅니다: ${output.byteLength} (expected ${expectedBytes})`
+  );
+  return output;
+}
+
+function analyzeCaptionColors(pixels) {
+  const result = {
+    red: { count: 0, xTotal: 0, yTotal: 0 },
+    green: { count: 0, xTotal: 0, yTotal: 0 }
+  };
+  for (let offset = 0; offset < pixels.byteLength; offset += 3) {
+    const red = pixels[offset];
+    const green = pixels[offset + 1];
+    const blue = pixels[offset + 2];
+    const pixelIndex = offset / 3;
+    const x = pixelIndex % FRAME_WIDTH;
+    const y = Math.floor(pixelIndex / FRAME_WIDTH);
+    if (red >= 150 && red >= green * 1.7 && red >= blue * 1.7) {
+      result.red.count += 1;
+      result.red.xTotal += x;
+      result.red.yTotal += y;
+    }
+    if (green >= 150 && green >= red * 1.7 && green >= blue * 1.7) {
+      result.green.count += 1;
+      result.green.xTotal += x;
+      result.green.yTotal += y;
+    }
+  }
+  return Object.fromEntries(Object.entries(result).map(([name, sample]) => [
+    name,
+    {
+      count: sample.count,
+      centerX: sample.count > 0 ? sample.xTotal / sample.count : null,
+      centerY: sample.count > 0 ? sample.yTotal / sample.count : null
+    }
+  ]));
+}
+
 async function sampleAudioPcm(ffmpeg, filePath, start, duration = 0.5) {
   const output = await runCommand(ffmpeg, [
     "-hide_banner",
@@ -862,6 +959,13 @@ async function sampleAudioPcm(ffmpeg, filePath, start, duration = 0.5) {
   assert(output.byteLength >= 4_000, `${start}초 오디오 PCM을 충분히 추출하지 못했습니다.`);
   const sampleCount = Math.floor(output.byteLength / 4);
   return Array.from({ length: sampleCount }, (_, index) => output.readFloatLE(index * 4));
+}
+
+function audioRms(samples) {
+  return Math.sqrt(
+    samples.reduce((total, sample) => total + sample * sample, 0) /
+      Math.max(1, samples.length)
+  );
 }
 
 function tonePower(samples, sampleRate, frequency) {
@@ -1185,21 +1289,24 @@ async function main() {
   await clickElement("#add-cue-top");
   await waitUntil(() => executeSync(`
     return document.querySelector("#cue-editor")?.hidden === false
-      && document.querySelectorAll("#caption-track .cue-block").length === 1;
+      && document.querySelectorAll("#caption-tracks .cue-block").length === 1;
   `), "사람 자막 추가");
   await clearAndType("#cue-text", CAPTION_TEXT);
   await executeSync("document.querySelector('#cue-text').blur();");
-  const captionProject = await waitForStoredProject((project) => (
+  await setControlValue("#font-color", FIRST_CAPTION_COLOR);
+  const firstCaptionProject = await waitForStoredProject((project) => (
     project.subtitles.length === 1
       && project.subtitles[0].text === CAPTION_TEXT
+      && project.subtitles[0].color === FIRST_CAPTION_COLOR
       && project.subtitles[0].origin === "human"
-  ), "사람 자막 autosave");
-  const captionCue = captionProject.subtitles[0];
-  const captionClip = captionProject.clips.find((clip) => clip.id === captionCue.clipId);
+  ), "첫 자막 텍스트·색상 autosave");
+  const captionCue = firstCaptionProject.subtitles[0];
+  const captionClip = firstCaptionProject.clips.find((clip) => clip.id === captionCue.clipId);
   const captionTimelineStartMs =
     Number(captionClip?.timelineStartMs) + Number(captionCue.startOffsetMs);
   assert(
     captionCue.clipId === "clip-blue" &&
+      captionCue.lane === 0 &&
       Math.abs(captionCue.startOffsetMs - 1_000) <= 2 &&
       Math.abs(captionTimelineStartMs - Number(safePlayhead.value) * 1_000) <= 2 &&
       captionCue.endOffsetMs - captionCue.startOffsetMs >= 100,
@@ -1207,6 +1314,109 @@ async function main() {
       safePlayhead,
       cue: captionCue
     })}`
+  );
+
+  await clickElement("#add-cue-top");
+  await waitUntil(() => executeSync(`
+    return document.querySelector("#cue-editor")?.hidden === false
+      && document.querySelectorAll("#caption-tracks .cue-block").length === 2;
+  `), "동시 두 번째 레인 자막 추가");
+  await clearAndType("#cue-text", SECOND_CAPTION_TEXT);
+  await executeSync("document.querySelector('#cue-text').blur();");
+  await setControlValue("#font-color", SECOND_CAPTION_COLOR);
+  const captionProject = await waitForStoredProject((project) => (
+    project.subtitles.length === 2
+      && project.subtitles.some((cue) => (
+        cue.text === CAPTION_TEXT &&
+        cue.color === FIRST_CAPTION_COLOR &&
+        cue.lane === 0
+      ))
+      && project.subtitles.some((cue) => (
+        cue.text === SECOND_CAPTION_TEXT &&
+        cue.color === SECOND_CAPTION_COLOR &&
+        cue.lane === 1
+      ))
+  ), "서로 다른 색의 동시 2레인 자막 autosave");
+  const captionCues = [...captionProject.subtitles].sort((a, b) => a.lane - b.lane);
+  assert(
+    captionCues[0].clipId === captionCues[1].clipId &&
+      captionCues[0].startOffsetMs === captionCues[1].startOffsetMs &&
+      captionCues[0].endOffsetMs === captionCues[1].endOffsetMs &&
+      captionCues[0].lane === 0 &&
+      captionCues[1].lane === 1,
+    `두 자막이 서로 다른 레인에서 동시에 겹치지 않습니다: ${JSON.stringify(captionCues)}`
+  );
+
+  const audioUiActions = {};
+  audioUiActions.muteSeek = await seekTimelineAtClipFraction("clip-blue", 0.4, 0.8);
+  await clickElement("#add-audio-region");
+  await waitUntil(() => executeSync(`
+    return document.querySelector("#audio-editor")?.hidden === false
+      && document.querySelectorAll("#audio-track .audio-block").length === 1;
+  `), "음소거 구간 추가");
+  await setControlValue("#audio-end", "00:01.200");
+  await clickElement("#audio-mute");
+  const mutedRegionProject = await waitForStoredProject((project) => (
+    project.audioRegions.length === 1
+      && project.audioRegions[0].clipId === "clip-blue"
+      && project.audioRegions[0].muted === true
+      && Math.abs(project.audioRegions[0].startOffsetMs - 800) <= 50
+      && Math.abs(project.audioRegions[0].endOffsetMs - 1_200) <= 2
+  ), "음소거 구간 autosave");
+
+  audioUiActions.gainSeek = await seekTimelineAtClipFraction("clip-blue", 0.05, 0.1);
+  await clickElement("#add-audio-region");
+  await waitUntil(() => executeSync(`
+    return document.querySelector("#audio-editor")?.hidden === false
+      && document.querySelectorAll("#audio-track .audio-block").length === 2;
+  `), "저음량 구간 추가");
+  await setControlValue("#audio-volume", "25");
+  const gainRegionProject = await waitForStoredProject((project) => (
+    project.audioRegions.length === 2
+      && project.audioRegions.some((region) => (
+        region.clipId === "clip-blue" &&
+        region.muted === false &&
+        Math.abs(region.gain - 0.25) < 0.001 &&
+        Math.abs(region.startOffsetMs - 100) <= 50 &&
+        Math.abs(region.endOffsetMs - mutedRegionProject.audioRegions[0].startOffsetMs) <= 2
+      ))
+  ), "25% 음량 구간 autosave");
+
+  audioUiActions.fadeSeek = await seekTimelineAtClipFraction("clip-red", 0.05, 2.1);
+  await clickElement("#add-audio-region");
+  await waitUntil(() => executeSync(`
+    return document.querySelector("#audio-editor")?.hidden === false
+      && document.querySelectorAll("#audio-track .audio-block").length === 3;
+  `), "페이드 구간 추가");
+  await setControlValue("#audio-volume", "20");
+  await setControlValue("#audio-fade-in", "500");
+  await setControlValue("#audio-fade-out", "500");
+  const audioProject = await waitForStoredProject((project) => (
+    project.audioRegions.length === 3
+      && project.audioRegions.some((region) => (
+        region.clipId === "clip-red" &&
+        Math.abs(region.gain - 0.2) < 0.001 &&
+        region.muted === false &&
+        region.fadeInMs === 500 &&
+        region.fadeOutMs === 500 &&
+        Math.abs(region.startOffsetMs - 100) <= 50 &&
+        Math.abs(region.endOffsetMs - 2_000) <= 2
+      ))
+  ), "20% 페이드 인·아웃 구간 autosave");
+  const gainRegion = audioProject.audioRegions.find((region) => (
+    region.clipId === "clip-blue" && Math.abs(region.gain - 0.25) < 0.001
+  ));
+  const mutedRegion = audioProject.audioRegions.find((region) => (
+    region.clipId === "clip-blue" && region.muted
+  ));
+  const fadeRegion = audioProject.audioRegions.find((region) => (
+    region.clipId === "clip-red" && region.fadeInMs === 500 && region.fadeOutMs === 500
+  ));
+  assert(
+    gainRegion && mutedRegion && fadeRegion &&
+      gainRegion.endOffsetMs <= mutedRegion.startOffsetMs &&
+      mutedRegion.endOffsetMs < 2_000,
+    `gain·mute·fade 음성 구간 구성이 잘못됐습니다: ${JSON.stringify(audioProject.audioRegions)}`
   );
 
   const pickerOverride = await installMemoryDirectoryPicker([{
@@ -1538,20 +1748,39 @@ async function main() {
     exportedProject.id === PROJECT_ID &&
       exportedProject.name === PROJECT_NAME &&
       exportedProject.clips?.map((clip) => clip.id).join(",") === "clip-blue,clip-red" &&
-      exportedProject.subtitles?.length === 1 &&
+      exportedProject.subtitles?.length === 2 &&
       exportedProject.subtitles[0].text === CAPTION_TEXT &&
-      exportedProject.subtitles[0].origin === "human",
+      exportedProject.subtitles[0].lane === 0 &&
+      exportedProject.subtitles[0].color === FIRST_CAPTION_COLOR &&
+      exportedProject.subtitles[1].text === SECOND_CAPTION_TEXT &&
+      exportedProject.subtitles[1].lane === 1 &&
+      exportedProject.subtitles[1].color === SECOND_CAPTION_COLOR &&
+      exportedProject.subtitles.every((cue) => cue.origin === "human") &&
+      exportedProject.audioRegions?.length === 3 &&
+      exportedProject.audioRegions.some((region) => (
+        region.id === gainRegion.id && Math.abs(region.gain - 0.25) < 0.001
+      )) &&
+      exportedProject.audioRegions.some((region) => (
+        region.id === mutedRegion.id && region.muted === true
+      )) &&
+      exportedProject.audioRegions.some((region) => (
+        region.id === fadeRegion.id &&
+        Math.abs(region.gain - 0.2) < 0.001 &&
+        region.fadeInMs === 500 &&
+        region.fadeOutMs === 500
+      )),
     `kirinuki JSON 내용이 editor 프로젝트와 다릅니다: ${jsonText.slice(0, 2_000)}`
   );
-  const expectedCue = captionProject.subtitles[0];
-  const expectedCueClip = captionProject.clips.find((clip) => clip.id === expectedCue.clipId);
-  const expectedSrt = [
-    "1",
-    `${formatSrtTime(expectedCueClip.timelineStartMs + expectedCue.startOffsetMs)} --> ` +
-      formatSrtTime(expectedCueClip.timelineStartMs + expectedCue.endOffsetMs),
-    CAPTION_TEXT,
-    ""
-  ].join("\n");
+  const expectedSrt = captionCues.map((cue, index) => {
+    const clip = captionProject.clips.find((candidate) => candidate.id === cue.clipId);
+    return [
+      index + 1,
+      `${formatSrtTime(clip.timelineStartMs + cue.startOffsetMs)} --> ` +
+        formatSrtTime(clip.timelineStartMs + cue.endOffsetMs),
+      cue.text,
+      ""
+    ].join("\n");
+  }).join("\n");
   assert(
     srtText === expectedSrt,
     `SRT 파일 내용이 autosave 프로젝트와 다릅니다:\nexpected=${expectedSrt}\nactual=${srtText}`
@@ -1581,11 +1810,60 @@ async function main() {
     );
   }
 
-  const [firstColor, secondColor, firstAudio, secondAudio] = await Promise.all([
+  const gainTimelineStart = (
+    audioProject.clips.find((clip) => clip.id === gainRegion.clipId).timelineStartMs +
+    gainRegion.startOffsetMs
+  ) / 1_000;
+  const mutedTimelineStart = (
+    audioProject.clips.find((clip) => clip.id === mutedRegion.clipId).timelineStartMs +
+    mutedRegion.startOffsetMs
+  ) / 1_000;
+  const mutedTimelineEnd = (
+    audioProject.clips.find((clip) => clip.id === mutedRegion.clipId).timelineStartMs +
+    mutedRegion.endOffsetMs
+  ) / 1_000;
+  const fadeTimelineStart = (
+    audioProject.clips.find((clip) => clip.id === fadeRegion.clipId).timelineStartMs +
+    fadeRegion.startOffsetMs
+  ) / 1_000;
+  const fadeTimelineEnd = (
+    audioProject.clips.find((clip) => clip.id === fadeRegion.clipId).timelineStartMs +
+    fadeRegion.endOffsetMs
+  ) / 1_000;
+  const [
+    firstColor,
+    secondColor,
+    firstAudio,
+    secondAudio,
+    captionPixels,
+    gainAudio,
+    mutedAudio,
+    baselineAudio,
+    fadeInAudio,
+    fadeCenterAudio,
+    fadeOutAudio
+  ] = await Promise.all([
     sampleFrameRgb(ffmpeg, downloadedVideo, 0.75),
     sampleFrameRgb(ffmpeg, downloadedVideo, 2.75),
     sampleAudioPcm(ffmpeg, downloadedVideo, 0.5),
-    sampleAudioPcm(ffmpeg, downloadedVideo, 2.5)
+    sampleAudioPcm(ffmpeg, downloadedVideo, 2.5),
+    sampleFrameRgbPixels(ffmpeg, downloadedVideo, 1.5),
+    sampleAudioPcm(ffmpeg, downloadedVideo, gainTimelineStart + 0.2, 0.25),
+    sampleAudioPcm(
+      ffmpeg,
+      downloadedVideo,
+      (mutedTimelineStart + mutedTimelineEnd) / 2 - 0.1,
+      0.2
+    ),
+    sampleAudioPcm(ffmpeg, downloadedVideo, mutedTimelineEnd + 0.2, 0.25),
+    sampleAudioPcm(ffmpeg, downloadedVideo, fadeTimelineStart + 0.05, 0.15),
+    sampleAudioPcm(
+      ffmpeg,
+      downloadedVideo,
+      (fadeTimelineStart + fadeTimelineEnd) / 2 - 0.075,
+      0.15
+    ),
+    sampleAudioPcm(ffmpeg, downloadedVideo, fadeTimelineEnd - 0.2, 0.15)
   ]);
   assert(
     firstColor.blue > firstColor.red + 100,
@@ -1594,6 +1872,15 @@ async function main() {
   assert(
     secondColor.red > secondColor.blue + 100,
     `둘째 컷이 빨강이 아닙니다: ${JSON.stringify(secondColor)}`
+  );
+
+  const captionColorAnalysis = analyzeCaptionColors(captionPixels);
+  assert(
+    captionColorAnalysis.red.count >= 40 &&
+      captionColorAnalysis.green.count >= 40 &&
+      captionColorAnalysis.green.centerY < captionColorAnalysis.red.centerY - 12,
+    "렌더 프레임에서 서로 다른 위치의 빨강·초록 동시 자막을 확인하지 못했습니다: " +
+      JSON.stringify(captionColorAnalysis)
   );
 
   const firstTone = {
@@ -1611,6 +1898,29 @@ async function main() {
   assert(
     secondTone.hz440 > secondTone.hz880 * 4,
     `둘째 컷 오디오가 440Hz 우세가 아닙니다: ${JSON.stringify(secondTone)}`
+  );
+
+  const audioLevels = {
+    gain25: audioRms(gainAudio),
+    muted: audioRms(mutedAudio),
+    unaffected: audioRms(baselineAudio),
+    fadeInEdge: audioRms(fadeInAudio),
+    fadeCenter20: audioRms(fadeCenterAudio),
+    fadeOutEdge: audioRms(fadeOutAudio)
+  };
+  assert(
+    audioLevels.gain25 < audioLevels.unaffected * 0.4 &&
+      audioLevels.gain25 > audioLevels.unaffected * 0.12,
+    `25% gain이 실제 PCM 진폭에 반영되지 않았습니다: ${JSON.stringify(audioLevels)}`
+  );
+  assert(
+    audioLevels.muted < audioLevels.unaffected * 0.03,
+    `mute가 실제 PCM을 충분히 무음으로 만들지 않았습니다: ${JSON.stringify(audioLevels)}`
+  );
+  assert(
+    audioLevels.fadeInEdge > audioLevels.fadeCenter20 * 2.3 &&
+      audioLevels.fadeOutEdge > audioLevels.fadeCenter20 * 2.3,
+    `fade in/out이 실제 PCM 가장자리→중앙 곡선에 반영되지 않았습니다: ${JSON.stringify(audioLevels)}`
   );
 
   const browserLogs = await webdriver("POST", `/session/${sessionId}/log`, { type: "browser" });
@@ -1653,7 +1963,15 @@ async function main() {
         safePlayhead,
         seekEventLog
       },
-      caption: captionProject.subtitles[0].text
+      captions: captionCues.map((cue) => ({
+        text: cue.text,
+        lane: cue.lane,
+        color: cue.color,
+        startOffsetMs: cue.startOffsetMs,
+        endOffsetMs: cue.endOffsetMs
+      })),
+      audioRegions: audioProject.audioRegions,
+      audioUiActions
     },
     output: {
       fileName: path.basename(downloadedVideo),
@@ -1678,7 +1996,12 @@ async function main() {
         srtName: srtFile.name,
         jsonProjectId: exportedProject.id,
         jsonClipOrder: exportedProject.clips.map((clip) => clip.id),
-        jsonCaption: exportedProject.subtitles[0].text,
+        jsonCaptions: exportedProject.subtitles.map((cue) => ({
+          text: cue.text,
+          lane: cue.lane,
+          color: cue.color
+        })),
+        jsonAudioRegions: exportedProject.audioRegions,
         srt: srtText
       },
       format: outputProbe.format,
@@ -1686,8 +2009,10 @@ async function main() {
       audio: audioStream,
       firstColor,
       secondColor,
+      captionColorAnalysis,
       firstTone,
-      secondTone
+      secondTone,
+      audioLevels
     },
     encoderEnvironment: {
       productProfileAvailable,
