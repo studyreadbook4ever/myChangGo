@@ -228,6 +228,35 @@ export function reflowClips(clips = []) {
   });
 }
 
+function normalizeSuppressedSelection(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const selectionId = String(raw.selectionId || "").trim();
+  const requestedStartMs = Number(raw.selectionStartMs);
+  const requestedEndMs = Number(raw.selectionEndMs);
+  if (
+    !selectionId ||
+    !Number.isFinite(requestedStartMs) ||
+    !Number.isFinite(requestedEndMs)
+  ) {
+    return null;
+  }
+  const selectionStartMs = Math.max(0, Math.round(requestedStartMs));
+  const selectionEndMs = Math.round(requestedEndMs);
+  if (selectionEndMs - selectionStartMs < MIN_CLIP_DURATION_MS) {
+    return null;
+  }
+  return {
+    ...raw,
+    selectionId,
+    selectionStartMs,
+    selectionEndMs,
+    createdAt: raw.createdAt || nowIso(),
+    updatedAt: raw.updatedAt || raw.createdAt || nowIso()
+  };
+}
+
 export function createEditorProjectFromCapture(captureState = {}, {
   id = captureProjectId(captureState),
   createdAt = nowIso()
@@ -242,6 +271,7 @@ export function createEditorProjectFromCapture(captureState = {}, {
     broadcastSession: createBroadcastSession(source),
     mediaAsset: null,
     clips,
+    suppressedSelections: [],
     imageAssets: [],
     subtitles: [],
     subtitleLaneCount: MIN_SUBTITLE_LANES,
@@ -293,6 +323,16 @@ export function normalizeEditorProject(raw) {
     createdAt: raw.createdAt || nowIso()
   });
   const clipIds = new Set(clips.map((clip) => clip.id));
+  const clipSelectionIds = new Set(clips.map((clip) => clip.selectionId));
+  const suppressedBySelectionId = new Map();
+  (Array.isArray(raw.suppressedSelections) ? raw.suppressedSelections : [])
+    .forEach((entry) => {
+      const suppressed = normalizeSuppressedSelection(entry);
+      if (suppressed && !clipSelectionIds.has(suppressed.selectionId)) {
+        suppressedBySelectionId.set(suppressed.selectionId, suppressed);
+      }
+    });
+  const suppressedSelections = [...suppressedBySelectionId.values()];
   const rawSubtitles = (Array.isArray(raw.subtitles) ? raw.subtitles : [])
     .filter((cue) => cue && clipIds.has(cue.clipId));
   const subtitleColor = normalizeHexColor(
@@ -369,6 +409,7 @@ export function normalizeEditorProject(raw) {
       redo: Array.isArray(raw.history?.redo) ? raw.history.redo : []
     },
     clips,
+    suppressedSelections,
     subtitles,
     subtitleLaneCount,
     audioRegions,
@@ -385,65 +426,137 @@ export function normalizeEditorProject(raw) {
 export function mergeCaptureIntoEditorProject(project, captureState = {}) {
   const normalized = normalizeEditorProject(project) || createEditorProjectFromCapture(captureState);
   const alignmentOffsetMs = Math.round(finiteNumber(normalized.broadcastSession?.alignmentOffsetMs));
-  const incomingClips = (captureState.segments || []).map(segmentToClip).map((clip) => {
-    const sourceStartMs = clip.selectionStartMs + alignmentOffsetMs;
-    const sourceEndMs = clip.selectionEndMs + alignmentOffsetMs;
-    if (sourceStartMs < 0 || sourceEndMs <= sourceStartMs) {
-      throw new Error(
-        `‘${clip.note || clip.selectionId}’ 선택 구간은 현재 정렬값에서 로컬 원본 시작보다 앞에 있습니다. 정렬값이나 선택 구간을 확인해 주세요.`
-      );
-    }
-    return {
-      ...clip,
-      sourceStartMs,
-      sourceEndMs
-    };
+  const capturedIncomingClips = (captureState.segments || []).map(segmentToClip);
+  const capturedIncomingBySelection = new Map(
+    capturedIncomingClips.map((clip) => [clip.selectionId, clip])
+  );
+  const suppressedSelections = (normalized.suppressedSelections || []).filter((suppressed) => {
+    const incoming = capturedIncomingBySelection.get(suppressed.selectionId);
+    return Boolean(
+      incoming &&
+      incoming.selectionStartMs === suppressed.selectionStartMs &&
+      incoming.selectionEndMs === suppressed.selectionEndMs
+    );
   });
+  const suppressedSelectionIds = new Set(
+    suppressedSelections.map((suppressed) => suppressed.selectionId)
+  );
+  const incomingClips = capturedIncomingClips
+    .filter((clip) => !suppressedSelectionIds.has(clip.selectionId))
+    .map((clip) => {
+      const sourceStartMs = clip.selectionStartMs + alignmentOffsetMs;
+      const sourceEndMs = clip.selectionEndMs + alignmentOffsetMs;
+      if (sourceStartMs < 0 || sourceEndMs <= sourceStartMs) {
+        throw new Error(
+          `‘${clip.note || clip.selectionId}’ 선택 구간은 현재 정렬값에서 로컬 원본 시작보다 앞에 있습니다. 정렬값이나 선택 구간을 확인해 주세요.`
+        );
+      }
+      return {
+        ...clip,
+        sourceStartMs,
+        sourceEndMs
+      };
+    });
   const incomingBySelection = new Map(incomingClips.map((clip) => [clip.selectionId, clip]));
   const existingSelectionIds = new Set(normalized.clips.map((clip) => clip.selectionId));
-  const retainedClips = normalized.clips.flatMap((existing) => {
-    const incoming = incomingBySelection.get(existing.selectionId);
+  const existingBySelection = new Map();
+  normalized.clips.forEach((clip) => {
+    const group = existingBySelection.get(clip.selectionId) || [];
+    group.push(clip);
+    existingBySelection.set(clip.selectionId, group);
+  });
+  const retainedByClipId = new Map();
+  const replacementBySelection = new Map();
+  existingBySelection.forEach((existingGroup, selectionId) => {
+    const incoming = incomingBySelection.get(selectionId);
     if (!incoming) {
-      return [];
+      return;
     }
-    const previousSelectionStartMs = Math.round(finiteNumber(
-      existing.selectionStartMs,
-      existing.sourceStartMs - alignmentOffsetMs
-    ));
-    const previousSelectionEndMs = Math.round(finiteNumber(
-      existing.selectionEndMs,
-      existing.sourceEndMs - alignmentOffsetMs
-    ));
-    const stillAtCapturedBoundary = (
-      existing.sourceStartMs === previousSelectionStartMs + alignmentOffsetMs &&
-      existing.sourceEndMs === previousSelectionEndMs + alignmentOffsetMs
-    );
-    const capturedBoundaryUnchanged = (
-      previousSelectionStartMs === incoming.selectionStartMs &&
-      previousSelectionEndMs === incoming.selectionEndMs
-    );
-    const overlapStartMs = Math.max(existing.sourceStartMs, incoming.sourceStartMs);
-    const overlapEndMs = Math.min(existing.sourceEndMs, incoming.sourceEndMs);
-    const canPreserveTrim = !stillAtCapturedBoundary && overlapEndMs - overlapStartMs >= MIN_CLIP_DURATION_MS;
-    return [{
+    const capturedBoundaryUnchanged = existingGroup.every((existing) => {
+      const previousSelectionStartMs = Math.round(finiteNumber(
+        existing.selectionStartMs,
+        existing.sourceStartMs - alignmentOffsetMs
+      ));
+      const previousSelectionEndMs = Math.round(finiteNumber(
+        existing.selectionEndMs,
+        existing.sourceEndMs - alignmentOffsetMs
+      ));
+      return (
+        previousSelectionStartMs === incoming.selectionStartMs &&
+        previousSelectionEndMs === incoming.selectionEndMs
+      );
+    });
+    const retainedGroup = existingGroup.flatMap((existing) => {
+      const previousSelectionStartMs = Math.round(finiteNumber(
+        existing.selectionStartMs,
+        existing.sourceStartMs - alignmentOffsetMs
+      ));
+      const previousSelectionEndMs = Math.round(finiteNumber(
+        existing.selectionEndMs,
+        existing.sourceEndMs - alignmentOffsetMs
+      ));
+      const stillAtCapturedBoundary = (
+        existing.sourceStartMs === previousSelectionStartMs + alignmentOffsetMs &&
+        existing.sourceEndMs === previousSelectionEndMs + alignmentOffsetMs
+      );
+      const overlapStartMs = Math.max(existing.sourceStartMs, incoming.sourceStartMs);
+      const overlapEndMs = Math.min(existing.sourceEndMs, incoming.sourceEndMs);
+      const canPreserveTrim = (
+        overlapEndMs - overlapStartMs >= MIN_CLIP_DURATION_MS &&
+        (existingGroup.length > 1 || !stillAtCapturedBoundary)
+      );
+      if (!capturedBoundaryUnchanged && !canPreserveTrim) {
+        return [];
+      }
+      return [{
+        ...incoming,
+        ...existing,
+        sourceStartMs: capturedBoundaryUnchanged
+          ? existing.sourceStartMs
+          : overlapStartMs,
+        sourceEndMs: capturedBoundaryUnchanged
+          ? existing.sourceEndMs
+          : overlapEndMs,
+        selectionStartMs: incoming.selectionStartMs,
+        selectionEndMs: incoming.selectionEndMs,
+        note: incoming.note,
+        capture: incoming.capture,
+        updatedAt: nowIso()
+      }];
+    });
+    if (retainedGroup.length > 0) {
+      retainedGroup.forEach((clip) => retainedByClipId.set(clip.id, clip));
+      return;
+    }
+    const [firstExisting] = existingGroup;
+    replacementBySelection.set(selectionId, {
       ...incoming,
-      ...existing,
-      sourceStartMs: capturedBoundaryUnchanged
-        ? existing.sourceStartMs
-        : canPreserveTrim
-          ? overlapStartMs
-          : incoming.sourceStartMs,
-      sourceEndMs: capturedBoundaryUnchanged
-        ? existing.sourceEndMs
-        : canPreserveTrim
-          ? overlapEndMs
-          : incoming.sourceEndMs,
+      ...firstExisting,
+      sourceStartMs: incoming.sourceStartMs,
+      sourceEndMs: incoming.sourceEndMs,
       selectionStartMs: incoming.selectionStartMs,
       selectionEndMs: incoming.selectionEndMs,
       note: incoming.note,
       capture: incoming.capture,
       updatedAt: nowIso()
-    }];
+    });
+  });
+  const emittedReplacements = new Set();
+  const retainedClips = normalized.clips.flatMap((existing) => {
+    const incoming = incomingBySelection.get(existing.selectionId);
+    if (!incoming) {
+      return [];
+    }
+    const retained = retainedByClipId.get(existing.id);
+    if (retained) {
+      return [retained];
+    }
+    const replacement = replacementBySelection.get(existing.selectionId);
+    if (!replacement || emittedReplacements.has(existing.selectionId)) {
+      return [];
+    }
+    emittedReplacements.add(existing.selectionId);
+    return [replacement];
   });
   const nextClips = [
     ...retainedClips,
@@ -513,6 +626,14 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
   });
   const source = { ...normalized.source, ...(captureState.source || {}) };
   const incomingSession = createBroadcastSession(source);
+  const previouslySelectedClip = normalized.clips.find((clip) => (
+    clip.id === normalized.selectedClipId
+  ));
+  const nextSelectedClipId = nextClipIds.has(normalized.selectedClipId)
+    ? normalized.selectedClipId
+    : nextClips.find((clip) => (
+      clip.selectionId === previouslySelectedClip?.selectionId
+    ))?.id || nextClips[0]?.id || null;
 
   return {
     ...normalized,
@@ -528,12 +649,11 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
       alignmentConfirmed: normalized.broadcastSession?.alignmentConfirmed || source.contentType === "vod"
     },
     clips: reflowedClips,
+    suppressedSelections,
     subtitles,
     audioRegions,
     imageAssets,
-    selectedClipId: nextClipIds.has(normalized.selectedClipId)
-      ? normalized.selectedClipId
-      : nextClips[0]?.id || null,
+    selectedClipId: nextSelectedClipId,
     selectedCueId: subtitles.some((cue) => cue.id === normalized.selectedCueId)
       ? normalized.selectedCueId
       : null,
@@ -1340,6 +1460,274 @@ export function updateClipTrim(project, clipId, {
     selectedAudioRegionId,
     selectedImageAssetId,
     updatedAt: nowIso()
+  };
+}
+
+export function rippleDeleteTimelineRange(project, {
+  startMs,
+  endMs
+} = {}) {
+  const numericStartMs = Number(startMs);
+  const numericEndMs = Number(endMs);
+  if (!Number.isFinite(numericStartMs) || !Number.isFinite(numericEndMs)) {
+    throw new TypeError("삭제할 타임라인 구간의 시작과 끝 시각이 필요합니다.");
+  }
+  const start = Math.round(numericStartMs);
+  const end = Math.round(numericEndMs);
+  const duration = projectDurationMs(project);
+  if (start < 0 || end > duration || end - start < MIN_CLIP_DURATION_MS) {
+    throw new RangeError(
+      "삭제 구간은 타임라인 안에서 0.1초 이상이어야 합니다."
+    );
+  }
+
+  const timestamp = nowIso();
+  const usedClipIds = new Set((project.clips || []).map((clip) => clip.id));
+  const makeUniqueClipId = () => {
+    let id = makeId("clip");
+    while (usedClipIds.has(id)) {
+      id = makeId("clip");
+    }
+    usedClipIds.add(id);
+    return id;
+  };
+  const slicesByClipId = new Map();
+  const nextClips = [];
+
+  for (const clip of project.clips || []) {
+    const clipDuration = clipDurationMs(clip);
+    const slices = [];
+    const appendSlice = (oldStartOffsetMs, oldEndOffsetMs, {
+      changed = true
+    } = {}) => {
+      const sliceIndex = slices.length;
+      const id = sliceIndex === 0 ? clip.id : makeUniqueClipId();
+      const nextClip = changed
+        ? {
+          ...clip,
+          id,
+          sourceStartMs: clip.sourceStartMs + oldStartOffsetMs,
+          sourceEndMs: clip.sourceStartMs + oldEndOffsetMs,
+          createdAt: id === clip.id ? clip.createdAt : timestamp,
+          updatedAt: timestamp
+        }
+        : clip;
+      slices.push({
+        oldStartOffsetMs,
+        oldEndOffsetMs,
+        nextClip
+      });
+      nextClips.push(nextClip);
+    };
+
+    if (clip.enabled === false) {
+      appendSlice(0, clipDuration, { changed: false });
+      slicesByClipId.set(clip.id, slices);
+      continue;
+    }
+
+    const clipTimelineStartMs = clip.timelineStartMs;
+    const clipTimelineEndMs = clipTimelineStartMs + clipDuration;
+    const overlapStartMs = Math.max(start, clipTimelineStartMs);
+    const overlapEndMs = Math.min(end, clipTimelineEndMs);
+    if (overlapEndMs <= overlapStartMs) {
+      appendSlice(0, clipDuration, { changed: false });
+      slicesByClipId.set(clip.id, slices);
+      continue;
+    }
+
+    const localDeleteStartMs = overlapStartMs - clipTimelineStartMs;
+    const localDeleteEndMs = overlapEndMs - clipTimelineStartMs;
+    const keptRanges = [
+      [0, localDeleteStartMs],
+      [localDeleteEndMs, clipDuration]
+    ].filter(([rangeStartMs, rangeEndMs]) => rangeEndMs > rangeStartMs);
+    const tooShort = keptRanges.find(([rangeStartMs, rangeEndMs]) => (
+      rangeEndMs - rangeStartMs < MIN_CLIP_DURATION_MS
+    ));
+    if (tooShort) {
+      throw new RangeError(
+        "삭제 뒤 남는 영상 조각은 각각 0.1초 이상이어야 합니다."
+      );
+    }
+    keptRanges.forEach(([rangeStartMs, rangeEndMs]) => {
+      appendSlice(rangeStartMs, rangeEndMs);
+    });
+    slicesByClipId.set(clip.id, slices);
+  }
+
+  const clips = reflowClips(nextClips);
+  const reflowedByClipId = new Map(clips.map((clip) => [clip.id, clip]));
+  slicesByClipId.forEach((slices) => {
+    slices.forEach((slice) => {
+      slice.nextClip = reflowedByClipId.get(slice.nextClip.id);
+    });
+  });
+
+  const remapTimedItems = (items, {
+    idPrefix,
+    normalize,
+    patchFragment = () => ({})
+  }) => (items || []).flatMap((item) => {
+    const slices = slicesByClipId.get(item.clipId) || [];
+    const fragments = slices.flatMap((slice) => {
+      const overlapStartMs = Math.max(item.startOffsetMs, slice.oldStartOffsetMs);
+      const overlapEndMs = Math.min(item.endOffsetMs, slice.oldEndOffsetMs);
+      if (overlapEndMs - overlapStartMs < MIN_CUE_DURATION_MS) {
+        return [];
+      }
+      return [{
+        slice,
+        overlapStartMs,
+        overlapEndMs,
+        startOffsetMs: overlapStartMs - slice.oldStartOffsetMs,
+        endOffsetMs: overlapEndMs - slice.oldStartOffsetMs
+      }];
+    });
+    return fragments.flatMap((fragment, fragmentIndex) => {
+      const preserveId = fragmentIndex === 0;
+      const unchanged = (
+        fragments.length === 1 &&
+        fragment.slice.nextClip.id === item.clipId &&
+        fragment.startOffsetMs === item.startOffsetMs &&
+        fragment.endOffsetMs === item.endOffsetMs
+      );
+      if (unchanged) {
+        return [item];
+      }
+      const raw = {
+        ...item,
+        ...patchFragment(item, fragment),
+        id: preserveId ? item.id : makeId(idPrefix),
+        clipId: fragment.slice.nextClip.id,
+        startOffsetMs: fragment.startOffsetMs,
+        endOffsetMs: fragment.endOffsetMs,
+        createdAt: preserveId ? item.createdAt : timestamp,
+        updatedAt: timestamp
+      };
+      const normalized = normalize(raw, fragment.slice.nextClip);
+      return normalized ? [normalized] : [];
+    });
+  });
+
+  const subtitles = remapTimedItems(project.subtitles, {
+    idPrefix: "cue",
+    normalize: (cue, clip) => normalizeSubtitleCue(
+      cue,
+      clip,
+      project.subtitleLaneCount ?? MIN_SUBTITLE_LANES
+    )
+  });
+  const imageAssets = remapTimedItems(project.imageAssets, {
+    idPrefix: "asset",
+    normalize: normalizeImageAsset
+  });
+  const audioRegions = remapTimedItems(project.audioRegions, {
+    idPrefix: "audio",
+    normalize: normalizeAudioRegion,
+    patchFragment: (region, fragment) => ({
+      fadeInMs: fragment.overlapStartMs === region.startOffsetMs
+        ? region.fadeInMs
+        : 0,
+      fadeOutMs: fragment.overlapEndMs === region.endOffsetMs
+        ? region.fadeOutMs
+        : 0
+    })
+  });
+
+  const previousPlayheadMs = clamp(
+    Math.round(finiteNumber(project.playheadMs)),
+    0,
+    duration
+  );
+  const deletedDurationMs = end - start;
+  const playheadMs = clamp(
+    previousPlayheadMs <= start
+      ? previousPlayheadMs
+      : previousPlayheadMs < end
+        ? start
+        : previousPlayheadMs - deletedDurationMs,
+    0,
+    projectDurationMs({ clips })
+  );
+  const projectWithClips = { ...project, clips };
+  const selectedClipId = clips.some((clip) => clip.id === project.selectedClipId)
+    ? project.selectedClipId
+    : mapTimelineToSource(projectWithClips, playheadMs)?.clipId
+      || clips[0]?.id
+      || null;
+  const survivingSelectionIds = new Set(clips.map((clip) => clip.selectionId));
+  const suppressedBySelectionId = new Map();
+  for (const entry of project.suppressedSelections || []) {
+    const suppressed = normalizeSuppressedSelection(entry);
+    if (suppressed && !survivingSelectionIds.has(suppressed.selectionId)) {
+      suppressedBySelectionId.set(suppressed.selectionId, suppressed);
+    }
+  }
+  const previousClipsBySelection = new Map();
+  for (const clip of project.clips || []) {
+    const selectionId = String(clip.selectionId || "").trim();
+    if (!selectionId) {
+      continue;
+    }
+    const group = previousClipsBySelection.get(selectionId) || [];
+    group.push(clip);
+    previousClipsBySelection.set(selectionId, group);
+  }
+  const alignmentOffsetMs = Math.round(finiteNumber(
+    project.broadcastSession?.alignmentOffsetMs
+  ));
+  previousClipsBySelection.forEach((previousClips, selectionId) => {
+    if (survivingSelectionIds.has(selectionId)) {
+      suppressedBySelectionId.delete(selectionId);
+      return;
+    }
+    const [representative] = previousClips;
+    const previous = suppressedBySelectionId.get(selectionId);
+    const suppressed = normalizeSuppressedSelection({
+      ...previous,
+      selectionId,
+      selectionStartMs: Math.round(finiteNumber(
+        representative.selectionStartMs,
+        representative.sourceStartMs - alignmentOffsetMs
+      )),
+      selectionEndMs: Math.round(finiteNumber(
+        representative.selectionEndMs,
+        representative.sourceEndMs - alignmentOffsetMs
+      )),
+      note: representative.note,
+      createdAt: previous?.createdAt || timestamp,
+      updatedAt: timestamp
+    });
+    if (suppressed) {
+      suppressedBySelectionId.set(selectionId, suppressed);
+    }
+  });
+  const suppressedSelections = [...suppressedBySelectionId.values()];
+
+  return {
+    ...project,
+    clips,
+    suppressedSelections,
+    subtitles,
+    imageAssets,
+    audioRegions,
+    selectedClipId,
+    selectedCueId: subtitles.some((cue) => cue.id === project.selectedCueId)
+      ? project.selectedCueId
+      : null,
+    selectedImageAssetId: imageAssets.some((asset) => (
+      asset.id === project.selectedImageAssetId
+    ))
+      ? project.selectedImageAssetId
+      : null,
+    selectedAudioRegionId: audioRegions.some((region) => (
+      region.id === project.selectedAudioRegionId
+    ))
+      ? project.selectedAudioRegionId
+      : null,
+    playheadMs,
+    updatedAt: timestamp
   };
 }
 

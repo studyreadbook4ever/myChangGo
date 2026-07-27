@@ -393,6 +393,17 @@
               <strong>영상 · 에셋 · 음성 · 자막</strong>
             </div>
             <div class="timeline-tools">
+              <div class="range-tools" role="group" aria-label="영상 구간 삭제">
+                <button id="set-range-start" class="tool-button range-mark-button" type="button" aria-pressed="false" aria-keyshortcuts="I" title="현재 재생 위치를 삭제 시작점으로 지정 (I)">
+                  시작 <kbd>I</kbd>
+                </button>
+                <button id="set-range-end" class="tool-button range-mark-button" type="button" aria-pressed="false" aria-keyshortcuts="O" title="현재 재생 위치를 삭제 끝점으로 지정 (O)">
+                  끝 <kbd>O</kbd>
+                </button>
+                <button id="clear-range" class="tool-button range-clear-button" type="button" aria-keyshortcuts="Escape" title="삭제 구간 선택 해제 (Esc)" hidden>선택 해제</button>
+                <button id="delete-range" class="tool-button range-delete-button" type="button" aria-keyshortcuts="Delete" title="선택한 영상 구간 삭제 (Delete)" disabled>구간 삭제</button>
+              </div>
+              <span class="timeline-tool-divider" aria-hidden="true"></span>
               <button id="paste-image-asset" class="tool-button asset-tool-button" type="button">+ 이미지 붙여넣기</button>
               <button id="add-audio-region" class="tool-button" type="button">+ 현재 위치 음성 설정</button>
               <button id="add-cue" class="tool-button" type="button">+ 현재 위치에 자막</button>
@@ -430,6 +441,11 @@
                 <div id="asset-track" class="timeline-track asset-track" aria-label="이미지 에셋 트랙"></div>
                 <div id="audio-track" class="timeline-track audio-track"></div>
                 <div id="caption-tracks" class="caption-tracks"></div>
+                <div id="timeline-range-selection" class="timeline-range-selection" hidden>
+                  <output id="timeline-range-summary" class="timeline-range-summary" aria-live="polite"></output>
+                  <button id="range-start-handle" class="range-handle start" type="button" role="slider" aria-label="삭제 구간 시작 시각" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00:00.000"></button>
+                  <button id="range-end-handle" class="range-handle end" type="button" role="slider" aria-label="삭제 구간 끝 시각" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00:00.000"></button>
+                </div>
                 <button id="playhead" class="playhead" type="button" role="slider" aria-label="편집 재생 시각" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00:00.000">
                   <span></span>
                 </button>
@@ -444,6 +460,9 @@
     <input id="asset-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
 
     <div id="timeline-context-menu" class="timeline-context-menu" hidden role="menu" aria-label="타임라인 메뉴">
+      <button id="context-set-range-start" type="button" role="menuitem">이 위치를 삭제 시작점으로</button>
+      <button id="context-set-range-end" type="button" role="menuitem">이 위치를 삭제 끝점으로</button>
+      <button id="context-delete-range" class="danger" type="button" role="menuitem">선택 구간 삭제</button>
       <button id="context-add-cue" type="button" role="menuitem">이 위치에 자막 추가</button>
       <button id="context-paste-asset" type="button" role="menuitem">이 위치에 이미지 붙여넣기</button>
       <button id="context-pick-asset" type="button" role="menuitem">이 위치에 이미지 파일 선택…</button>

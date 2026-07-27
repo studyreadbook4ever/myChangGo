@@ -33,6 +33,7 @@ import {
   projectDurationMs,
   reorderClip,
   replaceAiSubtitleDraft,
+  rippleDeleteTimelineRange,
   serializeSrt,
   sourceSessionIdentity,
   transcriptChunksToCueDrafts,
@@ -132,6 +133,7 @@ test("새 프로젝트는 에셋·자막 2개 레인과 고정 음성 레인 데
   const project = createEditorProjectFromCapture(captureState);
   assert.equal(project.subtitleLaneCount, MIN_SUBTITLE_LANES);
   assert.equal(project.subtitleLaneCount, 2);
+  assert.deepEqual(project.suppressedSelections, []);
   assert.deepEqual(project.imageAssets, []);
   assert.deepEqual(project.audioRegions, []);
   assert.equal(project.selectedImageAssetId, null);
@@ -156,6 +158,7 @@ test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v3로 이관
   const { lane: _lane, color: _color, ...cueWithoutV2Fields } = legacyCue;
   const {
     subtitleLaneCount: _subtitleLaneCount,
+    suppressedSelections: _suppressedSelections,
     audioRegions: _audioRegions,
     imageAssets: _imageAssets,
     selectedImageAssetId: _selectedImageAssetId,
@@ -827,6 +830,588 @@ test("컷 trim은 이미지 에셋의 원본 시각을 보존해 자르고 범�
     source: { kind: "blob-key", value: "asset/kept" }
   }]);
   assert.equal(project.selectedImageAssetId, null);
+});
+
+test("컷 trim은 영상과 같은 원본 시각을 유지하며 현재·후속 컷 자막을 함께 당긴다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    subtitles: [
+      createSubtitleCue(project, {
+        id: "first-source-cue",
+        clipId: "clip-first",
+        startOffsetMs: 1_500,
+        endOffsetMs: 2_500,
+        text: "첫 컷 자막"
+      }),
+      createSubtitleCue(project, {
+        id: "second-source-cue",
+        clipId: "clip-second",
+        startOffsetMs: 500,
+        endOffsetMs: 1_500,
+        text: "다음 컷 자막"
+      })
+    ]
+  };
+  const firstCueBefore = project.subtitles[0];
+  const secondCueBefore = project.subtitles[1];
+  const firstSourceRangeBefore = {
+    startMs: project.clips[0].sourceStartMs + firstCueBefore.startOffsetMs,
+    endMs: project.clips[0].sourceStartMs + firstCueBefore.endOffsetMs
+  };
+  assert.deepEqual(cueTimelineRange(project, secondCueBefore), {
+    startMs: 6_125,
+    endMs: 7_125
+  });
+
+  project = updateClipTrim(project, "clip-first", {
+    sourceStartMs: 10_625,
+    sourceEndMs: 14_750
+  });
+  const firstCueAfter = project.subtitles.find((cue) => cue.id === "first-source-cue");
+  const secondCueAfter = project.subtitles.find((cue) => cue.id === "second-source-cue");
+  const firstClipAfter = project.clips.find((clip) => clip.id === "clip-first");
+  assert.deepEqual({
+    startMs: firstClipAfter.sourceStartMs + firstCueAfter.startOffsetMs,
+    endMs: firstClipAfter.sourceStartMs + firstCueAfter.endOffsetMs
+  }, firstSourceRangeBefore);
+  assert.deepEqual(cueTimelineRange(project, firstCueAfter), {
+    startMs: 1_000,
+    endMs: 2_000
+  });
+  assert.deepEqual(cueTimelineRange(project, secondCueAfter), {
+    startMs: 4_625,
+    endMs: 5_625
+  });
+});
+
+test("가운데 구간 삭제는 컷을 분할하고 자막·에셋·음성을 원본 시각 기준으로 함께 잇는다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  const spanningCue = {
+    ...createSubtitleCue(project, {
+      id: "spanning-cue",
+      clipId: "clip-first",
+      startOffsetMs: 1_500,
+      endOffsetMs: 3_500,
+      text: "이어지는 자막",
+      lane: 1,
+      color: "#44aaee",
+      origin: "ai"
+    }),
+    humanEdited: true
+  };
+  const afterCue = createSubtitleCue(project, {
+    id: "after-cue",
+    clipId: "clip-first",
+    startOffsetMs: 4_000,
+    endOffsetMs: 5_000,
+    text: "뒤 자막"
+  });
+  const deletedCue = createSubtitleCue(project, {
+    id: "deleted-cue",
+    clipId: "clip-first",
+    startOffsetMs: 2_200,
+    endOffsetMs: 2_600,
+    text: "삭제될 자막"
+  });
+  const spanningAsset = createImageAsset(project, {
+    id: "spanning-asset",
+    clipId: "clip-first",
+    startOffsetMs: 1_000,
+    endOffsetMs: 4_000,
+    name: "투명 로고",
+    mimeType: "image/png",
+    blobKey: "asset/spanning",
+    opacity: 0.7
+  });
+  const spanningAudio = createAudioRegion(project, {
+    id: "spanning-audio",
+    clipId: "clip-first",
+    startOffsetMs: 1_000,
+    endOffsetMs: 4_000,
+    gain: 0.4,
+    fadeInMs: 600,
+    fadeOutMs: 700
+  });
+  project = {
+    ...project,
+    subtitles: [spanningCue, afterCue, deletedCue],
+    imageAssets: [spanningAsset],
+    audioRegions: [spanningAudio],
+    selectedCueId: "after-cue",
+    selectedImageAssetId: "spanning-asset",
+    selectedAudioRegionId: "spanning-audio",
+    playheadMs: 4_500
+  };
+
+  project = rippleDeleteTimelineRange(project, {
+    startMs: 2_000,
+    endMs: 3_000
+  });
+
+  const firstSelectionClips = project.clips.filter((clip) => clip.selectionId === "first");
+  assert.equal(firstSelectionClips.length, 2);
+  const [beforeClip, afterClip] = firstSelectionClips;
+  assert.equal(beforeClip.id, "clip-first");
+  assert.notEqual(afterClip.id, beforeClip.id);
+  assert.deepEqual(firstSelectionClips.map((clip) => ({
+    selectionId: clip.selectionId,
+    selectionStartMs: clip.selectionStartMs,
+    selectionEndMs: clip.selectionEndMs,
+    sourceStartMs: clip.sourceStartMs,
+    sourceEndMs: clip.sourceEndMs,
+    timelineStartMs: clip.timelineStartMs
+  })), [
+    {
+      selectionId: "first",
+      selectionStartMs: 10_125,
+      selectionEndMs: 15_750,
+      sourceStartMs: 10_125,
+      sourceEndMs: 12_125,
+      timelineStartMs: 0
+    },
+    {
+      selectionId: "first",
+      selectionStartMs: 10_125,
+      selectionEndMs: 15_750,
+      sourceStartMs: 13_125,
+      sourceEndMs: 15_750,
+      timelineStartMs: 2_000
+    }
+  ]);
+  assert.equal(project.clips.find((clip) => clip.id === "clip-second").timelineStartMs, 4_625);
+  assert.equal(projectDurationMs(project), 11_125);
+  assert.equal(project.playheadMs, 3_500);
+  assert.deepEqual(project.suppressedSelections, []);
+
+  const splitCues = project.subtitles.filter((cue) => cue.text === "이어지는 자막");
+  assert.equal(splitCues.length, 2);
+  assert.equal(splitCues[0].id, "spanning-cue");
+  assert.notEqual(splitCues[1].id, splitCues[0].id);
+  assert.deepEqual(splitCues.map((cue) => ({
+    clipId: cue.clipId,
+    startOffsetMs: cue.startOffsetMs,
+    endOffsetMs: cue.endOffsetMs,
+    lane: cue.lane,
+    color: cue.color,
+    origin: cue.origin,
+    humanEdited: cue.humanEdited
+  })), [
+    {
+      clipId: beforeClip.id,
+      startOffsetMs: 1_500,
+      endOffsetMs: 2_000,
+      lane: 1,
+      color: "#44aaee",
+      origin: "ai",
+      humanEdited: true
+    },
+    {
+      clipId: afterClip.id,
+      startOffsetMs: 0,
+      endOffsetMs: 500,
+      lane: 1,
+      color: "#44aaee",
+      origin: "ai",
+      humanEdited: true
+    }
+  ]);
+  assert.deepEqual(splitCues.map((cue) => cueTimelineRange(project, cue)), [
+    { startMs: 1_500, endMs: 2_000 },
+    { startMs: 2_000, endMs: 2_500 }
+  ]);
+  const movedAfterCue = project.subtitles.find((cue) => cue.id === "after-cue");
+  assert.deepEqual({
+    clipId: movedAfterCue.clipId,
+    startOffsetMs: movedAfterCue.startOffsetMs,
+    endOffsetMs: movedAfterCue.endOffsetMs,
+    timelineRange: cueTimelineRange(project, movedAfterCue)
+  }, {
+    clipId: afterClip.id,
+    startOffsetMs: 1_000,
+    endOffsetMs: 2_000,
+    timelineRange: { startMs: 3_000, endMs: 4_000 }
+  });
+  assert.equal(project.subtitles.some((cue) => cue.id === "deleted-cue"), false);
+  assert.equal(project.selectedCueId, "after-cue");
+
+  assert.equal(project.imageAssets.length, 2);
+  assert.deepEqual(project.imageAssets.map((asset) => ({
+    clipId: asset.clipId,
+    startOffsetMs: asset.startOffsetMs,
+    endOffsetMs: asset.endOffsetMs,
+    source: asset.source,
+    opacity: asset.opacity
+  })), [
+    {
+      clipId: beforeClip.id,
+      startOffsetMs: 1_000,
+      endOffsetMs: 2_000,
+      source: { kind: "blob-key", value: "asset/spanning" },
+      opacity: 0.7
+    },
+    {
+      clipId: afterClip.id,
+      startOffsetMs: 0,
+      endOffsetMs: 1_000,
+      source: { kind: "blob-key", value: "asset/spanning" },
+      opacity: 0.7
+    }
+  ]);
+  assert.equal(project.selectedImageAssetId, "spanning-asset");
+
+  assert.equal(project.audioRegions.length, 2);
+  assert.deepEqual(project.audioRegions.map((region) => ({
+    clipId: region.clipId,
+    startOffsetMs: region.startOffsetMs,
+    endOffsetMs: region.endOffsetMs,
+    gain: region.gain,
+    fadeInMs: region.fadeInMs,
+    fadeOutMs: region.fadeOutMs
+  })), [
+    {
+      clipId: beforeClip.id,
+      startOffsetMs: 1_000,
+      endOffsetMs: 2_000,
+      gain: 0.4,
+      fadeInMs: 600,
+      fadeOutMs: 0
+    },
+    {
+      clipId: afterClip.id,
+      startOffsetMs: 0,
+      endOffsetMs: 1_000,
+      gain: 0.4,
+      fadeInMs: 0,
+      fadeOutMs: 700
+    }
+  ]);
+  assert.equal(project.selectedAudioRegionId, "spanning-audio");
+  assert.deepEqual(findAudioRegionOverlaps(project), []);
+});
+
+test("여러 컷을 가로지르는 삭제도 뒤 자막의 원본 발화 시각을 보존해 한꺼번에 당긴다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    subtitles: [
+      createSubtitleCue(project, {
+        id: "before-cross-cut",
+        clipId: "clip-first",
+        startOffsetMs: 500,
+        endOffsetMs: 1_200,
+        text: "앞"
+      }),
+      createSubtitleCue(project, {
+        id: "inside-cross-cut",
+        clipId: "clip-first",
+        startOffsetMs: 2_500,
+        endOffsetMs: 3_500,
+        text: "삭제"
+      }),
+      createSubtitleCue(project, {
+        id: "after-cross-cut",
+        clipId: "clip-second",
+        startOffsetMs: 2_000,
+        endOffsetMs: 3_000,
+        text: "뒤"
+      })
+    ],
+    selectedClipId: "clip-second",
+    selectedCueId: "after-cross-cut",
+    playheadMs: 8_000
+  };
+
+  project = rippleDeleteTimelineRange(project, {
+    startMs: 2_000,
+    endMs: 7_000
+  });
+  assert.deepEqual(project.clips.map((clip) => ({
+    id: clip.id,
+    sourceStartMs: clip.sourceStartMs,
+    sourceEndMs: clip.sourceEndMs,
+    timelineStartMs: clip.timelineStartMs
+  })), [
+    {
+      id: "clip-first",
+      sourceStartMs: 10_125,
+      sourceEndMs: 12_125,
+      timelineStartMs: 0
+    },
+    {
+      id: "clip-second",
+      sourceStartMs: 31_375,
+      sourceEndMs: 36_500,
+      timelineStartMs: 2_000
+    }
+  ]);
+  assert.equal(projectDurationMs(project), 7_125);
+  assert.equal(project.playheadMs, 3_000);
+  assert.equal(project.selectedClipId, "clip-second");
+  assert.equal(project.subtitles.some((cue) => cue.id === "inside-cross-cut"), false);
+  const afterCue = project.subtitles.find((cue) => cue.id === "after-cross-cut");
+  assert.deepEqual({
+    clipId: afterCue.clipId,
+    startOffsetMs: afterCue.startOffsetMs,
+    endOffsetMs: afterCue.endOffsetMs,
+    sourceStartMs: project.clips[1].sourceStartMs + afterCue.startOffsetMs,
+    timelineRange: cueTimelineRange(project, afterCue)
+  }, {
+    clipId: "clip-second",
+    startOffsetMs: 625,
+    endOffsetMs: 1_625,
+    sourceStartMs: 32_000,
+    timelineRange: { startMs: 2_625, endMs: 3_625 }
+  });
+});
+
+test("전체 컷 삭제는 소속 트랙 선택을 정리하고 재생 위치를 다음 컷으로 잇는다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  project = {
+    ...project,
+    subtitles: [
+      createSubtitleCue(project, {
+        id: "removed-with-clip",
+        clipId: "clip-first",
+        startOffsetMs: 1_000,
+        endOffsetMs: 2_000,
+        text: "함께 삭제"
+      })
+    ],
+    selectedClipId: "clip-first",
+    selectedCueId: "removed-with-clip",
+    playheadMs: 2_500
+  };
+  project = rippleDeleteTimelineRange(project, {
+    startMs: 0,
+    endMs: 5_625
+  });
+  assert.deepEqual(project.clips.map((clip) => ({
+    id: clip.id,
+    timelineStartMs: clip.timelineStartMs
+  })), [{ id: "clip-second", timelineStartMs: 0 }]);
+  assert.deepEqual(project.subtitles, []);
+  assert.deepEqual(project.suppressedSelections.map((suppressed) => ({
+    selectionId: suppressed.selectionId,
+    selectionStartMs: suppressed.selectionStartMs,
+    selectionEndMs: suppressed.selectionEndMs
+  })), [{
+    selectionId: "first",
+    selectionStartMs: 10_125,
+    selectionEndMs: 15_750
+  }]);
+  assert.equal(project.selectedCueId, null);
+  assert.equal(project.selectedClipId, "clip-second");
+  assert.equal(project.playheadMs, 0);
+});
+
+test("전체 삭제한 선택의 tombstone은 정규화 왕복 뒤에도 보존된다", () => {
+  const original = createEditorProjectFromCapture(captureState);
+  const deleted = rippleDeleteTimelineRange(original, {
+    startMs: 0,
+    endMs: 5_625
+  });
+  const restored = normalizeEditorProject(JSON.parse(JSON.stringify(deleted)));
+  assert.ok(restored);
+  assert.equal(restored.clips.some((clip) => clip.selectionId === "first"), false);
+  assert.deepEqual(restored.suppressedSelections.map((suppressed) => ({
+    selectionId: suppressed.selectionId,
+    selectionStartMs: suppressed.selectionStartMs,
+    selectionEndMs: suppressed.selectionEndMs
+  })), [{
+    selectionId: "first",
+    selectionStartMs: 10_125,
+    selectionEndMs: 15_750
+  }]);
+  assert.deepEqual(original.suppressedSelections, []);
+});
+
+test("전체 삭제한 선택은 같은 hot-seed에서 유지되고 경계 변경 시 정확히 한 번 복구된다", () => {
+  const deleted = rippleDeleteTimelineRange(
+    createEditorProjectFromCapture(captureState),
+    { startMs: 0, endMs: 5_625 }
+  );
+
+  const sameSeed = mergeCaptureIntoEditorProject(deleted, captureState);
+  assert.equal(sameSeed.clips.some((clip) => clip.selectionId === "first"), false);
+  assert.equal(sameSeed.clips.filter((clip) => clip.selectionId === "second").length, 1);
+  assert.deepEqual(sameSeed.suppressedSelections.map((suppressed) => (
+    suppressed.selectionId
+  )), ["first"]);
+
+  const changedSeed = mergeCaptureIntoEditorProject(deleted, {
+    ...captureState,
+    segments: [
+      { ...captureState.segments[0], startSeconds: 11, endSeconds: 14 },
+      ...captureState.segments.slice(1)
+    ]
+  });
+  const restoredFirst = changedSeed.clips.filter((clip) => clip.selectionId === "first");
+  assert.equal(restoredFirst.length, 1);
+  assert.deepEqual([
+    restoredFirst[0].sourceStartMs,
+    restoredFirst[0].sourceEndMs
+  ], [11_000, 14_000]);
+  assert.deepEqual(changedSeed.suppressedSelections, []);
+});
+
+test("삭제 표식의 선택이 사이드패널에서 사라지면 tombstone도 해제된다", () => {
+  const deleted = rippleDeleteTimelineRange(
+    createEditorProjectFromCapture(captureState),
+    { startMs: 0, endMs: 5_625 }
+  );
+  const removedFromCapture = mergeCaptureIntoEditorProject(deleted, {
+    ...captureState,
+    segments: captureState.segments.slice(1)
+  });
+  assert.deepEqual(removedFromCapture.suppressedSelections, []);
+
+  const addedAgain = mergeCaptureIntoEditorProject(removedFromCapture, captureState);
+  assert.equal(addedAgain.clips.filter((clip) => clip.selectionId === "first").length, 1);
+  assert.deepEqual(addedAgain.suppressedSelections, []);
+});
+
+test("구간 삭제는 범위 밖 입력과 0.1초보다 짧게 남는 영상 조각을 조용히 늘리지 않는다", () => {
+  const project = createEditorProjectFromCapture(captureState);
+  assert.throws(
+    () => rippleDeleteTimelineRange(project, { startMs: 0, endMs: 99 }),
+    /0\.1초 이상/
+  );
+  assert.throws(
+    () => rippleDeleteTimelineRange(project, { startMs: -1, endMs: 500 }),
+    /타임라인 안/
+  );
+  assert.throws(
+    () => rippleDeleteTimelineRange(project, { startMs: 50, endMs: 500 }),
+    /남는 영상 조각/
+  );
+});
+
+test("분할 컷은 같은 선택 hot-seed에서 유지되고 변경된 선택과는 그룹 단위로 한 번만 병합된다", () => {
+  const createSplitProject = () => {
+    let project = createEditorProjectFromCapture(captureState);
+    project = rippleDeleteTimelineRange(project, {
+      startMs: 1_500,
+      endMs: 2_500
+    });
+    const fragments = project.clips.filter((clip) => clip.selectionId === "first");
+    const afterFragment = fragments[1];
+    project = {
+      ...project,
+      subtitles: [
+        createSubtitleCue(project, {
+          id: "split-after-cue",
+          clipId: afterFragment.id,
+          startOffsetMs: 500,
+          endOffsetMs: 1_000,
+          text: "분할 뒤 자막"
+        })
+      ],
+      selectedClipId: afterFragment.id,
+      selectedCueId: "split-after-cue"
+    };
+    return project;
+  };
+
+  const split = createSplitProject();
+  const originalFragmentIds = split.clips
+    .filter((clip) => clip.selectionId === "first")
+    .map((clip) => clip.id);
+  const unchanged = mergeCaptureIntoEditorProject(split, {
+    ...captureState,
+    segments: [
+      ...captureState.segments,
+      { id: "third", startSeconds: 50, endSeconds: 52, description: "추가" }
+    ]
+  });
+  assert.deepEqual(
+    unchanged.clips.filter((clip) => clip.selectionId === "first").map((clip) => clip.id),
+    originalFragmentIds
+  );
+  assert.deepEqual(
+    unchanged.clips.filter((clip) => clip.selectionId === "first").map((clip) => [
+      clip.sourceStartMs,
+      clip.sourceEndMs
+    ]),
+    [[10_125, 11_625], [12_625, 15_750]]
+  );
+  assert.equal(unchanged.clips.filter((clip) => clip.id === "clip-third").length, 1);
+  assert.equal(unchanged.subtitles[0].id, "split-after-cue");
+
+  const oneSidedInput = createSplitProject();
+  const oneSidedAfterId = oneSidedInput.clips
+    .filter((clip) => clip.selectionId === "first")[1].id;
+  const oneSided = mergeCaptureIntoEditorProject(oneSidedInput, {
+    ...captureState,
+    segments: [
+      { ...captureState.segments[0], startSeconds: 13, endSeconds: 16 },
+      ...captureState.segments.slice(1)
+    ]
+  });
+  const oneSidedFragments = oneSided.clips.filter((clip) => clip.selectionId === "first");
+  assert.equal(oneSidedFragments.length, 1);
+  assert.equal(oneSidedFragments[0].id, oneSidedAfterId);
+  assert.deepEqual([
+    oneSidedFragments[0].sourceStartMs,
+    oneSidedFragments[0].sourceEndMs
+  ], [13_000, 15_750]);
+  assert.equal(oneSided.selectedClipId, oneSidedAfterId);
+  assert.equal(oneSided.subtitles[0].id, "split-after-cue");
+  assert.equal(
+    oneSidedFragments[0].sourceStartMs + oneSided.subtitles[0].startOffsetMs,
+    13_125
+  );
+
+  const gapOnly = mergeCaptureIntoEditorProject(createSplitProject(), {
+    ...captureState,
+    segments: [
+      { ...captureState.segments[0], startSeconds: 11.8, endSeconds: 12.4 },
+      ...captureState.segments.slice(1)
+    ]
+  });
+  const gapReplacement = gapOnly.clips.filter((clip) => clip.selectionId === "first");
+  assert.equal(gapReplacement.length, 1);
+  assert.equal(gapReplacement[0].id, "clip-first");
+  assert.deepEqual([
+    gapReplacement[0].sourceStartMs,
+    gapReplacement[0].sourceEndMs
+  ], [11_800, 12_400]);
+  assert.equal(gapOnly.subtitles.some((cue) => cue.id === "split-after-cue"), false);
+  assert.equal(gapOnly.selectedCueId, null);
+  assert.equal(gapOnly.selectedClipId, "clip-first");
+
+  const bothSides = mergeCaptureIntoEditorProject(createSplitProject(), {
+    ...captureState,
+    segments: [
+      { ...captureState.segments[0], startSeconds: 11, endSeconds: 14 },
+      ...captureState.segments.slice(1)
+    ]
+  });
+  assert.deepEqual(
+    bothSides.clips.filter((clip) => clip.selectionId === "first").map((clip) => [
+      clip.sourceStartMs,
+      clip.sourceEndMs
+    ]),
+    [[11_000, 11_625], [12_625, 14_000]]
+  );
+
+  const exactMinimum = mergeCaptureIntoEditorProject(createSplitProject(), {
+    ...captureState,
+    segments: [
+      { ...captureState.segments[0], startSeconds: 11.525, endSeconds: 12.725 },
+      ...captureState.segments.slice(1)
+    ]
+  });
+  assert.deepEqual(
+    exactMinimum.clips.filter((clip) => clip.selectionId === "first").map((clip) => (
+      clip.sourceEndMs - clip.sourceStartMs
+    )),
+    [100, 100]
+  );
+  assert.equal(
+    new Set(exactMinimum.clips.map((clip) => clip.id)).size,
+    exactMinimum.clips.length
+  );
 });
 
 test("기존 편집 순서와 trim을 유지하면서 새 사용자 선택을 동기화한다", () => {
