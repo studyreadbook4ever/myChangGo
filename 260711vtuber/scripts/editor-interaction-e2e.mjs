@@ -399,6 +399,26 @@ async function pointerDrag(selector, moves) {
   `);
 }
 
+async function contextClickElement(selector) {
+  const element = await findElement(selector);
+  try {
+    await webdriver("POST", `/session/${sessionId}/actions`, {
+      actions: [{
+        type: "pointer",
+        id: `context-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        parameters: { pointerType: "mouse" },
+        actions: [
+          { type: "pointerMove", duration: 0, origin: element, x: 0, y: 0 },
+          { type: "pointerDown", button: 2 },
+          { type: "pointerUp", button: 2 }
+        ]
+      }]
+    });
+  } finally {
+    await webdriver("DELETE", `/session/${sessionId}/actions`).catch(() => {});
+  }
+}
+
 async function readStoredProject() {
   const result = await executeAsync(`
     const projectId = arguments[0];
@@ -901,7 +921,7 @@ async function main() {
     button.focus();
     return {
       activeId: document.activeElement?.id || null,
-      cueCount: document.querySelectorAll("#caption-track .cue-block").length,
+      cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
       paused: video.paused
     };
   `);
@@ -915,9 +935,9 @@ async function main() {
   await waitUntil(async () => {
     const state = await executeSync(`
       return {
-        cueCount: document.querySelectorAll("#caption-track .cue-block").length,
+        cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
         editorHidden: document.querySelector("#cue-editor")?.hidden,
-        cueId: document.querySelector("#caption-track .cue-block")?.dataset.id || null,
+        cueId: document.querySelector("#caption-tracks .cue-block")?.dataset.id || null,
         clicks: globalThis.__kirinukiE2eNativeSpace?.clicks || 0
       };
     `);
@@ -933,7 +953,7 @@ async function main() {
     const video = document.querySelector("#preview-video");
     return {
       ...globalThis.__kirinukiE2eNativeSpace,
-      cueCount: document.querySelectorAll("#caption-track .cue-block").length,
+      cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
       paused: video.paused,
       playingClass: document.querySelector("#play-toggle")?.classList.contains("playing")
     };
@@ -949,7 +969,7 @@ async function main() {
   );
 
   const cueId = await executeSync(`
-    return document.querySelector("#caption-track .cue-block")?.dataset.id || null;
+    return document.querySelector("#caption-tracks .cue-block")?.dataset.id || null;
   `);
   assert(cueId, "추가된 자막 ID를 찾지 못했습니다.");
 
@@ -1076,10 +1096,14 @@ async function main() {
     "자막 오른쪽 손잡이 drag autosave"
   );
 
-  await clickElement(`.cue-block[data-id="${cueId}"] .cue-block-body`);
+  await executeSync(`
+    document.querySelector(
+      '.cue-block[data-id="' + arguments[0] + '"] .cue-block-body'
+    )?.click();
+  `, [cueId]);
   await waitUntil(async () => {
     const overlay = await executeSync(`
-      const element = document.querySelector("#subtitle-overlay");
+      const element = document.querySelector("#subtitle-overlays .subtitle-overlay");
       return {
         visible: Boolean(element && !element.hidden),
         cueId: element?.dataset.cueId || null
@@ -1089,14 +1113,156 @@ async function main() {
   }, "자막 overlay 표시");
 
   const overlayDrag = await pointerDrag(
-    "#subtitle-overlay",
+    "#subtitle-overlays .subtitle-overlay",
     [{ x: 20, y: -16 }, { x: 20, y: -16 }, { x: 20, y: -16 }]
   );
   assert(overlayDrag.moves >= 3, `overlay drag pointermove가 부족합니다: ${JSON.stringify(overlayDrag)}`);
+  let overlayDragObserved = null;
   await waitForStoredProject(
-    (project) => project.subtitles.some((cue) => cue.id === cueId && cue.x > 0.505 && cue.y < 0.835),
+    (project) => {
+      overlayDragObserved = project.subtitles.find((cue) => cue.id === cueId) || null;
+      return overlayDragObserved?.x > 0.505 && overlayDragObserved?.y < 0.835;
+    },
     "자막 overlay 위치 drag autosave"
+  ).catch((error) => {
+    throw new Error(
+      `${error.message} cue=${JSON.stringify(overlayDragObserved)} drag=${JSON.stringify(overlayDrag)}`
+    );
+  });
+
+  await executeSync(`
+    const input = document.querySelector("#font-color");
+    input.value = "#ff66aa";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  `);
+  const coloredCueProject = await waitForStoredProject(
+    (project) => project.subtitles.find((cue) => cue.id === cueId)?.color === "#ff66aa",
+    "선택 자막별 색상 autosave"
   );
+
+  await clickElement("#add-subtitle-lane");
+  const laneUi = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        count: document.querySelectorAll("#caption-tracks .caption-track-row").length,
+        label: document.querySelector("#subtitle-lane-count")?.textContent || ""
+      };
+    `);
+    return state.count === 3 && state.label === "3" ? state : false;
+  }, "자막 레인 추가 UI");
+  await waitForStoredProject(
+    (project) => project.subtitleLaneCount === 3,
+    "자막 레인 추가 autosave"
+  );
+
+  await contextClickElement(`.cue-block[data-id="${cueId}"]`);
+  const captionContextMenu = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        menuHidden: document.querySelector("#timeline-context-menu")?.hidden,
+        addHidden: document.querySelector("#context-add-cue")?.hidden,
+        deleteHidden: document.querySelector("#context-delete-cue")?.hidden
+      };
+    `);
+    return (
+      state.menuHidden === false &&
+      state.addHidden === false &&
+      state.deleteHidden === false
+    ) ? state : false;
+  }, "자막 우클릭 메뉴");
+  await clickElement("#context-add-cue");
+  const simultaneousProject = await waitForStoredProject(
+    (project) => (
+      project.subtitles.length === 2 &&
+      project.subtitles.some((cue) => cue.id !== cueId && cue.lane !== 0)
+    ),
+    "다른 레인의 동시 자막 추가"
+  );
+  const simultaneousCue = simultaneousProject.subtitles.find((cue) => cue.id !== cueId);
+  await clickElement(`.cue-block[data-id="${simultaneousCue.id}"] .cue-block-body`);
+  const simultaneousOverlayCount = await waitUntil(async () => {
+    const count = await executeSync(
+      `return document.querySelectorAll("#subtitle-overlays .subtitle-overlay").length;`
+    );
+    return count === 2 ? count : false;
+  }, "동시 자막 2개 미리보기");
+  await contextClickElement(`.cue-block[data-id="${simultaneousCue.id}"]`);
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#context-delete-cue")?.hidden === false;`),
+    "자막 우클릭 삭제 메뉴"
+  );
+  await clickElement("#context-delete-cue");
+  await waitForStoredProject(
+    (project) => project.subtitles.length === 1 && project.subtitles[0].id === cueId,
+    "우클릭 자막 삭제"
+  );
+
+  await clickElement("#add-audio-region");
+  const audioProject = await waitForStoredProject(
+    (project) => project.audioRegions.length === 1 && project.selectedAudioRegionId,
+    "음성 설정 구간 추가"
+  );
+  const audioRegionId = audioProject.audioRegions[0].id;
+  await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        block: Boolean(document.querySelector('.audio-block[data-id="' + arguments[0] + '"]')),
+        editorHidden: document.querySelector("#audio-editor")?.hidden,
+        audioTabSelected: document.querySelector("#audio-mode-tab")?.getAttribute("aria-selected")
+      };
+    `, [audioRegionId]);
+    return (
+      state.block &&
+      state.editorHidden === false &&
+      state.audioTabSelected === "true"
+    ) ? state : false;
+  }, "음성 설정 선택 UI");
+  await executeSync(`
+    const input = document.querySelector("#audio-volume");
+    input.value = "35";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  `);
+  const quietAudioProject = await waitForStoredProject(
+    (project) => Math.abs(project.audioRegions[0]?.gain - 0.35) < 0.0001,
+    "음성 구간 음량 autosave"
+  );
+  await contextClickElement(`.audio-block[data-id="${audioRegionId}"]`);
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#context-delete-audio")?.hidden === false;`),
+    "음성 우클릭 삭제 메뉴"
+  );
+  await clickElement("#context-delete-audio");
+  await waitForStoredProject(
+    (project) => project.audioRegions.length === 0,
+    "우클릭 음성 설정 삭제"
+  );
+  await executeSync(`
+    document.querySelector(
+      '.cue-block[data-id="' + arguments[0] + '"] .cue-block-body'
+    )?.click();
+  `, [cueId]);
+  await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        text: document.querySelector("#cue-text")?.value || "",
+        captionTabSelected: document.querySelector("#caption-mode-tab")?.getAttribute("aria-selected")
+      };
+    `);
+    return (
+      state.text === EDITED_TEXT &&
+      state.captionTabSelected === "true"
+    ) ? state : false;
+  }, "멀티트랙 검증 후 원래 자막 선택 복원");
+  const multitrackUiProbe = {
+    color: coloredCueProject.subtitles.find((cue) => cue.id === cueId)?.color,
+    laneUi,
+    captionContextMenu,
+    simultaneousCueLane: simultaneousCue.lane,
+    simultaneousOverlayCount,
+    audioGain: quietAudioProject.audioRegions[0]?.gain
+  };
 
   const reorderKeyboardSetup = await executeSync(`
     const control = document.querySelector(
@@ -1311,7 +1477,7 @@ async function main() {
   await clickElement(`.cue-block[data-id="${cueId}"] .cue-block-body`);
   await waitUntil(async () => {
     const visible = await executeSync(`
-      const element = document.querySelector("#subtitle-overlay");
+      const element = document.querySelector("#subtitle-overlays .subtitle-overlay");
       return Boolean(element && !element.hidden && element.dataset.cueId === arguments[0]);
     `, [cueId]);
     return visible;
@@ -1332,6 +1498,7 @@ async function main() {
     endOffsetMs: finalPersistedCue.endOffsetMs,
     x: finalPersistedCue.x,
     y: finalPersistedCue.y,
+    color: finalPersistedCue.color,
     mediaName: reorderedProject.mediaAsset?.name
   };
 
@@ -1352,6 +1519,7 @@ async function main() {
         cue.endOffsetMs === expected.endOffsetMs &&
         Math.abs(cue.x - expected.x) < 0.0001 &&
         Math.abs(cue.y - expected.y) < 0.0001 &&
+        cue.color === expected.color &&
         project.mediaAsset?.name === expected.mediaName
       );
     }, "reload 후 IndexedDB 프로젝트 복원");
@@ -1374,7 +1542,7 @@ async function main() {
       return {
         clipOrder: [...document.querySelectorAll("#clip-list .clip-item")].map((item) => item.dataset.id),
         cueText: document.querySelector("#cue-text")?.value || "",
-        cueCount: document.querySelectorAll("#caption-track .cue-block").length,
+        cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
         mediaName: document.querySelector("#media-name")?.textContent || ""
       };
     `);
@@ -1985,6 +2153,7 @@ async function main() {
       endOffsetMs: restoredCue.endOffsetMs,
       x: restoredCue.x,
       y: restoredCue.y,
+      color: restoredCue.color,
       leftHandleHitAtCueStart: cueLeftHandleHit
     },
     clipOrder: restored.clips.map((clip) => clip.id),
@@ -1996,6 +2165,7 @@ async function main() {
     },
     semantics: {
       nativeSpaceButton,
+      multitrackUi: multitrackUiProbe,
       cueHandleNudge: {
         before: cueHandleNudgeBefore,
         after: cueHandleNudgeAfter

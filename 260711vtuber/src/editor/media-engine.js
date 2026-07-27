@@ -1,6 +1,7 @@
 import {
   ALL_FORMATS,
   AudioBufferSink,
+  AudioSample,
   AudioSampleSink,
   AudioSampleSource,
   BlobSource,
@@ -18,8 +19,10 @@ import {
 } from "mediabunny";
 
 import {
+  audioRegionTimelineRange,
   clamp,
   cueTimelineRange,
+  findAudioRegionOverlaps,
   findSubtitleOverlaps
 } from "../../extension/lib/editor-core.js";
 
@@ -340,7 +343,11 @@ export function activeCuesAt(project, outputSeconds) {
   return project.subtitles
     .map((cue) => ({ cue, range: cueTimelineRange(project, cue) }))
     .filter(({ cue, range }) => range && cue.text.trim() && outputMs >= range.startMs && outputMs < range.endMs)
-    .sort((a, b) => a.range.startMs - b.range.startMs)
+    .sort((a, b) => (
+      (Number(a.cue.lane) || 0) - (Number(b.cue.lane) || 0)
+      || a.range.startMs - b.range.startMs
+      || String(a.cue.id).localeCompare(String(b.cue.id))
+    ))
     .map(({ cue }) => cue);
 }
 
@@ -399,6 +406,8 @@ function drawCaption(context, canvas, project, cue) {
   }
   const defaults = project.subtitleDefaults;
   let fontSize = Math.max(18, Math.round(canvas.height * (defaults.fontScale || 0.052)));
+  const fontFamily = String(defaults.fontFamily || "Pretendard").replace(/["\\]/gu, "");
+  const fontWeight = clamp(Math.round(Number(defaults.fontWeight) || 800), 100, 900);
   const requestedX = canvas.width * cue.x;
   const requestedY = canvas.height * cue.y;
   const maxWidth = canvas.width * (defaults.maxWidth || 0.86);
@@ -411,7 +420,7 @@ function drawCaption(context, canvas, project, cue) {
   let lines = [];
   const maximumCaptionHeight = canvas.height * 0.9;
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    context.font = `760 ${fontSize}px Pretendard, "Noto Sans KR", sans-serif`;
+    context.font = `${fontWeight} ${fontSize}px "${fontFamily}", "Noto Sans KR", sans-serif`;
     lines = wrapCaption(context, cue.text, maxWidth);
     const measuredHeight = lines.length * fontSize * 1.28 + fontSize * 0.3;
     if (measuredHeight <= maximumCaptionHeight || fontSize <= 1) {
@@ -434,16 +443,23 @@ function drawCaption(context, canvas, project, cue) {
     canvasHeight: canvas.height,
     safeInset
   });
-  context.fillStyle = defaults.backgroundColor || "rgba(0, 0, 0, 0.58)";
-  context.beginPath();
-  context.roundRect(
-    x - boxWidth / 2,
-    y - boxHeight / 2,
-    boxWidth,
-    boxHeight,
-    Math.max(5, fontSize * 0.14)
-  );
-  context.fill();
+  const backgroundColor = String(defaults.backgroundColor || "transparent").trim();
+  if (
+    backgroundColor
+    && backgroundColor !== "transparent"
+    && !/^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/iu.test(backgroundColor)
+  ) {
+    context.fillStyle = backgroundColor;
+    context.beginPath();
+    context.roundRect(
+      x - boxWidth / 2,
+      y - boxHeight / 2,
+      boxWidth,
+      boxHeight,
+      Math.max(5, fontSize * 0.14)
+    );
+    context.fill();
+  }
 
   const firstY = y - ((lines.length - 1) * lineHeight) / 2;
   const textX = context.textAlign === "left"
@@ -452,8 +468,8 @@ function drawCaption(context, canvas, project, cue) {
       ? x + boxWidth / 2 - fontSize * 0.36
       : x;
   context.lineWidth = outlineWidth;
-  context.strokeStyle = defaults.outlineColor || "#111318";
-  context.fillStyle = defaults.color || "#ffffff";
+  context.strokeStyle = defaults.outlineColor || "#111111";
+  context.fillStyle = cue.color || defaults.color || "#ffffff";
   lines.forEach((line, index) => {
     const lineY = firstY + index * lineHeight;
     context.strokeText(line, textX, lineY, maxWidth);
@@ -536,10 +552,7 @@ function scaledDimensions(width, height) {
 }
 
 async function prepareRenderSource(input, project) {
-  const subtitleOverlaps = findSubtitleOverlaps(project);
-  if (subtitleOverlaps.length > 0) {
-    throw new Error("서로 겹치는 자막이 있습니다. 타임라인에서 자막 시작·끝을 겹치지 않게 조정해 주세요.");
-  }
+  validateRenderTimeline(project);
   const [videoTrack, audioTrack] = await Promise.all([
     input.getPrimaryVideoTrack(),
     input.getPrimaryAudioTrack()
@@ -579,6 +592,21 @@ async function prepareRenderSource(input, project) {
     settings,
     clips
   };
+}
+
+export function validateRenderTimeline(project) {
+  const subtitleOverlaps = findSubtitleOverlaps(project);
+  if (subtitleOverlaps.length > 0) {
+    throw new Error(
+      "같은 자막 레인에서 서로 겹치는 자막이 있습니다. 자막 시작·끝 또는 레인을 조정해 주세요."
+    );
+  }
+  const audioOverlaps = findAudioRegionOverlaps(project);
+  if (audioOverlaps.length > 0) {
+    throw new Error(
+      "서로 겹치는 음성 설정 구간이 있습니다. 음성 구간 시작·끝을 겹치지 않게 조정해 주세요."
+    );
+  }
 }
 
 export async function getPreferredOutputProfile(file, project) {
@@ -651,6 +679,97 @@ export function audioTrimFrameRange(sample, startSeconds, endSeconds) {
     )
   );
   return { frameStart, frameEnd };
+}
+
+export function buildAudioAutomation(project) {
+  return (project?.audioRegions || [])
+    .map((region) => {
+      const range = audioRegionTimelineRange(project, region);
+      if (!range) {
+        return null;
+      }
+      return {
+        id: region.id,
+        startSeconds: range.startMs / 1000,
+        endSeconds: range.endMs / 1000,
+        targetGain: region.muted
+          ? 0
+          : clamp(Number.isFinite(Number(region.gain)) ? Number(region.gain) : 1, 0, 1),
+        fadeInSeconds: clamp(
+          (Number.isFinite(Number(region.fadeInMs)) ? Number(region.fadeInMs) : 0) / 1000,
+          0,
+          Math.max(0, (range.endMs - range.startMs) / 1000)
+        ),
+        fadeOutSeconds: clamp(
+          (Number.isFinite(Number(region.fadeOutMs)) ? Number(region.fadeOutMs) : 0) / 1000,
+          0,
+          Math.max(0, (range.endMs - range.startMs) / 1000)
+        )
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.startSeconds - b.startSeconds || a.endSeconds - b.endSeconds);
+}
+
+export function audioAutomationGainAt(automation, outputSeconds) {
+  const time = Number(outputSeconds);
+  if (!Number.isFinite(time)) {
+    return 1;
+  }
+  const segment = automation.find((candidate) => (
+    time >= candidate.startSeconds && time < candidate.endSeconds
+  ));
+  if (!segment) {
+    return 1;
+  }
+
+  // Regions are non-destructive overrides: fades move from the untouched source
+  // level (1) into the region setting, then back to the untouched level.
+  let blend = 1;
+  if (segment.fadeInSeconds > 0) {
+    blend = Math.min(
+      blend,
+      clamp((time - segment.startSeconds) / segment.fadeInSeconds, 0, 1)
+    );
+  }
+  if (segment.fadeOutSeconds > 0) {
+    blend = Math.min(
+      blend,
+      clamp((segment.endSeconds - time) / segment.fadeOutSeconds, 0, 1)
+    );
+  }
+  return 1 + (segment.targetGain - 1) * blend;
+}
+
+export function applyAudioAutomationToSample(sample, automation) {
+  const sampleStart = sample.timestamp;
+  const sampleEnd = sample.timestamp + sample.duration;
+  const relevantAutomation = automation.filter((segment) => (
+    segment.targetGain !== 1
+    && segment.startSeconds < sampleEnd
+    && segment.endSeconds > sampleStart
+  ));
+  if (relevantAutomation.length === 0) {
+    return sample;
+  }
+
+  const data = new Float32Array(sample.numberOfFrames * sample.numberOfChannels);
+  sample.copyTo(data, { planeIndex: 0, format: "f32" });
+  for (let frameIndex = 0; frameIndex < sample.numberOfFrames; frameIndex += 1) {
+    const outputSeconds = sample.timestamp + frameIndex / sample.sampleRate;
+    const gain = audioAutomationGainAt(relevantAutomation, outputSeconds);
+    const frameOffset = frameIndex * sample.numberOfChannels;
+    for (let channel = 0; channel < sample.numberOfChannels; channel += 1) {
+      data[frameOffset + channel] *= gain;
+    }
+  }
+  return new AudioSample({
+    data,
+    format: "f32",
+    numberOfChannels: sample.numberOfChannels,
+    sampleRate: sample.sampleRate,
+    timestamp: sample.timestamp
+  });
 }
 
 export async function renderProjectVideo(file, project, {
@@ -726,6 +845,7 @@ export async function renderProjectVideo(file, project, {
     }
     const videoSink = new VideoSampleSink(videoTrack);
     const audioSink = audioTrack && audioSource ? new AudioSampleSink(audioTrack) : null;
+    const audioAutomation = buildAudioAutomation(project);
     const pumpState = {
       stopped: false,
       primaryError: null
@@ -812,7 +932,14 @@ export async function renderProjectVideo(file, project, {
             const trimmed = sourceSample.trim(frameStart, frameEnd);
             try {
               trimmed.setTimestamp(timelineStart + trimmed.timestamp - start);
-              await audioSource.add(trimmed);
+              const automated = applyAudioAutomationToSample(trimmed, audioAutomation);
+              try {
+                await audioSource.add(automated);
+              } finally {
+                if (automated !== trimmed) {
+                  automated.close();
+                }
+              }
             } finally {
               trimmed.close();
             }

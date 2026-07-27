@@ -295,9 +295,11 @@ async function main() {
     script: `
       const requiredIds = [
         "preview-video",
-        "subtitle-overlay",
+        "subtitle-overlays",
         "video-track",
-        "caption-track",
+        "audio-track",
+        "caption-tracks",
+        "timeline-context-menu",
         "cue-text",
         "cue-start",
         "cue-end",

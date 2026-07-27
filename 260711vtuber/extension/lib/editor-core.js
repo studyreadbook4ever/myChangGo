@@ -1,10 +1,13 @@
-export const EDITOR_SCHEMA = "chzzk-kirinuki-editor/v1";
+export const EDITOR_SCHEMA = "chzzk-kirinuki-editor/v2";
 export const EDITOR_PROJECTS_STORE_KEY = "chzzkKirinukiEditorProjectsV1";
 export const EDITOR_SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 export const EDITOR_DATABASE_NAME = "chzzk-kirinuki-studio";
+export const MIN_SUBTITLE_LANES = 2;
+export const MAX_SUBTITLE_LANES = 8;
 
 const MIN_CLIP_DURATION_MS = 100;
 const MIN_CUE_DURATION_MS = 100;
+const LEGACY_EDITOR_SCHEMA = "chzzk-kirinuki-editor/v1";
 
 const nowIso = () => new Date().toISOString();
 const makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
@@ -17,6 +20,17 @@ const finiteNumber = (value, fallback = 0) => {
 export const secondsToMilliseconds = (seconds) => Math.max(0, Math.round(finiteNumber(seconds) * 1000));
 export const millisecondsToSeconds = (milliseconds) => Math.max(0, finiteNumber(milliseconds) / 1000);
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+export function normalizeHexColor(value, fallback = "#ffffff") {
+  const candidate = String(value || "").trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/u.test(candidate)) {
+    return candidate;
+  }
+  if (/^#[0-9a-f]{3}$/u.test(candidate)) {
+    return `#${[...candidate.slice(1)].map((character) => character.repeat(2)).join("")}`;
+  }
+  return fallback;
+}
 
 export function normalizeMediaAsset(raw) {
   if (!raw || typeof raw !== "object") {
@@ -169,18 +183,23 @@ export function createEditorProjectFromCapture(captureState = {}, {
     mediaAsset: null,
     clips,
     subtitles: [],
+    subtitleLaneCount: MIN_SUBTITLE_LANES,
+    audioRegions: [],
     selectedClipId: clips[0]?.id || null,
     selectedCueId: null,
+    selectedAudioRegionId: null,
     playheadMs: 0,
     subtitleDefaults: {
       x: 0.5,
       y: 0.84,
       maxWidth: 0.86,
       fontScale: 0.052,
+      fontFamily: "Pretendard",
+      fontWeight: 800,
       color: "#ffffff",
-      outlineColor: "#111318",
-      outlineWidth: 0.004,
-      backgroundColor: "rgba(0, 0, 0, 0.58)",
+      outlineColor: "#111111",
+      outlineWidth: 0.006,
+      backgroundColor: "transparent",
       align: "center"
     },
     ai: {
@@ -202,33 +221,89 @@ export function createEditorProjectFromCapture(captureState = {}, {
 }
 
 export function normalizeEditorProject(raw) {
-  if (!raw || raw.schema !== EDITOR_SCHEMA) {
+  if (!raw || ![EDITOR_SCHEMA, LEGACY_EDITOR_SCHEMA].includes(raw.schema)) {
     return null;
   }
+  const migratingLegacyProject = raw.schema === LEGACY_EDITOR_SCHEMA;
   const clips = reflowClips(Array.isArray(raw.clips) ? raw.clips : []);
   const defaults = createEditorProjectFromCapture({}, {
     id: raw.id || makeId("project"),
     createdAt: raw.createdAt || nowIso()
   });
   const clipIds = new Set(clips.map((clip) => clip.id));
-  const subtitles = (Array.isArray(raw.subtitles) ? raw.subtitles : [])
-    .filter((cue) => cue && clipIds.has(cue.clipId))
-    .map((cue) => normalizeSubtitleCue(cue, clips.find((clip) => clip.id === cue.clipId)));
+  const rawSubtitles = (Array.isArray(raw.subtitles) ? raw.subtitles : [])
+    .filter((cue) => cue && clipIds.has(cue.clipId));
+  const subtitleColor = normalizeHexColor(
+    raw.subtitleDefaults?.color,
+    defaults.subtitleDefaults.color
+  );
+  const requestedLaneCount = clamp(
+    Math.max(
+      Math.round(finiteNumber(raw.subtitleLaneCount, MIN_SUBTITLE_LANES)),
+      ...rawSubtitles.map((cue) => Math.round(finiteNumber(cue?.lane)) + 1),
+      MIN_SUBTITLE_LANES
+    ),
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  const subtitles = rawSubtitles.map((cue) => normalizeSubtitleCue(
+    {
+      ...cue,
+      color: cue.color ?? subtitleColor
+    },
+    clips.find((clip) => clip.id === cue.clipId),
+    requestedLaneCount
+  ));
+  const subtitleLaneCount = clamp(
+    Math.max(
+      requestedLaneCount,
+      ...subtitles.map((cue) => cue.lane + 1),
+      MIN_SUBTITLE_LANES
+    ),
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  const audioRegions = (Array.isArray(raw.audioRegions) ? raw.audioRegions : [])
+    .filter((region) => region && clipIds.has(region.clipId))
+    .map((region) => normalizeAudioRegion(
+      region,
+      clips.find((clip) => clip.id === region.clipId)
+    ));
+  const subtitleDefaults = {
+    ...defaults.subtitleDefaults,
+    ...(raw.subtitleDefaults || {}),
+    fontFamily: "Pretendard",
+    fontWeight: 800,
+    color: subtitleColor,
+    outlineColor: normalizeHexColor(
+      raw.subtitleDefaults?.outlineColor,
+      defaults.subtitleDefaults.outlineColor
+    ),
+    backgroundColor: migratingLegacyProject
+      ? "transparent"
+      : String(raw.subtitleDefaults?.backgroundColor || defaults.subtitleDefaults.backgroundColor)
+  };
 
   return {
     ...defaults,
     ...raw,
+    schema: EDITOR_SCHEMA,
     source: { ...defaults.source, ...(raw.source || {}) },
     broadcastSession: { ...defaults.broadcastSession, ...(raw.broadcastSession || {}) },
     mediaAsset: normalizeMediaAsset(raw.mediaAsset),
-    subtitleDefaults: { ...defaults.subtitleDefaults, ...(raw.subtitleDefaults || {}) },
+    subtitleDefaults,
     ai: { ...defaults.ai, ...(raw.ai || {}) },
     history: {
       undo: Array.isArray(raw.history?.undo) ? raw.history.undo : [],
       redo: Array.isArray(raw.history?.redo) ? raw.history.redo : []
     },
     clips,
-    subtitles
+    subtitles,
+    subtitleLaneCount,
+    audioRegions,
+    selectedAudioRegionId: audioRegions.some((region) => region.id === raw.selectedAudioRegionId)
+      ? raw.selectedAudioRegionId
+      : null
   };
 }
 
@@ -320,6 +395,25 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
       ...cue,
       startOffsetMs: overlapStartMs - nextClip.sourceStartMs,
       endOffsetMs: overlapEndMs - nextClip.sourceStartMs
+    }, nextClip, normalized.subtitleLaneCount)];
+  });
+  const audioRegions = normalized.audioRegions.flatMap((region) => {
+    const previousClip = previousClipsById.get(region.clipId);
+    const nextClip = nextClipsById.get(region.clipId);
+    if (!previousClip || !nextClip) {
+      return [];
+    }
+    const regionSourceStartMs = previousClip.sourceStartMs + region.startOffsetMs;
+    const regionSourceEndMs = previousClip.sourceStartMs + region.endOffsetMs;
+    const overlapStartMs = Math.max(nextClip.sourceStartMs, regionSourceStartMs);
+    const overlapEndMs = Math.min(nextClip.sourceEndMs, regionSourceEndMs);
+    if (overlapEndMs - overlapStartMs < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    return [normalizeAudioRegion({
+      ...region,
+      startOffsetMs: overlapStartMs - nextClip.sourceStartMs,
+      endOffsetMs: overlapEndMs - nextClip.sourceStartMs
     }, nextClip)];
   });
   const source = { ...normalized.source, ...(captureState.source || {}) };
@@ -340,11 +434,17 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
     },
     clips: reflowedClips,
     subtitles,
+    audioRegions,
     selectedClipId: nextClipIds.has(normalized.selectedClipId)
       ? normalized.selectedClipId
       : nextClips[0]?.id || null,
     selectedCueId: subtitles.some((cue) => cue.id === normalized.selectedCueId)
       ? normalized.selectedCueId
+      : null,
+    selectedAudioRegionId: audioRegions.some((region) => (
+      region.id === normalized.selectedAudioRegionId
+    ))
+      ? normalized.selectedAudioRegionId
       : null,
     updatedAt: nowIso()
   };
@@ -393,7 +493,7 @@ export function mapSourceToTimeline(project, clipId, sourceMs) {
   return clip.timelineStartMs + boundedSourceMs - clip.sourceStartMs;
 }
 
-function normalizeSubtitleCue(cue, clip) {
+function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
   const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
   const startOffsetMs = clamp(Math.round(finiteNumber(cue.startOffsetMs)), 0, Math.max(0, duration - MIN_CUE_DURATION_MS));
   const endOffsetMs = clamp(
@@ -407,6 +507,12 @@ function normalizeSubtitleCue(cue, clip) {
     startOffsetMs,
     endOffsetMs,
     text: String(cue.text || "").trim(),
+    lane: clamp(
+      Math.round(finiteNumber(cue.lane)),
+      0,
+      Math.max(0, Math.min(MAX_SUBTITLE_LANES, laneCount) - 1)
+    ),
+    color: normalizeHexColor(cue.color, "#ffffff"),
     x: clamp(finiteNumber(cue.x, 0.5), 0.05, 0.95),
     y: clamp(finiteNumber(cue.y, 0.84), 0.05, 0.95),
     origin: cue.origin === "ai" ? "ai" : "human",
@@ -423,6 +529,8 @@ export function createSubtitleCue(project, {
   startOffsetMs = 0,
   endOffsetMs = 2000,
   text = "",
+  lane = 0,
+  color,
   x,
   y,
   origin = "human",
@@ -439,13 +547,112 @@ export function createSubtitleCue(project, {
     startOffsetMs,
     endOffsetMs,
     text,
+    lane,
+    color: color ?? project.subtitleDefaults?.color,
     x: x ?? project.subtitleDefaults?.x,
     y: y ?? project.subtitleDefaults?.y,
     origin,
     confidence,
     createdAt,
     updatedAt: createdAt
+  }, clip, project.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
+}
+
+function normalizeAudioRegion(region, clip) {
+  const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
+  const startOffsetMs = clamp(
+    Math.round(finiteNumber(region.startOffsetMs)),
+    0,
+    Math.max(0, duration - MIN_CUE_DURATION_MS)
+  );
+  const endOffsetMs = clamp(
+    Math.round(finiteNumber(region.endOffsetMs, startOffsetMs + 2000)),
+    startOffsetMs + MIN_CUE_DURATION_MS,
+    duration
+  );
+  const maximumFadeMs = Math.max(0, endOffsetMs - startOffsetMs);
+  return {
+    id: region.id || makeId("audio"),
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    gain: clamp(finiteNumber(region.gain, 1), 0, 1),
+    muted: Boolean(region.muted),
+    fadeInMs: clamp(
+      Math.round(finiteNumber(region.fadeInMs)),
+      0,
+      maximumFadeMs
+    ),
+    fadeOutMs: clamp(
+      Math.round(finiteNumber(region.fadeOutMs)),
+      0,
+      maximumFadeMs
+    ),
+    createdAt: region.createdAt || nowIso(),
+    updatedAt: region.updatedAt || region.createdAt || nowIso()
+  };
+}
+
+export function createAudioRegion(project, {
+  id,
+  clipId,
+  startOffsetMs = 0,
+  endOffsetMs = 2000,
+  gain = 1,
+  muted = false,
+  fadeInMs = 0,
+  fadeOutMs = 0,
+  createdAt = nowIso()
+} = {}) {
+  const clip = project?.clips?.find((candidate) => candidate.id === clipId) || project?.clips?.[0];
+  if (!clip) {
+    throw new Error("음성을 조절할 영상 구간이 없습니다.");
+  }
+  return normalizeAudioRegion({
+    id,
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    gain,
+    muted,
+    fadeInMs,
+    fadeOutMs,
+    createdAt,
+    updatedAt: createdAt
   }, clip);
+}
+
+export function updateAudioRegion(project, regionId, patch = {}) {
+  const index = project.audioRegions.findIndex((region) => region.id === regionId);
+  if (index < 0) {
+    return project;
+  }
+  const current = project.audioRegions[index];
+  const clip = project.clips.find((candidate) => candidate.id === current.clipId);
+  const next = normalizeAudioRegion({
+    ...current,
+    ...patch,
+    updatedAt: nowIso()
+  }, clip);
+  const audioRegions = [...project.audioRegions];
+  audioRegions[index] = next;
+  return {
+    ...project,
+    audioRegions,
+    selectedAudioRegionId: regionId,
+    updatedAt: nowIso()
+  };
+}
+
+export function deleteAudioRegion(project, regionId) {
+  return {
+    ...project,
+    audioRegions: project.audioRegions.filter((region) => region.id !== regionId),
+    selectedAudioRegionId: project.selectedAudioRegionId === regionId
+      ? null
+      : project.selectedAudioRegionId,
+    updatedAt: nowIso()
+  };
 }
 
 export function cueTimelineRange(project, cue) {
@@ -459,12 +666,32 @@ export function cueTimelineRange(project, cue) {
   };
 }
 
+export function audioRegionTimelineRange(project, region) {
+  const clip = project?.clips?.find((candidate) => candidate.id === region?.clipId);
+  if (!clip || clip.enabled === false) {
+    return null;
+  }
+  return {
+    startMs: clip.timelineStartMs + region.startOffsetMs,
+    endMs: clip.timelineStartMs + region.endOffsetMs
+  };
+}
+
 export function cueAtTimeline(project, timelineMs) {
+  return cuesAtTimeline(project, timelineMs)[0] || null;
+}
+
+export function cuesAtTimeline(project, timelineMs) {
   const target = Math.round(finiteNumber(timelineMs));
   return (project?.subtitles || [])
     .map((cue) => ({ cue, range: cueTimelineRange(project, cue) }))
     .filter(({ range }) => range && target >= range.startMs && target < range.endMs)
-    .sort((a, b) => a.range.startMs - b.range.startMs)[0]?.cue || null;
+    .sort((a, b) => (
+      a.cue.lane - b.cue.lane ||
+      a.range.startMs - b.range.startMs ||
+      a.cue.id.localeCompare(b.cue.id)
+    ))
+    .map(({ cue }) => cue);
 }
 
 export function findSubtitleOverlaps(project) {
@@ -480,7 +707,10 @@ export function findSubtitleOverlaps(project) {
       if (right.range.startMs >= left.range.endMs) {
         break;
       }
-      if (right.range.endMs > left.range.startMs) {
+      if (
+        right.cue.lane === left.cue.lane &&
+        right.range.endMs > left.range.startMs
+      ) {
         overlaps.push({
           firstCueId: left.cue.id,
           secondCueId: right.cue.id,
@@ -491,6 +721,55 @@ export function findSubtitleOverlaps(project) {
     }
   }
   return overlaps;
+}
+
+export function audioRegionAtTimeline(project, timelineMs) {
+  const target = Math.round(finiteNumber(timelineMs));
+  return (project?.audioRegions || [])
+    .map((region) => ({ region, range: audioRegionTimelineRange(project, region) }))
+    .find(({ range }) => range && target >= range.startMs && target < range.endMs)
+    ?.region || null;
+}
+
+export function findAudioRegionOverlaps(project) {
+  const regions = (project?.audioRegions || [])
+    .map((region) => ({ region, range: audioRegionTimelineRange(project, region) }))
+    .filter(({ range }) => range)
+    .sort((a, b) => a.range.startMs - b.range.startMs);
+  const overlaps = [];
+  for (let leftIndex = 0; leftIndex < regions.length; leftIndex += 1) {
+    const left = regions[leftIndex];
+    for (let rightIndex = leftIndex + 1; rightIndex < regions.length; rightIndex += 1) {
+      const right = regions[rightIndex];
+      if (right.range.startMs >= left.range.endMs) {
+        break;
+      }
+      if (
+        right.region.clipId === left.region.clipId &&
+        right.range.endMs > left.range.startMs
+      ) {
+        overlaps.push({
+          firstRegionId: left.region.id,
+          secondRegionId: right.region.id,
+          startMs: Math.max(left.range.startMs, right.range.startMs),
+          endMs: Math.min(left.range.endMs, right.range.endMs)
+        });
+      }
+    }
+  }
+  return overlaps;
+}
+
+export function addSubtitleLane(project) {
+  const subtitleLaneCount = clamp(
+    Math.round(finiteNumber(project?.subtitleLaneCount, MIN_SUBTITLE_LANES)) + 1,
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  if (subtitleLaneCount === project.subtitleLaneCount) {
+    return project;
+  }
+  return { ...project, subtitleLaneCount, updatedAt: nowIso() };
 }
 
 export function updateSubtitleCue(project, cueId, patch = {}, { markHuman = true } = {}) {
@@ -505,7 +784,7 @@ export function updateSubtitleCue(project, cueId, patch = {}, { markHuman = true
     ...patch,
     humanEdited: markHuman ? true : current.humanEdited,
     updatedAt: nowIso()
-  }, clip);
+  }, clip, project.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
   const subtitles = [...project.subtitles];
   subtitles[index] = next;
   return { ...project, subtitles, selectedCueId: cueId, updatedAt: nowIso() };
@@ -528,7 +807,9 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
   const preserved = project.subtitles.filter((cue) => (
     cue.clipId !== clipId || cue.origin !== "ai" || cue.humanEdited
   ));
-  const protectedInClip = preserved.filter((cue) => cue.clipId === clipId);
+  const protectedInClip = preserved.filter((cue) => (
+    cue.clipId === clipId && cue.lane === 0
+  ));
   const overlapsProtectedCue = (draft) => protectedInClip.some((cue) => (
     Math.max(finiteNumber(draft.startOffsetMs), cue.startOffsetMs) <
     Math.min(finiteNumber(draft.endOffsetMs), cue.endOffsetMs)
@@ -538,6 +819,7 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
     .map((draft) => createSubtitleCue(project, {
       ...draft,
       clipId,
+      lane: 0,
       origin: "ai"
     }))
     .sort((a, b) => (
@@ -715,16 +997,40 @@ export function updateClipTrim(project, clipId, {
       ...cue,
       startOffsetMs: overlapStart - start,
       endOffsetMs: overlapEnd - start
+    }, nextClip, project.subtitleLaneCount ?? MIN_SUBTITLE_LANES)];
+  });
+  const audioRegions = project.audioRegions.flatMap((region) => {
+    if (region.clipId !== clipId) {
+      return [region];
+    }
+    const regionSourceStart = current.sourceStartMs + region.startOffsetMs;
+    const regionSourceEnd = current.sourceStartMs + region.endOffsetMs;
+    const overlapStart = Math.max(start, regionSourceStart);
+    const overlapEnd = Math.min(end, regionSourceEnd);
+    if (overlapEnd - overlapStart < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    return [normalizeAudioRegion({
+      ...region,
+      startOffsetMs: overlapStart - start,
+      endOffsetMs: overlapEnd - start
     }, nextClip)];
   });
   const selectedCueId = subtitles.some((cue) => cue.id === project.selectedCueId)
     ? project.selectedCueId
     : null;
+  const selectedAudioRegionId = audioRegions.some((region) => (
+    region.id === project.selectedAudioRegionId
+  ))
+    ? project.selectedAudioRegionId
+    : null;
   return {
     ...project,
     clips,
     subtitles,
+    audioRegions,
     selectedCueId,
+    selectedAudioRegionId,
     updatedAt: nowIso()
   };
 }

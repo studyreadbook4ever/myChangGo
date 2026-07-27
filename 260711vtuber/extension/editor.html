@@ -117,10 +117,7 @@
               <span>긴 영상도 디스크에서 필요한 부분만 읽습니다</span>
               <button id="pick-media-empty" class="button primary" type="button">원본 영상 선택</button>
             </div>
-            <button id="subtitle-overlay" class="subtitle-overlay" type="button" hidden aria-label="자막 위치 드래그">
-              <span></span>
-              <i class="drag-indicator" aria-hidden="true"></i>
-            </button>
+            <div id="subtitle-overlays" class="subtitle-overlays" aria-live="off"></div>
             <div class="safe-area" aria-hidden="true"></div>
           </div>
 
@@ -146,15 +143,20 @@
         </section>
 
         <aside class="inspector panel">
+          <div class="property-mode-tabs" role="tablist" aria-label="속성 편집 종류">
+            <button id="caption-mode-tab" class="active" type="button" role="tab" aria-selected="true">자막</button>
+            <button id="audio-mode-tab" type="button" role="tab" aria-selected="false">음성</button>
+          </div>
           <div class="panel-heading inspector-heading">
             <div>
-              <span class="overline">CAPTIONS</span>
-              <h2>한글 자막</h2>
+              <span id="inspector-overline" class="overline">CAPTIONS</span>
+              <h2 id="inspector-title">한글 자막</h2>
             </div>
             <button id="add-cue-top" class="small-action" type="button">+ 직접 추가</button>
           </div>
 
-          <section class="ai-card">
+          <div id="caption-inspector-content">
+            <section class="ai-card">
             <div class="ai-title">
               <div class="spark" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8Z"/></svg>
@@ -182,21 +184,21 @@
                 <strong id="ai-progress-value">0%</strong>
               </div>
             </div>
-          </section>
+            </section>
 
-          <div class="inspector-tabs" role="tablist" aria-label="자막 편집 보기">
-            <button id="cue-selected-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="cue-selected-panel">선택 자막</button>
-            <button id="cue-list-tab" type="button" role="tab" aria-selected="false" aria-controls="cue-list" tabindex="-1">전체 <span id="cue-count">0</span></button>
-          </div>
-
-          <div id="cue-selected-panel" role="tabpanel" aria-labelledby="cue-selected-tab">
-            <div id="cue-empty" class="inspector-empty">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H8l-4 4Z"/><path d="M8 9h8M8 13h5"/></svg>
-              <strong>자막을 선택해 주세요</strong>
-              <span>타임라인의 자막 블록을 누르면 텍스트와 위치를 수정할 수 있습니다.</span>
+            <div class="inspector-tabs" role="tablist" aria-label="자막 편집 보기">
+              <button id="cue-selected-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="cue-selected-panel">선택 자막</button>
+              <button id="cue-list-tab" type="button" role="tab" aria-selected="false" aria-controls="cue-list" tabindex="-1">전체 <span id="cue-count">0</span></button>
             </div>
 
-            <div id="cue-editor" class="cue-editor" hidden>
+            <div id="cue-selected-panel" role="tabpanel" aria-labelledby="cue-selected-tab">
+              <div id="cue-empty" class="inspector-empty">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H8l-4 4Z"/><path d="M8 9h8M8 13h5"/></svg>
+                <strong>자막을 선택해 주세요</strong>
+                <span>타임라인의 자막 블록을 누르면 텍스트와 위치를 수정할 수 있습니다.</span>
+              </div>
+
+              <div id="cue-editor" class="cue-editor" hidden>
               <label class="field">
                 <span>자막 텍스트</span>
                 <textarea id="cue-text" rows="4" placeholder="자막 내용을 입력하세요"></textarea>
@@ -243,29 +245,85 @@
                     <input id="font-size" type="range" min="3" max="9" step="0.25" value="5.2">
                   </label>
                   <label class="color-control">
-                    <span>글자색</span>
+                    <span>선택 자막 색상</span>
                     <input id="font-color" type="color" value="#ffffff">
                   </label>
                 </div>
+                <button id="reset-font-color" class="inline-reset" type="button">기본 흰색으로</button>
               </div>
 
               <button id="delete-cue" class="danger-action" type="button">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
                 이 자막 삭제
               </button>
+              </div>
             </div>
+
+            <div id="cue-list" class="cue-list" hidden role="tabpanel" aria-labelledby="cue-list-tab"></div>
           </div>
 
-          <div id="cue-list" class="cue-list" hidden role="tabpanel" aria-labelledby="cue-list-tab"></div>
+          <div id="audio-inspector-content" hidden>
+            <div id="audio-empty" class="inspector-empty">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h4l5-4v14l-5-4H5Z"/><path d="M17 9a4 4 0 0 1 0 6"/></svg>
+              <strong>음성 구간을 선택해 주세요</strong>
+              <span>음성 트랙의 기본 블록을 누르거나 우클릭해 조절 구간을 만들 수 있습니다.</span>
+            </div>
+
+            <div id="audio-editor" class="cue-editor" hidden>
+              <div class="audio-region-heading">
+                <span class="overline">SELECTED REGION</span>
+                <strong id="audio-region-label">선택 구간 음성</strong>
+              </div>
+
+              <div class="time-fields">
+                <label class="field">
+                  <span>시작</span>
+                  <input id="audio-start" type="text" inputmode="decimal" value="00:00.000">
+                </label>
+                <label class="field">
+                  <span>끝</span>
+                  <input id="audio-end" type="text" inputmode="decimal" value="00:02.000">
+                </label>
+              </div>
+
+              <label class="field audio-volume-field">
+                <span>구간 음량 <b id="audio-volume-value">100%</b></span>
+                <input id="audio-volume" type="range" min="0" max="100" step="1" value="100">
+              </label>
+
+              <button id="audio-mute" class="toggle-setting" type="button" aria-pressed="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h4l5-4v14l-5-4H5Z"/><path d="m18 9 4 6M22 9l-4 6"/></svg>
+                <span id="audio-mute-label">이 구간 음소거</span>
+              </button>
+
+              <div class="position-values audio-fades">
+                <label class="field">
+                  <span>페이드 인 <b id="audio-fade-in-value">0.0초</b></span>
+                  <input id="audio-fade-in" type="range" min="0" max="3000" step="100" value="0">
+                </label>
+                <label class="field">
+                  <span>페이드 아웃 <b id="audio-fade-out-value">0.0초</b></span>
+                  <input id="audio-fade-out" type="range" min="0" max="3000" step="100" value="0">
+                </label>
+              </div>
+
+              <button id="reset-audio-region" class="secondary-action" type="button">음성 설정 초기화</button>
+              <button id="delete-audio-region" class="danger-action" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
+                이 음성 설정 구간 삭제
+              </button>
+            </div>
+          </div>
         </aside>
 
         <section class="timeline-panel">
           <div class="timeline-toolbar">
             <div class="timeline-title">
               <span class="overline">TIMELINE</span>
-              <strong>컷과 자막</strong>
+              <strong>영상 · 음성 · 자막</strong>
             </div>
             <div class="timeline-tools">
+              <button id="add-audio-region" class="tool-button" type="button">+ 현재 위치 음성 설정</button>
               <button id="add-cue" class="tool-button" type="button">+ 현재 위치에 자막</button>
               <button id="fit-timeline" class="tool-button" type="button">전체 보기</button>
               <svg class="zoom-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M8 10h4"/></svg>
@@ -276,20 +334,26 @@
           <div class="timeline-grid">
             <div class="track-labels">
               <div class="ruler-spacer"></div>
-              <div class="track-label">
+              <div class="track-label video-track-label">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 10 5-3v10l-5-3Z"/><rect x="3" y="5" width="12" height="14" rx="2"/></svg>
                 영상
               </div>
-              <div class="track-label">
+              <div class="track-label audio-track-label">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h4l5-4v14l-5-4H5Z"/><path d="M17 9a4 4 0 0 1 0 6"/></svg>
+                음성
+              </div>
+              <div class="track-label caption-track-label">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H8l-4 4Z"/><path d="M8 9h8M8 13h5"/></svg>
-                자막
+                <span>자막 <b id="subtitle-lane-count">2</b></span>
+                <button id="add-subtitle-lane" type="button" title="자막 레인 추가" aria-label="자막 레인 추가">+</button>
               </div>
             </div>
             <div id="timeline-scroll" class="timeline-scroll">
               <div id="timeline-content" class="timeline-content">
                 <div id="timeline-ruler" class="timeline-ruler"></div>
                 <div id="video-track" class="timeline-track video-track"></div>
-                <div id="caption-track" class="timeline-track caption-track"></div>
+                <div id="audio-track" class="timeline-track audio-track"></div>
+                <div id="caption-tracks" class="caption-tracks"></div>
                 <button id="playhead" class="playhead" type="button" role="slider" aria-label="편집 재생 시각" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00:00.000">
                   <span></span>
                 </button>
@@ -301,6 +365,14 @@
     </div>
 
     <input id="media-input" type="file" accept="video/*,audio/*" hidden>
+
+    <div id="timeline-context-menu" class="timeline-context-menu" hidden role="menu" aria-label="타임라인 메뉴">
+      <button id="context-add-cue" type="button" role="menuitem">이 위치에 자막 추가</button>
+      <button id="context-add-audio" type="button" role="menuitem">이 위치에 음성 설정 추가</button>
+      <button id="context-delete-cue" class="danger" type="button" role="menuitem">이 자막 삭제</button>
+      <button id="context-delete-audio" class="danger" type="button" role="menuitem">이 음성 설정 삭제</button>
+      <button id="context-add-lane" type="button" role="menuitem">자막 레인 하나 더</button>
+    </div>
 
     <dialog id="job-dialog" class="job-dialog" hidden aria-labelledby="job-title" aria-describedby="job-message">
       <div class="job-card" tabindex="-1">

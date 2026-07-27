@@ -1,13 +1,20 @@
 import {
   EDITOR_SEED_PREFIX,
+  MAX_SUBTITLE_LANES,
+  addSubtitleLane,
   applyMediaAlignmentOffset,
+  audioRegionAtTimeline,
+  audioRegionTimelineRange,
   captureProjectId,
   clipDurationMs,
+  createAudioRegion,
   createEditorProjectFromCapture,
   createSubtitleCue,
-  cueAtTimeline,
+  cuesAtTimeline,
   cueTimelineRange,
+  deleteAudioRegion,
   deleteSubtitleCue,
+  findAudioRegionOverlaps,
   findSubtitleOverlaps,
   mapTimelineToSource,
   mergeCaptureIntoEditorProject,
@@ -17,6 +24,7 @@ import {
   replaceAiSubtitleDraft,
   serializeSrt,
   transcriptChunksToCueDrafts,
+  updateAudioRegion,
   updateClipTrim,
   updateSubtitleCue
 } from "../../extension/lib/editor-core.js";
@@ -58,7 +66,7 @@ const elements = Object.fromEntries([
   "preview-video",
   "stage-empty",
   "pick-media-empty",
-  "subtitle-overlay",
+  "subtitle-overlays",
   "previous-clip",
   "play-toggle",
   "next-clip",
@@ -66,6 +74,12 @@ const elements = Object.fromEntries([
   "duration-time",
   "toggle-mute",
   "volume",
+  "caption-mode-tab",
+  "audio-mode-tab",
+  "inspector-overline",
+  "inspector-title",
+  "caption-inspector-content",
+  "audio-inspector-content",
   "add-cue-top",
   "asr-model",
   "generate-captions",
@@ -87,17 +101,43 @@ const elements = Object.fromEntries([
   "cue-y-value",
   "font-size",
   "font-color",
+  "reset-font-color",
   "delete-cue",
   "cue-list",
+  "audio-empty",
+  "audio-editor",
+  "audio-region-label",
+  "audio-start",
+  "audio-end",
+  "audio-volume",
+  "audio-volume-value",
+  "audio-mute",
+  "audio-mute-label",
+  "audio-fade-in",
+  "audio-fade-in-value",
+  "audio-fade-out",
+  "audio-fade-out-value",
+  "reset-audio-region",
+  "delete-audio-region",
+  "add-audio-region",
   "add-cue",
+  "subtitle-lane-count",
+  "add-subtitle-lane",
   "fit-timeline",
   "timeline-zoom",
   "timeline-scroll",
   "timeline-content",
   "timeline-ruler",
   "video-track",
-  "caption-track",
+  "audio-track",
+  "caption-tracks",
   "playhead",
+  "timeline-context-menu",
+  "context-add-cue",
+  "context-add-audio",
+  "context-delete-cue",
+  "context-delete-audio",
+  "context-add-lane",
   "media-input",
   "job-dialog",
   "job-title",
@@ -135,6 +175,10 @@ let exportRequestPending = false;
 let activeJobCancelable = false;
 let previewSeekSequence = 0;
 let pendingPreviewSeek = null;
+let propertyInspectorMode = "caption";
+let previewVolume = 1;
+let previewMuted = false;
+let timelineContext = null;
 
 const EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
 const cloneProject = (value) => structuredClone(value);
@@ -333,6 +377,10 @@ function selectedCue() {
   return project.subtitles.find((cue) => cue.id === project.selectedCueId) || null;
 }
 
+function selectedAudioRegion() {
+  return project.audioRegions.find((region) => region.id === project.selectedAudioRegionId) || null;
+}
+
 function selectedClip() {
   return project.clips.find((clip) => clip.id === project.selectedClipId) || project.clips[0] || null;
 }
@@ -434,9 +482,60 @@ function renderCueInspector() {
   elements.cue_x_value.textContent = `${Math.round(cue.x * 100)}%`;
   elements.cue_y_value.textContent = `${Math.round(cue.y * 100)}%`;
   elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.052) * 100);
-  elements.font_color.value = project.subtitleDefaults.color || "#ffffff";
+  elements.font_color.value = cue.color || project.subtitleDefaults.color || "#ffffff";
   const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
+}
+
+function renderAudioInspector() {
+  const region = selectedAudioRegion();
+  elements.audio_empty.hidden = Boolean(region);
+  elements.audio_editor.hidden = !region;
+  if (!region) {
+    return;
+  }
+  const range = audioRegionTimelineRange(project, region);
+  const clipIndex = project.clips.findIndex((clip) => clip.id === region.clipId);
+  elements.audio_region_label.textContent = `${clipIndex + 1}번 컷 · 음성 설정`;
+  if (document.activeElement !== elements.audio_start) {
+    elements.audio_start.value = formatTime(range.startMs, { compact: true });
+  }
+  if (document.activeElement !== elements.audio_end) {
+    elements.audio_end.value = formatTime(range.endMs, { compact: true });
+  }
+  const gainPercent = Math.round(region.gain * 100);
+  elements.audio_volume.value = String(gainPercent);
+  elements.audio_volume_value.textContent = `${gainPercent}%`;
+  elements.audio_mute.classList.toggle("active", region.muted);
+  elements.audio_mute.setAttribute("aria-pressed", String(region.muted));
+  elements.audio_mute_label.textContent = region.muted
+    ? "이 구간 음소거 해제"
+    : "이 구간 음소거";
+  const durationMs = Math.max(0, region.endOffsetMs - region.startOffsetMs);
+  const maximumFadeMs = Math.min(3_000, durationMs);
+  elements.audio_fade_in.max = String(maximumFadeMs);
+  elements.audio_fade_out.max = String(maximumFadeMs);
+  elements.audio_fade_in.value = String(Math.min(region.fadeInMs, maximumFadeMs));
+  elements.audio_fade_out.value = String(Math.min(region.fadeOutMs, maximumFadeMs));
+  elements.audio_fade_in_value.textContent = `${(region.fadeInMs / 1000).toFixed(1)}초`;
+  elements.audio_fade_out_value.textContent = `${(region.fadeOutMs / 1000).toFixed(1)}초`;
+}
+
+function renderPropertyInspector() {
+  const showingAudio = propertyInspectorMode === "audio";
+  elements.caption_mode_tab.classList.toggle("active", !showingAudio);
+  elements.caption_mode_tab.setAttribute("aria-selected", String(!showingAudio));
+  elements.caption_mode_tab.tabIndex = showingAudio ? -1 : 0;
+  elements.audio_mode_tab.classList.toggle("active", showingAudio);
+  elements.audio_mode_tab.setAttribute("aria-selected", String(showingAudio));
+  elements.audio_mode_tab.tabIndex = showingAudio ? 0 : -1;
+  elements.caption_inspector_content.hidden = showingAudio;
+  elements.audio_inspector_content.hidden = !showingAudio;
+  elements.inspector_overline.textContent = showingAudio ? "VOICE" : "CAPTIONS";
+  elements.inspector_title.textContent = showingAudio ? "구간별 음성" : "한글 자막";
+  elements.add_cue_top.hidden = showingAudio;
+  renderCueInspector();
+  renderAudioInspector();
 }
 
 function renderCueList() {
@@ -457,7 +556,7 @@ function renderCueList() {
     button.classList.toggle("selected", cue.id === project.selectedCueId);
     button.dataset.id = cue.id;
     const time = document.createElement("time");
-    time.textContent = formatTime(range.startMs, { compact: true }).slice(0, -4);
+    time.textContent = `L${cue.lane + 1} · ${formatTime(range.startMs, { compact: true }).slice(0, -4)}`;
     const text = document.createElement("span");
     text.textContent = cue.text || "(빈 자막)";
     button.append(time, text);
@@ -519,9 +618,13 @@ function makeHandle(side, onStart, onNudge, {
     }
     event.preventDefault();
     event.stopPropagation();
-    const owner = handle.closest(".clip-block, .cue-block");
+    const owner = handle.closest(".clip-block, .cue-block, .audio-block");
     const ownerId = owner?.dataset.id;
-    const ownerClass = owner?.classList.contains("clip-block") ? "clip-block" : "cue-block";
+    const ownerClass = owner?.classList.contains("clip-block")
+      ? "clip-block"
+      : owner?.classList.contains("audio-block")
+        ? "audio-block"
+        : "cue-block";
     const amount = event.shiftKey ? 1_000 : 100;
     onNudge(event.key === "ArrowLeft" ? -amount : amount);
     queueMicrotask(() => {
@@ -646,7 +749,74 @@ function bindCueTrim(handle, cue, side, event) {
     }
     endPointerHistory();
     if (overlapBlocked) {
-      showToast("자막끼리는 겹칠 수 없습니다.", "error");
+      showToast("같은 자막 레인 안에서는 자막이 겹칠 수 없습니다.", "error");
+    }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+function audioRegionHasOverlap(candidateProject, regionId) {
+  return findAudioRegionOverlaps(candidateProject).some((overlap) => (
+    overlap.firstRegionId === regionId || overlap.secondRegionId === regionId
+  ));
+}
+
+function bindAudioTrim(handle, region, side, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  beginPointerHistory();
+  const startX = event.clientX;
+  const originalStart = region.startOffsetMs;
+  const originalEnd = region.endOffsetMs;
+  const clip = project.clips.find((candidate) => candidate.id === region.clipId);
+  const duration = clipDurationMs(clip);
+  const pointerId = event.pointerId;
+  const block = handle.closest(".audio-block");
+  let overlapBlocked = false;
+  handle.setPointerCapture(pointerId);
+
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1000);
+    const startOffsetMs = side === "left"
+      ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta))
+      : originalStart;
+    const endOffsetMs = side === "right"
+      ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta))
+      : originalEnd;
+    const nextProject = updateAudioRegion(project, region.id, { startOffsetMs, endOffsetMs });
+    if (audioRegionHasOverlap(nextProject, region.id)) {
+      overlapBlocked = true;
+      return;
+    }
+    overlapBlocked = false;
+    project = nextProject;
+    const nextRegion = selectedAudioRegion();
+    const range = audioRegionTimelineRange(project, nextRegion);
+    if (block && range) {
+      block.style.left = `${timelineX(range.startMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    }
+    renderAudioInspector();
+    applyPreviewAudioSettings();
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    endPointerHistory();
+    if (overlapBlocked) {
+      showToast("음성 설정 구간끼리는 겹칠 수 없습니다.", "error");
     }
   };
   window.addEventListener("pointermove", move);
@@ -657,14 +827,29 @@ function bindCueTrim(handle, cue, side, event) {
 function renderTimeline({ keepScroll = false } = {}) {
   const scrollLeft = elements.timeline_scroll.scrollLeft;
   const width = timelineWidth();
+  const laneCount = Math.max(2, project.subtitleLaneCount || 2);
+  document.documentElement.style.setProperty("--subtitle-lane-count", String(laneCount));
+  elements.subtitle_lane_count.textContent = String(laneCount);
+  elements.add_subtitle_lane.disabled = laneCount >= MAX_SUBTITLE_LANES;
   elements.timeline_content.style.width = `${width}px`;
   elements.video_track.style.width = `${width}px`;
-  elements.caption_track.style.width = `${width}px`;
+  elements.audio_track.style.width = `${width}px`;
   elements.video_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
-  elements.caption_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+  elements.audio_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
   renderRuler(width);
   elements.video_track.replaceChildren();
-  elements.caption_track.replaceChildren();
+  elements.audio_track.replaceChildren();
+  elements.caption_tracks.replaceChildren();
+  const captionRows = Array.from({ length: laneCount }, (_, lane) => {
+    const row = document.createElement("div");
+    row.className = "timeline-track caption-track-row";
+    row.dataset.lane = String(lane);
+    row.setAttribute("aria-label", `자막 ${lane + 1} 레인`);
+    row.style.width = `${width}px`;
+    row.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+    elements.caption_tracks.append(row);
+    return row;
+  });
 
   project.clips.filter((clip) => clip.enabled !== false).forEach((clip, index) => {
     const block = document.createElement("div");
@@ -731,6 +916,86 @@ function renderTimeline({ keepScroll = false } = {}) {
       )
     );
     elements.video_track.append(block);
+
+    const audioSource = document.createElement("button");
+    audioSource.type = "button";
+    audioSource.className = "audio-source-block";
+    audioSource.dataset.clipId = clip.id;
+    audioSource.style.left = `${timelineX(clip.timelineStartMs)}px`;
+    audioSource.style.width = `${Math.max(8, timelineX(clipDurationMs(clip)))}px`;
+    audioSource.textContent = `${index + 1} · 원본 음성`;
+    audioSource.title = "클릭하면 이 위치에 음성 설정 구간을 만듭니다.";
+    audioSource.addEventListener("click", (event) => {
+      const rect = elements.timeline_content.getBoundingClientRect();
+      const timelineMs = (event.clientX - rect.left) / pixelsPerSecond * 1000;
+      addAudioRegionAtTimeline(timelineMs);
+    });
+    elements.audio_track.append(audioSource);
+  });
+
+  project.audioRegions.forEach((region, regionIndex) => {
+    const range = audioRegionTimelineRange(project, region);
+    if (!range) {
+      return;
+    }
+    const block = document.createElement("div");
+    block.className = "audio-block";
+    block.classList.toggle("selected", region.id === project.selectedAudioRegionId);
+    block.classList.toggle("muted", region.muted);
+    block.dataset.id = region.id;
+    block.style.left = `${timelineX(range.startMs)}px`;
+    block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    const body = document.createElement("button");
+    body.type = "button";
+    body.className = "audio-block-body";
+    body.textContent = region.muted ? "음소거" : `음량 ${Math.round(region.gain * 100)}%`;
+    body.addEventListener("click", () => selectAudioRegion(region.id, { seek: true }));
+    const regionClip = project.clips.find((candidate) => candidate.id === region.clipId);
+    const nudgeRegion = (side, delta) => {
+      const current = project.audioRegions.find((candidate) => candidate.id === region.id);
+      const currentClip = project.clips.find((candidate) => candidate.id === current.clipId);
+      const duration = clipDurationMs(currentClip);
+      const startOffsetMs = side === "left"
+        ? Math.max(0, Math.min(current.endOffsetMs - 100, current.startOffsetMs + delta))
+        : current.startOffsetMs;
+      const endOffsetMs = side === "right"
+        ? Math.min(duration, Math.max(current.startOffsetMs + 100, current.endOffsetMs + delta))
+        : current.endOffsetMs;
+      const nextProject = updateAudioRegion(project, region.id, { startOffsetMs, endOffsetMs });
+      if (audioRegionHasOverlap(nextProject, region.id)) {
+        showToast("음성 설정 구간끼리는 겹칠 수 없습니다.", "error");
+        return;
+      }
+      applyProject(nextProject, { render: false });
+      renderAll({ keepScroll: true });
+      applyPreviewAudioSettings();
+    };
+    block.append(
+      makeHandle(
+        "left",
+        (event) => bindAudioTrim(event.currentTarget, region, "left", event),
+        (delta) => nudgeRegion("left", delta),
+        {
+          label: `${regionIndex + 1}번 음성 설정 시작 시각`,
+          valueMs: range.startMs,
+          minMs: regionClip.timelineStartMs,
+          maxMs: range.endMs - 100
+        }
+      ),
+      body,
+      makeHandle(
+        "right",
+        (event) => bindAudioTrim(event.currentTarget, region, "right", event),
+        (delta) => nudgeRegion("right", delta),
+        {
+          label: `${regionIndex + 1}번 음성 설정 끝 시각`,
+          valueMs: range.endMs,
+          minMs: range.startMs + 100,
+          maxMs: regionClip.timelineStartMs + clipDurationMs(regionClip)
+        }
+      )
+    );
+    elements.audio_track.append(block);
   });
 
   project.subtitles.forEach((cue, cueIndex) => {
@@ -742,8 +1007,10 @@ function renderTimeline({ keepScroll = false } = {}) {
     block.className = `cue-block ${cue.origin === "ai" ? "ai" : "human"}${cue.humanEdited ? " human-edited" : ""}`;
     block.classList.toggle("selected", cue.id === project.selectedCueId);
     block.dataset.id = cue.id;
+    block.dataset.lane = String(cue.lane);
     block.style.left = `${timelineX(range.startMs)}px`;
     block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    block.style.setProperty("--cue-color", cue.color || "#ffffff");
     const body = document.createElement("button");
     body.type = "button";
     body.className = "cue-block-body";
@@ -765,7 +1032,7 @@ function renderTimeline({ keepScroll = false } = {}) {
         : current.endOffsetMs;
       const nextProject = updateSubtitleCue(project, cue.id, { startOffsetMs, endOffsetMs });
       if (cueHasOverlap(nextProject, cue.id)) {
-        showToast("자막끼리는 겹칠 수 없습니다.", "error");
+        showToast("같은 자막 레인 안에서는 자막이 겹칠 수 없습니다.", "error");
         return;
       }
       applyProject(nextProject, { render: false });
@@ -796,7 +1063,7 @@ function renderTimeline({ keepScroll = false } = {}) {
         }
       )
     );
-    elements.caption_track.append(block);
+    (captionRows[cue.lane] || captionRows[0]).append(block);
   });
 
   updatePlayhead();
@@ -823,35 +1090,86 @@ function videoContentRect() {
 }
 
 function renderSubtitleOverlay() {
-  const cue = cueAtTimeline(project, project.playheadMs);
-  if (!cue || !mediaFile) {
-    elements.subtitle_overlay.hidden = true;
+  elements.subtitle_overlays.replaceChildren();
+  const cues = mediaFile ? cuesAtTimeline(project, project.playheadMs) : [];
+  if (cues.length === 0) {
     return;
   }
   const contentRect = videoContentRect();
-  elements.subtitle_overlay.hidden = false;
-  elements.subtitle_overlay.querySelector("span").textContent = cue.text || " ";
-  elements.subtitle_overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
-  elements.subtitle_overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
-  elements.subtitle_overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
-  elements.subtitle_overlay.style.fontSize = `${Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.052))}px`;
-  elements.subtitle_overlay.style.color = project.subtitleDefaults.color || "#ffffff";
-  elements.subtitle_overlay.style.background = project.subtitleDefaults.backgroundColor || "rgba(0, 0, 0, 0.58)";
-  const overlayRect = elements.subtitle_overlay.getBoundingClientRect();
-  const halfWidth = Math.min(overlayRect.width / 2, contentRect.width / 2);
-  const halfHeight = Math.min(overlayRect.height / 2, contentRect.height / 2);
-  const desiredLeft = contentRect.left + contentRect.width * cue.x;
-  const desiredTop = contentRect.top + contentRect.height * cue.y;
-  elements.subtitle_overlay.style.left = `${Math.min(
-    contentRect.left + contentRect.width - halfWidth,
-    Math.max(contentRect.left + halfWidth, desiredLeft)
-  )}px`;
-  elements.subtitle_overlay.style.top = `${Math.min(
-    contentRect.top + contentRect.height - halfHeight,
-    Math.max(contentRect.top + halfHeight, desiredTop)
-  )}px`;
-  elements.subtitle_overlay.classList.toggle("selected", cue.id === project.selectedCueId);
-  elements.subtitle_overlay.dataset.cueId = cue.id;
+  cues.forEach((cue) => {
+    const overlay = document.createElement("button");
+    overlay.type = "button";
+    overlay.className = "subtitle-overlay";
+    overlay.classList.toggle("selected", cue.id === project.selectedCueId);
+    overlay.dataset.cueId = cue.id;
+    overlay.setAttribute("aria-label", `${cue.lane + 1}번 레인 자막: ${cue.text || "빈 자막"}`);
+    const text = document.createElement("span");
+    text.textContent = cue.text || " ";
+    const indicator = document.createElement("i");
+    indicator.className = "drag-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    overlay.append(text, indicator);
+    overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
+    overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
+    overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
+    const fontSize = Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.052));
+    overlay.style.fontSize = `${fontSize}px`;
+    overlay.style.color = cue.color || project.subtitleDefaults.color || "#ffffff";
+    overlay.style.background = "transparent";
+    overlay.style.setProperty(
+      "--subtitle-stroke",
+      `${Math.max(1.5, contentRect.height * (project.subtitleDefaults.outlineWidth || 0.006))}px`
+    );
+    overlay.style.setProperty(
+      "--subtitle-outline-color",
+      project.subtitleDefaults.outlineColor || "#111111"
+    );
+    elements.subtitle_overlays.append(overlay);
+
+    const overlayRect = overlay.getBoundingClientRect();
+    const halfWidth = Math.min(overlayRect.width / 2, contentRect.width / 2);
+    const halfHeight = Math.min(overlayRect.height / 2, contentRect.height / 2);
+    const desiredLeft = contentRect.left + contentRect.width * cue.x;
+    const desiredTop = contentRect.top + contentRect.height * cue.y;
+    overlay.style.left = `${Math.min(
+      contentRect.left + contentRect.width - halfWidth,
+      Math.max(contentRect.left + halfWidth, desiredLeft)
+    )}px`;
+    overlay.style.top = `${Math.min(
+      contentRect.top + contentRect.height - halfHeight,
+      Math.max(contentRect.top + halfHeight, desiredTop)
+    )}px`;
+  });
+}
+
+function applyPreviewAudioSettings() {
+  const video = elements.preview_video;
+  if (!video || !project) {
+    return;
+  }
+  const region = audioRegionAtTimeline(project, project.playheadMs);
+  const targetGain = region?.muted ? 0 : (region?.gain ?? 1);
+  let blend = region ? 1 : 0;
+  if (region) {
+    const range = audioRegionTimelineRange(project, region);
+    const elapsedMs = Math.max(0, project.playheadMs - range.startMs);
+    const remainingMs = Math.max(0, range.endMs - project.playheadMs);
+    if (region.fadeInMs > 0) {
+      blend = Math.min(blend, Math.min(1, elapsedMs / region.fadeInMs));
+    }
+    if (region.fadeOutMs > 0) {
+      blend = Math.min(blend, Math.min(1, remainingMs / region.fadeOutMs));
+    }
+  }
+  const regionGain = 1 + (targetGain - 1) * blend;
+  video.muted = previewMuted || Boolean(region?.muted && region.fadeInMs === 0 && region.fadeOutMs === 0);
+  video.volume = Math.max(0, Math.min(1, previewVolume * regionGain));
+  elements.toggle_mute.classList.toggle("active", previewMuted);
+  elements.toggle_mute.title = region?.muted && !previewMuted
+    ? "현재 음성 설정 구간이 음소거됨"
+    : previewMuted
+      ? "미리보기 음소거 해제"
+      : "미리보기 음소거";
 }
 
 function updatePlayhead() {
@@ -864,6 +1182,7 @@ function updatePlayhead() {
   elements.current_time.textContent = formatTime(project.playheadMs);
   elements.duration_time.textContent = `/ ${formatTime(duration)}`;
   renderSubtitleOverlay();
+  applyPreviewAudioSettings();
 }
 
 function renderTransport() {
@@ -882,10 +1201,11 @@ function renderAll(options = {}) {
   renderHeader();
   renderMediaCard();
   renderClipList();
-  renderCueInspector();
+  renderPropertyInspector();
   renderCueList();
   renderTimeline(options);
   renderTransport();
+  applyPreviewAudioSettings();
 }
 
 function sourceMsToPreviewSeconds(sourceMs) {
@@ -1090,6 +1410,7 @@ function selectCue(cueId, { seek = false } = {}) {
     selectedClipId: cue.clipId
   };
   inspectorMode = "selected";
+  propertyInspectorMode = "caption";
   const range = cueTimelineRange(project, cue);
   if (seek && range) {
     void seekTimeline(range.startMs);
@@ -1104,23 +1425,58 @@ function cueHasOverlap(candidateProject, cueId) {
   ));
 }
 
-function addCueAtPlayhead() {
-  const mapping = mapTimelineToSource(project, project.playheadMs);
+function selectAudioRegion(regionId, { seek = false } = {}) {
+  const region = project.audioRegions.find((candidate) => candidate.id === regionId);
+  if (!region) {
+    return;
+  }
+  project = {
+    ...project,
+    selectedAudioRegionId: region.id,
+    selectedClipId: region.clipId
+  };
+  propertyInspectorMode = "audio";
+  const range = audioRegionTimelineRange(project, region);
+  if (seek && range) {
+    void seekTimeline(range.startMs);
+  }
+  renderAll({ keepScroll: true });
+  scheduleSave();
+}
+
+function addCueAtPlayhead({ timelineMs = project.playheadMs, lane: requestedLane = null } = {}) {
+  const mapping = mapTimelineToSource(project, timelineMs);
   if (!mapping) {
     showToast("자막을 추가할 영상 구간이 없습니다.", "error");
     return;
   }
-  const activeCue = cueAtTimeline(project, project.playheadMs);
-  if (activeCue) {
-    selectCue(activeCue.id);
-    elements.cue_text.focus();
-    showToast("현재 시각에는 이미 자막이 있습니다. 기존 자막의 끝을 먼저 조정해 주세요.", "error");
+  let workingProject = project;
+  const occupiedLanes = new Set(cuesAtTimeline(workingProject, mapping.timelineMs).map((cue) => cue.lane));
+  let lane = Number.isInteger(requestedLane) &&
+    requestedLane >= 0 &&
+    requestedLane < workingProject.subtitleLaneCount &&
+    !occupiedLanes.has(requestedLane)
+    ? requestedLane
+    : Array.from(
+      { length: workingProject.subtitleLaneCount },
+      (_, index) => index
+    ).find((candidate) => !occupiedLanes.has(candidate));
+  if (lane === undefined && workingProject.subtitleLaneCount < MAX_SUBTITLE_LANES) {
+    workingProject = addSubtitleLane(workingProject);
+    lane = workingProject.subtitleLaneCount - 1;
+  }
+  if (lane === undefined) {
+    showToast(`현재 시각의 ${MAX_SUBTITLE_LANES}개 자막 레인이 모두 사용 중입니다.`, "error");
     return;
   }
-  const clip = project.clips.find((candidate) => candidate.id === mapping.clipId);
+  const clip = workingProject.clips.find((candidate) => candidate.id === mapping.clipId);
   const startOffsetMs = mapping.clipOffsetMs;
-  const nextCueStartMs = project.subtitles
-    .filter((cue) => cue.clipId === clip.id && cue.startOffsetMs > startOffsetMs)
+  const nextCueStartMs = workingProject.subtitles
+    .filter((cue) => (
+      cue.clipId === clip.id &&
+      cue.lane === lane &&
+      cue.startOffsetMs > startOffsetMs
+    ))
     .map((cue) => cue.startOffsetMs)
     .sort((a, b) => a - b)[0] ?? clipDurationMs(clip);
   const endOffsetMs = Math.min(
@@ -1129,24 +1485,65 @@ function addCueAtPlayhead() {
     nextCueStartMs
   );
   if (endOffsetMs - startOffsetMs < 100) {
-    showToast("다음 자막과의 간격이 너무 짧습니다. 기존 자막 시각을 먼저 조정해 주세요.", "error");
+    showToast("이 레인의 다음 자막과 간격이 너무 짧습니다.", "error");
     return;
   }
-  const cue = createSubtitleCue(project, {
+  const cue = createSubtitleCue(workingProject, {
     clipId: clip.id,
     startOffsetMs,
     endOffsetMs,
     text: "새 자막",
+    lane,
+    y: Math.max(0.12, (workingProject.subtitleDefaults?.y || 0.84) - lane * 0.1),
     origin: "human"
   });
+  propertyInspectorMode = "caption";
+  inspectorMode = "selected";
   applyProject({
-    ...project,
-    subtitles: [...project.subtitles, cue],
+    ...workingProject,
+    subtitles: [...workingProject.subtitles, cue],
     selectedCueId: cue.id,
     selectedClipId: clip.id
   });
   elements.cue_text.focus();
   elements.cue_text.select();
+}
+
+function addAudioRegionAtTimeline(timelineMs = project.playheadMs) {
+  const mapping = mapTimelineToSource(project, timelineMs);
+  if (!mapping) {
+    showToast("음성을 조절할 영상 구간이 없습니다.", "error");
+    return;
+  }
+  const activeRegion = audioRegionAtTimeline(project, mapping.timelineMs);
+  if (activeRegion) {
+    selectAudioRegion(activeRegion.id);
+    showToast("현재 시각의 음성 설정 구간을 선택했습니다.");
+    return;
+  }
+  const clip = project.clips.find((candidate) => candidate.id === mapping.clipId);
+  const startOffsetMs = mapping.clipOffsetMs;
+  const nextRegionStartMs = project.audioRegions
+    .filter((region) => region.clipId === clip.id && region.startOffsetMs > startOffsetMs)
+    .map((region) => region.startOffsetMs)
+    .sort((a, b) => a - b)[0] ?? clipDurationMs(clip);
+  const endOffsetMs = Math.min(clipDurationMs(clip), startOffsetMs + 2_000, nextRegionStartMs);
+  if (endOffsetMs - startOffsetMs < 100) {
+    showToast("다음 음성 설정 구간과 간격이 너무 짧습니다.", "error");
+    return;
+  }
+  const region = createAudioRegion(project, {
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs
+  });
+  propertyInspectorMode = "audio";
+  applyProject({
+    ...project,
+    audioRegions: [...project.audioRegions, region],
+    selectedAudioRegionId: region.id,
+    selectedClipId: clip.id
+  });
 }
 
 function updateSelectedCue(patch, options) {
@@ -1156,11 +1553,27 @@ function updateSelectedCue(patch, options) {
   }
   const next = updateSubtitleCue(project, cue.id, patch, options);
   if (cueHasOverlap(next, cue.id)) {
-    showToast("자막끼리는 겹칠 수 없습니다. 시작·끝 시각을 다시 조정해 주세요.", "error");
+    showToast("같은 자막 레인 안에서는 자막이 겹칠 수 없습니다.", "error");
     renderCueInspector();
     return;
   }
   applyProject(next);
+}
+
+function updateSelectedAudioRegion(patch) {
+  const region = selectedAudioRegion();
+  if (!region) {
+    return false;
+  }
+  const next = updateAudioRegion(project, region.id, patch);
+  if (audioRegionHasOverlap(next, region.id)) {
+    showToast("음성 설정 구간끼리는 겹칠 수 없습니다.", "error");
+    renderAudioInspector();
+    return false;
+  }
+  applyProject(next);
+  applyPreviewAudioSettings();
+  return true;
 }
 
 async function chooseMediaFile() {
@@ -1645,7 +2058,11 @@ async function exportVideo() {
     return;
   }
   if (findSubtitleOverlaps(project).length > 0) {
-    showToast("서로 겹치는 자막이 있습니다. 자막 시작·끝 시각을 먼저 조정해 주세요.", "error", 0);
+    showToast("같은 레인 안에서 겹치는 자막이 있습니다. 자막 시각을 먼저 조정해 주세요.", "error", 0);
+    return;
+  }
+  if (findAudioRegionOverlaps(project).length > 0) {
+    showToast("서로 겹치는 음성 설정 구간이 있습니다. 구간 시각을 먼저 조정해 주세요.", "error", 0);
     return;
   }
   if (activeJobController || projectMutationLockCount > 0) {
@@ -1655,6 +2072,14 @@ async function exportVideo() {
 
   lockProjectMutations();
   try {
+    if (document.fonts?.load) {
+      try {
+        await document.fonts.load('800 48px "Pretendard"');
+      } catch (error) {
+        showToast(`자막 폰트를 준비하지 못했습니다: ${error.message}`, "error", 0);
+        return;
+      }
+    }
     const exportProject = cloneProject(project);
     let profile;
     try {
@@ -1827,36 +2252,108 @@ async function focusSourceTab({ seek = false } = {}) {
 }
 
 function bindOverlayDrag() {
-  elements.subtitle_overlay.addEventListener("pointerdown", (event) => {
-    const cueId = elements.subtitle_overlay.dataset.cueId;
+  elements.subtitle_overlays.addEventListener("pointerdown", (event) => {
+    const overlay = event.target.closest(".subtitle-overlay");
+    const cueId = overlay?.dataset.cueId;
     if (!cueId) {
       return;
     }
     event.preventDefault();
-    selectCue(cueId);
+    const cue = project.subtitles.find((candidate) => candidate.id === cueId);
+    project = {
+      ...project,
+      selectedCueId: cueId,
+      selectedClipId: cue.clipId
+    };
+    propertyInspectorMode = "caption";
+    inspectorMode = "selected";
+    elements.subtitle_overlays.querySelectorAll(".subtitle-overlay").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate === overlay);
+    });
+    elements.caption_tracks.querySelectorAll(".cue-block").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate.dataset.id === cueId);
+    });
+    renderPropertyInspector();
     beginPointerHistory();
-    elements.subtitle_overlay.setPointerCapture(event.pointerId);
+    const pointerId = event.pointerId;
+    overlay.setPointerCapture(pointerId);
     elements.stage.classList.add("dragging-subtitle");
     const move = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) {
+        return;
+      }
       const rect = elements.stage.getBoundingClientRect();
       const content = videoContentRect();
       const x = Math.max(0.05, Math.min(0.95, (moveEvent.clientX - rect.left - content.left) / content.width));
       const y = Math.max(0.05, Math.min(0.95, (moveEvent.clientY - rect.top - content.top) / content.height));
       project = updateSubtitleCue(project, cueId, { x, y });
       renderCueInspector();
-      renderSubtitleOverlay();
+      overlay.style.left = `${content.left + content.width * x}px`;
+      overlay.style.top = `${content.top + content.height * y}px`;
     };
-    const finish = () => {
-      elements.subtitle_overlay.removeEventListener("pointermove", move);
-      elements.subtitle_overlay.removeEventListener("pointerup", finish);
-      elements.subtitle_overlay.removeEventListener("pointercancel", finish);
+    const finish = (finishEvent) => {
+      if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
+        return;
+      }
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (overlay.hasPointerCapture(pointerId)) {
+        overlay.releasePointerCapture(pointerId);
+      }
       elements.stage.classList.remove("dragging-subtitle");
       endPointerHistory();
     };
-    elements.subtitle_overlay.addEventListener("pointermove", move);
-    elements.subtitle_overlay.addEventListener("pointerup", finish);
-    elements.subtitle_overlay.addEventListener("pointercancel", finish);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   });
+}
+
+function closeTimelineContextMenu() {
+  elements.timeline_context_menu.hidden = true;
+  timelineContext = null;
+}
+
+function openTimelineContextMenu(event) {
+  const cueBlock = event.target.closest(".cue-block");
+  const audioBlock = event.target.closest(".audio-block");
+  const captionRow = event.target.closest(".caption-track-row");
+  const inAudioTrack = Boolean(event.target.closest("#audio-track"));
+  if (!cueBlock && !audioBlock && !captionRow && !inAudioTrack) {
+    return;
+  }
+  event.preventDefault();
+  const timelineRect = elements.timeline_content.getBoundingClientRect();
+  const rawTimelineMs = (event.clientX - timelineRect.left) / pixelsPerSecond * 1000;
+  const timelineMs = Math.max(0, Math.min(projectDurationMs(project), Math.round(rawTimelineMs)));
+  const laneValue = cueBlock?.dataset.lane ?? captionRow?.dataset.lane;
+  timelineContext = {
+    timelineMs,
+    lane: laneValue === undefined ? null : Number(laneValue),
+    cueId: cueBlock?.dataset.id || null,
+    audioRegionId: audioBlock?.dataset.id || null,
+    kind: cueBlock || captionRow ? "caption" : "audio"
+  };
+  const captionContext = timelineContext.kind === "caption";
+  elements.context_add_cue.hidden = !captionContext;
+  elements.context_delete_cue.hidden = !timelineContext.cueId;
+  elements.context_add_lane.hidden = !captionContext || project.subtitleLaneCount >= MAX_SUBTITLE_LANES;
+  elements.context_add_audio.hidden = captionContext;
+  elements.context_delete_audio.hidden = !timelineContext.audioRegionId;
+  elements.timeline_context_menu.hidden = false;
+  elements.timeline_context_menu.style.left = `${event.clientX}px`;
+  elements.timeline_context_menu.style.top = `${event.clientY}px`;
+  const menuRect = elements.timeline_context_menu.getBoundingClientRect();
+  elements.timeline_context_menu.style.left = `${Math.max(
+    8,
+    Math.min(event.clientX, window.innerWidth - menuRect.width - 8)
+  )}px`;
+  elements.timeline_context_menu.style.top = `${Math.max(
+    8,
+    Math.min(event.clientY, window.innerHeight - menuRect.height - 8)
+  )}px`;
+  elements.timeline_context_menu.querySelector("button:not([hidden])")?.focus({ preventScroll: true });
 }
 
 function bindTimelineSeeking() {
@@ -1986,15 +2483,49 @@ function bindActions() {
   elements.preview_video.addEventListener("pause", () => elements.play_toggle.classList.remove("playing"));
   elements.preview_video.addEventListener("loadedmetadata", renderSubtitleOverlay);
   elements.toggle_mute.addEventListener("click", () => {
-    elements.preview_video.muted = !elements.preview_video.muted;
-    showToast(elements.preview_video.muted ? "미리보기 음소거" : "미리보기 음소거 해제");
+    previewMuted = !previewMuted;
+    applyPreviewAudioSettings();
+    showToast(previewMuted ? "미리보기 음소거" : "미리보기 음소거 해제");
   });
   elements.volume.addEventListener("input", () => {
-    elements.preview_video.volume = Number(elements.volume.value);
+    previewVolume = Number(elements.volume.value);
+    applyPreviewAudioSettings();
   });
 
-  elements.add_cue.addEventListener("click", addCueAtPlayhead);
-  elements.add_cue_top.addEventListener("click", addCueAtPlayhead);
+  elements.caption_mode_tab.addEventListener("click", () => {
+    propertyInspectorMode = "caption";
+    renderPropertyInspector();
+  });
+  elements.audio_mode_tab.addEventListener("click", () => {
+    propertyInspectorMode = "audio";
+    renderPropertyInspector();
+  });
+  for (const tab of [elements.caption_mode_tab, elements.audio_mode_tab]) {
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      const next = event.key === "ArrowLeft" || event.key === "Home"
+        ? elements.caption_mode_tab
+        : elements.audio_mode_tab;
+      next.click();
+      next.focus();
+    });
+  }
+
+  elements.add_cue.addEventListener("click", () => addCueAtPlayhead());
+  elements.add_cue_top.addEventListener("click", () => addCueAtPlayhead());
+  elements.add_audio_region.addEventListener("click", () => addAudioRegionAtTimeline());
+  elements.add_subtitle_lane.addEventListener("click", () => {
+    const next = addSubtitleLane(project);
+    if (next === project) {
+      showToast(`자막 레인은 최대 ${MAX_SUBTITLE_LANES}개까지 만들 수 있습니다.`);
+      return;
+    }
+    applyProject(next);
+    showToast(`${next.subtitleLaneCount}번째 자막 레인을 추가했습니다.`, "success");
+  });
   elements.cue_text.addEventListener("input", () => {
     const cue = selectedCue();
     if (cue) {
@@ -2073,16 +2604,22 @@ function bindActions() {
     }, "font-size");
   });
   elements.font_color.addEventListener("input", () => {
-    applyFieldProject({
-      ...project,
-      subtitleDefaults: {
-        ...project.subtitleDefaults,
-        color: elements.font_color.value
-      }
-    }, "font-color");
+    const cue = selectedCue();
+    if (cue) {
+      applyFieldProject(
+        updateSubtitleCue(project, cue.id, { color: elements.font_color.value }),
+        "font-color"
+      );
+    }
   });
   elements.font_size.addEventListener("change", () => endFieldEdit("font-size"));
   elements.font_color.addEventListener("change", () => endFieldEdit("font-color"));
+  elements.reset_font_color.addEventListener("click", () => {
+    const cue = selectedCue();
+    if (cue) {
+      updateSelectedCue({ color: project.subtitleDefaults.color || "#ffffff" });
+    }
+  });
   elements.delete_cue.addEventListener("click", () => {
     const cue = selectedCue();
     if (cue) {
@@ -2117,6 +2654,92 @@ function bindActions() {
       next.focus();
     });
   }
+
+  const restoreAudioTimeFields = () => {
+    const region = selectedAudioRegion();
+    const range = region ? audioRegionTimelineRange(project, region) : null;
+    if (!range) {
+      renderAudioInspector();
+      return;
+    }
+    elements.audio_start.value = formatTime(range.startMs, { compact: true });
+    elements.audio_end.value = formatTime(range.endMs, { compact: true });
+  };
+  elements.audio_start.addEventListener("change", () => {
+    const region = selectedAudioRegion();
+    const clip = project.clips.find((candidate) => candidate.id === region?.clipId);
+    const timelineMs = parseTime(elements.audio_start.value);
+    if (!region || !clip || timelineMs === null) {
+      restoreAudioTimeFields();
+      showToast("음성 구간 시작 시각 형식을 확인해 주세요.", "error");
+      return;
+    }
+    updateSelectedAudioRegion({ startOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAudioTimeFields();
+  });
+  elements.audio_end.addEventListener("change", () => {
+    const region = selectedAudioRegion();
+    const clip = project.clips.find((candidate) => candidate.id === region?.clipId);
+    const timelineMs = parseTime(elements.audio_end.value);
+    if (!region || !clip || timelineMs === null) {
+      restoreAudioTimeFields();
+      showToast("음성 구간 종료 시각 형식을 확인해 주세요.", "error");
+      return;
+    }
+    updateSelectedAudioRegion({ endOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAudioTimeFields();
+  });
+  elements.audio_volume.addEventListener("input", () => {
+    const region = selectedAudioRegion();
+    if (!region) {
+      return;
+    }
+    applyFieldProject(
+      updateAudioRegion(project, region.id, { gain: Number(elements.audio_volume.value) / 100 }),
+      "audio-volume"
+    );
+    applyPreviewAudioSettings();
+  });
+  elements.audio_volume.addEventListener("change", () => endFieldEdit("audio-volume"));
+  elements.audio_mute.addEventListener("click", () => {
+    const region = selectedAudioRegion();
+    if (region) {
+      updateSelectedAudioRegion({ muted: !region.muted });
+    }
+  });
+  elements.audio_fade_in.addEventListener("input", () => {
+    const region = selectedAudioRegion();
+    if (!region) {
+      return;
+    }
+    applyFieldProject(
+      updateAudioRegion(project, region.id, { fadeInMs: Number(elements.audio_fade_in.value) }),
+      "audio-fade-in"
+    );
+    applyPreviewAudioSettings();
+  });
+  elements.audio_fade_out.addEventListener("input", () => {
+    const region = selectedAudioRegion();
+    if (!region) {
+      return;
+    }
+    applyFieldProject(
+      updateAudioRegion(project, region.id, { fadeOutMs: Number(elements.audio_fade_out.value) }),
+      "audio-fade-out"
+    );
+    applyPreviewAudioSettings();
+  });
+  elements.audio_fade_in.addEventListener("change", () => endFieldEdit("audio-fade-in"));
+  elements.audio_fade_out.addEventListener("change", () => endFieldEdit("audio-fade-out"));
+  elements.reset_audio_region.addEventListener("click", () => {
+    updateSelectedAudioRegion({ gain: 1, muted: false, fadeInMs: 0, fadeOutMs: 0 });
+  });
+  elements.delete_audio_region.addEventListener("click", () => {
+    const region = selectedAudioRegion();
+    if (region) {
+      applyProject(deleteAudioRegion(project, region.id));
+    }
+  });
 
   elements.generate_captions.addEventListener("click", () => void generateCaptions());
   elements.asr_model.addEventListener("change", () => {
@@ -2156,6 +2779,51 @@ function bindActions() {
     renderTimeline();
   });
 
+  elements.caption_tracks.addEventListener("contextmenu", openTimelineContextMenu);
+  elements.audio_track.addEventListener("contextmenu", openTimelineContextMenu);
+  elements.context_add_cue.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      addCueAtPlayhead({ timelineMs: context.timelineMs, lane: context.lane });
+    }
+  });
+  elements.context_add_audio.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      addAudioRegionAtTimeline(context.timelineMs);
+    }
+  });
+  elements.context_delete_cue.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context?.cueId) {
+      applyProject(deleteSubtitleCue(project, context.cueId));
+    }
+  });
+  elements.context_delete_audio.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context?.audioRegionId) {
+      applyProject(deleteAudioRegion(project, context.audioRegionId));
+    }
+  });
+  elements.context_add_lane.addEventListener("click", () => {
+    closeTimelineContextMenu();
+    const next = addSubtitleLane(project);
+    if (next !== project) {
+      applyProject(next);
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!elements.timeline_context_menu.hidden && !event.target.closest("#timeline-context-menu")) {
+      closeTimelineContextMenu();
+    }
+  });
+  elements.timeline_scroll.addEventListener("scroll", closeTimelineContextMenu, { passive: true });
+  window.addEventListener("blur", closeTimelineContextMenu);
+
   bindOverlayDrag();
   bindTimelineSeeking();
   window.addEventListener("resize", () => {
@@ -2167,6 +2835,11 @@ function bindActions() {
     const interactive = Boolean(event.target.closest(
       "button, a, input, textarea, select, [contenteditable='true'], [role='slider'], [role='tab']"
     ));
+    if (event.key === "Escape" && !elements.timeline_context_menu.hidden) {
+      event.preventDefault();
+      closeTimelineContextMenu();
+      return;
+    }
     if (!elements.job_dialog.hidden) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -2263,13 +2936,28 @@ async function initialize() {
   await saveProject(project);
   await initializeSourceBinding();
   renderAll();
+  if (document.fonts?.load) {
+    void document.fonts
+      .load('800 48px "Pretendard"')
+      .then(renderSubtitleOverlay)
+      .catch((error) => {
+        console.warn("Pretendard 폰트를 미리 불러오지 못했습니다.", error);
+      });
+  }
   if (seedMergeError) {
     showToast(`최신 선택 구간을 반영하지 못했습니다: ${seedMergeError.message}`, "error", 0);
   }
   await restoreMedia();
   if (findSubtitleOverlaps(project).length > 0) {
     showToast(
-      "이 프로젝트에는 서로 겹치는 자막이 있습니다. 내보내기 전에 자막 시작·끝 시각을 조정해 주세요.",
+      "이 프로젝트에는 같은 레인 안에서 겹치는 자막이 있습니다. 자막 시각을 조정해 주세요.",
+      "error",
+      0
+    );
+  }
+  if (findAudioRegionOverlaps(project).length > 0) {
+    showToast(
+      "이 프로젝트에는 서로 겹치는 음성 설정 구간이 있습니다. 구간 시각을 조정해 주세요.",
       "error",
       0
     );
