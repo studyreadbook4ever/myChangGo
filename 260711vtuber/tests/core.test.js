@@ -13,6 +13,7 @@ import {
   generateCodexStartHere,
   generateEditPrompt,
   normalizeState,
+  normalizeWorkspaceMeta,
   parseTimestamp,
   resolveCreatorPolicies,
   sanitizeFileName,
@@ -38,9 +39,10 @@ test("초를 uniform HH:MM:SS로 표시한다", () => {
   assert.equal(formatTimestamp(0), "00:00:00");
   assert.equal(formatTimestamp(3723), "01:02:03");
   assert.equal(formatTimestamp(90.5, { precision: 1 }), "00:01:30.5");
+  assert.equal(formatTimestamp(83.456, { precision: 3 }), "00:01:23.456");
 });
 
-test("끝이 시작보다 뒤고 설명이 있어야 구간을 저장한다", () => {
+test("끝이 시작보다 뒤면 메모 없이도 구간을 저장한다", () => {
   assert.deepEqual(validateSegmentInput({ startText: "00:01:00", endText: "00:01:30", description: "반응까지 살려줘" }), {
     ok: true,
     startSeconds: 60,
@@ -48,7 +50,12 @@ test("끝이 시작보다 뒤고 설명이 있어야 구간을 저장한다", ()
     description: "반응까지 살려줘"
   });
   assert.equal(validateSegmentInput({ startText: "20", endText: "10", description: "설명" }).ok, false);
-  assert.equal(validateSegmentInput({ startText: "10", endText: "20", description: "" }).ok, false);
+  assert.deepEqual(validateSegmentInput({ startText: "10", endText: "20", description: "" }), {
+    ok: true,
+    startSeconds: 10,
+    endSeconds: 20,
+    description: ""
+  });
 });
 
 test("저장 상태를 기본 스키마와 병합해 복구한다", () => {
@@ -58,6 +65,33 @@ test("저장 상태를 기본 스키마와 병합해 복구한다", () => {
   assert.equal(restored.source.channelId, "channel");
   assert.deepEqual(restored.segments, []);
   assert.equal(createInitialState().schemaVersion, 1);
+  assert.equal(createInitialState().editorProjectId, "");
+});
+
+test("다중 창 저장 메타데이터를 안전한 epoch와 revision으로 복구한다", () => {
+  assert.deepEqual(normalizeWorkspaceMeta(null), {
+    resetEpoch: "initial",
+    revision: 0,
+    writerId: ""
+  });
+  assert.deepEqual(normalizeWorkspaceMeta({
+    resetEpoch: "reset-2",
+    revision: 17,
+    writerId: "panel-b"
+  }), {
+    resetEpoch: "reset-2",
+    revision: 17,
+    writerId: "panel-b"
+  });
+  assert.deepEqual(normalizeWorkspaceMeta({
+    resetEpoch: "",
+    revision: -1,
+    writerId: 42
+  }), {
+    resetEpoch: "initial",
+    revision: 0,
+    writerId: ""
+  });
 });
 
 test("파일명에 사용할 수 없는 문자를 제거한다", () => {
@@ -129,8 +163,9 @@ test("내장 MD와 사용자 입력을 포함한 uniform Codex 프롬프트를 �
   const metadata = JSON.parse(jsonBlock[1]);
   assert.equal(metadata.schema, SCHEMA_VERSION);
   assert.equal(metadata.segments.length, 2);
-  assert.equal(metadata.segments[0].anchorStartSeconds, 600);
-  assert.equal(metadata.segments[1].userDescription, "스트리머가 실수를 인정하는 두 번째 사건");
+  assert.equal(metadata.segments[0].selectionStartSeconds, 600);
+  assert.equal(metadata.segments[0].authority, "USER");
+  assert.equal(metadata.segments[1].userNote, "스트리머가 실수를 인정하는 두 번째 사건");
   assert.equal(metadata.policyGates.revenueHumanReview, "PENDING");
   assert.equal(metadata.policyGates.musicHumanReview, "PENDING");
   assert.equal(metadata.policyGates.automaticPublication, "BLOCKED");
@@ -159,7 +194,8 @@ test("Codex 작업 폴더용 manifest를 uniform 규격으로 만든다", () => 
   assert.equal(manifest.status, "AWAITING_SOURCE_VIDEO");
   assert.equal(manifest.inputs.fullVideo.expectedCount, 1);
   assert.equal(manifest.inputs.fullVideo.status, "USER_TO_ADD");
-  assert.equal(manifest.userIntent.anchors[0].anchorStartSeconds, 100);
+  assert.equal(manifest.userIntent.selections[0].selectionStartSeconds, 100);
+  assert.equal(manifest.userIntent.selections[0].authority, "USER");
   assert.equal(manifest.inputs.creatorPolicyIndex, "creator-policy-index.json");
   assert.equal(manifest.inputs.creatorPolicyCache.authority, "FALLBACK_ONLY");
   assert.equal(manifest.policyGates.revenueHumanReview, "PENDING");

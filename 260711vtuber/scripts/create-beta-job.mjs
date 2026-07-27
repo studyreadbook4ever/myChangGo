@@ -1,6 +1,7 @@
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import {
   buildCodexJobManifest,
@@ -11,7 +12,7 @@ import {
   resolveCreatorPolicies
 } from "../extension/lib/core.js";
 
-const root = path.resolve(import.meta.dirname, "..");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const jobDirectory = path.resolve(process.argv[2] || path.join(root, "beta-runs", "synthetic-codex-job"));
 const referencePath = path.resolve(process.argv[3] || path.join(root, "beta-runs", "synthetic-reference.json"));
 const videoPath = path.join(jobDirectory, "synthetic-full-video.mp4");
@@ -54,16 +55,16 @@ if (!semanticSession || !policySession) {
 
 const segments = [
   createSegment({
-    id: "beta-semantic-anchor",
-    startText: (semanticSession.startSeconds + 0.8).toFixed(3),
-    endText: (semanticSession.endSeconds - 1.2).toFixed(3),
-    description: "타임스탬프를 그대로 자르지 말고, 질문이 시작되는 순간부터 설명이 끝나고 검수자의 즉각적인 반응이 마무리될 때까지 하나의 의미 세션으로 확장해줘."
+    id: "beta-semantic-selection",
+    startText: semanticSession.startSeconds.toFixed(3),
+    endText: semanticSession.endSeconds.toFixed(3),
+    description: "사용자가 선택한 이 경계를 그대로 유지하고, 범위 안의 한국어 자막 초안을 만들어줘."
   }),
   createSegment({
-    id: "beta-policy-anchor",
-    startText: (policySession.startSeconds + 0.7).toFixed(3),
-    endText: (policySession.endSeconds - 1.0).toFixed(3),
-    description: "수익과 음원 자동 승인 여부를 묻는 질문부터 사람 재확인과 제3자 정책 교차확인 답변, 비공개 검수본으로 끝내자는 결론까지 포함해줘."
+    id: "beta-policy-selection",
+    startText: policySession.startSeconds.toFixed(3),
+    endText: policySession.endSeconds.toFixed(3),
+    description: "이 확정 구간 안에서 정책 관련 발화를 받아쓰고 비공개 검수본으로 만들어줘."
   })
 ];
 
@@ -79,7 +80,7 @@ const source = {
   observedAt: generatedAt
 };
 const projectName = "키리누키 Codex 합성 E2E 베타";
-const globalInstruction = "합성 원본을 사용한 비공개 베타다. 두 관심 앵커를 각각 의미가 완결되는 대화 세션으로 확장하고, 원본 시간순으로 연결하며 한국어 자막을 입혀라.";
+const globalInstruction = "합성 원본을 사용한 비공개 베타다. 두 사용자 확정 구간의 경계와 저장 순서를 바꾸지 말고 한국어 자막을 입혀라.";
 const prompt = generateEditPrompt({
   projectName,
   source,

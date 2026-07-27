@@ -5,6 +5,7 @@
   globalThis.__chzzkKirinukiBridgeLoaded = true;
 
   let liveMetadataCache = null;
+  let vodMetadataCache = null;
 
   const isVisible = (element) => {
     if (!(element instanceof HTMLElement)) {
@@ -44,6 +45,16 @@
   const inferIdentifiers = () => {
     const parts = location.pathname.split("/").filter(Boolean);
     const uuidLike = parts.find((part) => /^[a-f0-9]{32}$/i.test(part));
+    const linkedChannelId = [...document.querySelectorAll("a[href]")]
+      .map((anchor) => {
+        try {
+          return new URL(anchor.href, location.origin).pathname.split("/").filter(Boolean)
+            .find((part) => /^[a-f0-9]{32}$/i.test(part));
+        } catch {
+          return "";
+        }
+      })
+      .find(Boolean);
     const videoIndex = parts.indexOf("video");
     const liveIndex = parts.indexOf("live");
     const clipsIndex = parts.indexOf("clips");
@@ -63,7 +74,7 @@
     }
 
     return {
-      channelId: uuidLike ?? "",
+      channelId: uuidLike ?? linkedChannelId ?? "",
       contentId,
       contentType
     };
@@ -129,6 +140,32 @@
     }
   };
 
+  const fetchVodMetadata = async (videoId) => {
+    if (!videoId) {
+      return null;
+    }
+    if (
+      vodMetadataCache?.videoId === videoId &&
+      Date.now() - vodMetadataCache.fetchedAt < 60_000
+    ) {
+      return vodMetadataCache.value;
+    }
+
+    try {
+      const endpoint = `https://api.chzzk.naver.com/service/v3/videos/${encodeURIComponent(videoId)}`;
+      const response = await fetch(endpoint, { credentials: "include", cache: "no-store" });
+      if (!response.ok) {
+        return null;
+      }
+      const payload = await response.json();
+      const value = payload?.code === 200 && payload?.content ? payload.content : null;
+      vodMetadataCache = { videoId, fetchedAt: Date.now(), value };
+      return value;
+    } catch {
+      return null;
+    }
+  };
+
   const parseChzzkOpenDate = (value) => {
     if (!value) {
       return null;
@@ -172,12 +209,21 @@
     const identifiers = inferIdentifiers();
     const pageTitle = cleanTitle(readMeta("meta[property='og:title']", "meta[name='twitter:title']") || document.title);
     const titleParts = pageTitle.split(/\s+-\s+/).map((part) => part.trim()).filter(Boolean);
-    const liveMetadata = identifiers.contentType === "live"
-      ? await fetchLiveMetadata(identifiers.channelId)
-      : null;
+    const [liveMetadata, vodMetadata] = await Promise.all([
+      identifiers.contentType === "live"
+        ? fetchLiveMetadata(identifiers.channelId)
+        : null,
+      identifiers.contentType === "vod"
+        ? fetchVodMetadata(identifiers.contentId)
+        : null
+    ]);
+    const metadataChannel = liveMetadata?.channel || vodMetadata?.channel || null;
+    const channelId = metadataChannel?.channelId || identifiers.channelId;
     const hasCreatorTitlePair = ["live", "vod", "clip"].includes(identifiers.contentType) && titleParts.length >= 2;
-    const streamerName = hasCreatorTitlePair ? titleParts[0] : "";
-    const broadcastTitle = liveMetadata?.liveTitle || (hasCreatorTitlePair ? titleParts.slice(1).join(" - ") : pageTitle);
+    const streamerName = metadataChannel?.channelName || (hasCreatorTitlePair ? titleParts[0] : "");
+    const broadcastTitle = liveMetadata?.liveTitle
+      || vodMetadata?.videoTitle
+      || (hasCreatorTitlePair ? titleParts.slice(1).join(" - ") : pageTitle);
     const description = readMeta("meta[property='og:description']", "meta[name='description']");
     const imageUrl = readMeta("meta[property='og:image']", "meta[name='twitter:image']");
     const capturedAt = new Date().toISOString();
@@ -194,26 +240,70 @@
       broadcastTitle,
       description,
       imageUrl,
-      channelId: identifiers.channelId,
+      channelId,
       contentId: identifiers.contentId,
       contentType: identifiers.contentType,
-      broadcastStartedAt: liveMetadata?.openDate || "",
-      clipActive: typeof liveMetadata?.clipActive === "boolean" ? liveMetadata.clipActive : null,
+      broadcastStartedAt: liveMetadata?.openDate || vodMetadata?.liveOpenDate || "",
+      clipActive: typeof (liveMetadata?.clipActive ?? vodMetadata?.clipActive) === "boolean"
+        ? (liveMetadata?.clipActive ?? vodMetadata?.clipActive)
+        : null,
       timeMachineActive: typeof liveMetadata?.timeMachineActive === "boolean" ? liveMetadata.timeMachineActive : null,
-      category: liveMetadata?.liveCategoryValue || "",
+      category: liveMetadata?.liveCategoryValue || vodMetadata?.videoCategoryValue || "",
       capturedAt,
       player
     };
   };
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type !== "KIRINUKI_GET_CONTEXT") {
-      return false;
+  const applyPlayerCommand = async (message) => {
+    const video = choosePrimaryVideo();
+    if (!video) {
+      throw new Error("치지직 영상 플레이어를 찾지 못했습니다.");
     }
+    if (message.action === "play") {
+      await video.play();
+    } else if (message.action === "pause") {
+      video.pause();
+    } else if (message.action === "seek") {
+      if (!Number.isFinite(message.positionSeconds) || message.positionSeconds < 0) {
+        throw new Error("이동할 영상 시각이 올바르지 않습니다.");
+      }
+      const identifiers = inferIdentifiers();
+      let target = message.positionSeconds;
+      if (identifiers.contentType === "live") {
+        const context = await getContext();
+        const normalizedPosition = context.player?.positionSeconds;
+        if (Number.isFinite(normalizedPosition)) {
+          target = video.currentTime + message.positionSeconds - normalizedPosition;
+        }
+      }
+      if (video.seekable.length > 0) {
+        const start = video.seekable.start(0);
+        const end = video.seekable.end(video.seekable.length - 1);
+        target = Math.min(end, Math.max(start, target));
+      }
+      video.currentTime = target;
+    } else {
+      throw new Error(`지원하지 않는 플레이어 명령입니다: ${message.action}`);
+    }
+    return {
+      paused: video.paused,
+      currentTime: video.currentTime
+    };
+  };
 
-    void getContext()
-      .then((context) => sendResponse({ ok: true, context }))
-      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-    return true;
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "KIRINUKI_GET_CONTEXT") {
+      void getContext()
+        .then((context) => sendResponse({ ok: true, context }))
+        .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      return true;
+    }
+    if (message?.type === "KIRINUKI_PLAYER_COMMAND") {
+      void applyPlayerCommand(message)
+        .then((player) => sendResponse({ ok: true, player }))
+        .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      return true;
+    }
+    return false;
   });
 })();

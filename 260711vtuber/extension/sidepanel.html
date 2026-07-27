@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>치지직 키리누키 프롬프트</title>
+    <title>치지직 키리누키 스튜디오</title>
     <link rel="stylesheet" href="sidepanel.css">
   </head>
   <body>
@@ -13,8 +13,8 @@
         <span></span><span></span>
       </div>
       <div class="brand-copy">
-        <p class="eyebrow">CHZZK EDIT BRIEF</p>
-        <h1>키리누키 프롬프트</h1>
+        <p class="eyebrow">CHZZK KIRINUKI</p>
+        <h1>키리누키 스튜디오</h1>
       </div>
       <span id="connection-badge" class="badge badge-muted">확인 중</span>
     </header>
@@ -116,8 +116,8 @@
         <p id="timestamp-help" class="help-text">직접 수정할 수 있습니다. 형식: HH:MM:SS, MM:SS 또는 초</p>
 
         <label class="field description-field">
-          <span>이 구간의 특징과 원하는 편집 <strong>필수</strong></span>
-          <textarea id="segment-description" rows="5" placeholder="예: 스트리머가 실수를 깨닫고 당황한 뒤 채팅이 폭발하는 장면. 실수 전의 짧은 설정과 반응이 끝나는 지점까지 살려줘."></textarea>
+          <span>이 구간의 메모 <em>선택</em></span>
+          <textarea id="segment-description" rows="4" placeholder="예: 당황한 반응. 메모 없이 시간만 저장해도 됩니다."></textarea>
           <span class="character-count"><span id="description-count">0</span>자</span>
         </label>
 
@@ -144,14 +144,18 @@
       <section class="card output-card" aria-labelledby="output-title">
         <div class="section-heading">
           <div>
-            <p class="step-label">OUTPUT</p>
-            <h2 id="output-title">Codex 작업 넘기기</h2>
+            <p class="step-label">STUDIO</p>
+            <h2 id="output-title">컷·자막 편집하기</h2>
           </div>
           <span id="policy-match-badge" class="badge badge-policy">정책 확인 중</span>
         </div>
-        <p class="section-description">프롬프트만 확인하거나, 정책·작업 규칙까지 포함한 폴더를 만들어 나중에 풀영상 하나만 넣고 Codex에서 바로 시작할 수 있습니다.</p>
+        <p class="section-description">저장한 구간을 전체화면 편집기로 넘겨 원본 연결, 로컬 AI 한글 자막, 자막 시간·위치 검수와 영상 출력을 한 흐름에서 진행합니다.</p>
         <div class="output-actions">
-          <button id="create-codex-job" class="button button-primary button-wide" type="button">
+          <button id="open-editor" class="button button-primary button-wide" type="button">
+            통합 편집기에서 열기
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4Z"/><path d="M4 15h16M9 15v4M15 15v4"/><path d="m10 8 5 2.5-5 2.5Z"/></svg>
+          </button>
+          <button id="create-codex-job" class="button button-secondary button-wide" type="button">
             Codex 작업폴더 만들기
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M12 12v5m-2.5-2.5h5"/></svg>
           </button>
@@ -160,7 +164,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
           </button>
         </div>
-        <p class="pipeline-note">새 하위 폴더에 작업 요청서, 방송인↔정책 링크 인덱스, 안전 규칙과 시작 안내를 저장합니다. 선택 캐시는 별도 폴더에 두며 영상은 저장하지 않습니다.</p>
+        <p class="pipeline-note">영상 바이트는 메시지로 옮기지 않습니다. 편집기에서 사용 권한이 있는 로컬 원본을 직접 연결하며, AI는 사용자가 고른 범위를 변경하지 않습니다.</p>
 
         <div id="prompt-result" class="prompt-result" hidden>
           <div class="prompt-meta">
@@ -176,7 +180,7 @@
         </div>
       </section>
 
-      <button id="reset-project" class="reset-button" type="button">현재 프로젝트 초기화</button>
+      <button id="reset-project" class="reset-button" type="button">모든 로컬 작업 초기화</button>
     </main>
 
     <div id="status-bar" class="status-bar" role="status" aria-live="polite" hidden></div>

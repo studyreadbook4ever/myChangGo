@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
-const root = path.resolve(import.meta.dirname, "..");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const policyPath = path.join(root, "extension", "knowledge", "default-creator-policy.md");
 const policy = await readFile(policyPath, "utf8");
 const links = [...new Set(policy.match(/https:\/\/cafe\.naver\.com\/[A-Za-z0-9_-]+\/\d+/g) ?? [])];

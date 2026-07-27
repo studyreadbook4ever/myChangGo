@@ -1,5 +1,6 @@
 import {
   STORAGE_KEY,
+  WORKSPACE_META_KEY,
   buildCodexJobManifest,
   compileCreatorPolicyMarkdown,
   createInitialState,
@@ -8,11 +9,16 @@ import {
   generateCodexStartHere,
   generateEditPrompt,
   normalizeState,
+  normalizeWorkspaceMeta,
   parseTimestamp,
   resolveCreatorPolicies,
   sanitizeFileName,
   validateSegmentInput
 } from "./lib/core.js";
+import {
+  captureStateSourceConflict,
+  sourceSessionIdentity
+} from "./lib/editor-core.js";
 
 const elements = {
   connectionBadge: document.querySelector("#connection-badge"),
@@ -42,6 +48,7 @@ const elements = {
   segmentsList: document.querySelector("#segments-list"),
   segmentTemplate: document.querySelector("#segment-template"),
   generatePrompt: document.querySelector("#generate-prompt"),
+  openEditor: document.querySelector("#open-editor"),
   createCodexJob: document.querySelector("#create-codex-job"),
   policyMatchBadge: document.querySelector("#policy-match-badge"),
   promptResult: document.querySelector("#prompt-result"),
@@ -65,6 +72,16 @@ let lastPrompt = "";
 let saveTimer = null;
 let statusTimer = null;
 let refreshTimer = null;
+let contextRequestSequence = 0;
+let stateGeneration = 0;
+let resetInProgress = false;
+let persistenceChain = Promise.resolve();
+let workspaceSyncChain = Promise.resolve();
+let workspaceMeta = normalizeWorkspaceMeta(null);
+const panelWriterId = crypto.randomUUID();
+let dirtyFieldSequence = 0;
+const dirtyFields = new Map();
+let lastPersistedStateSignature = "";
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -80,21 +97,204 @@ function setStatus(message, type = "info", timeout = 4200) {
   }
 }
 
-async function persistState() {
+function assertOperationCurrent(generation) {
+  if (resetInProgress || generation !== stateGeneration) {
+    throw new DOMException("초기화로 이전 작업이 취소되었습니다.", "AbortError");
+  }
+}
+
+function markDirtyField(field, value) {
+  dirtyFieldSequence += 1;
+  dirtyFields.set(field, {
+    version: dirtyFieldSequence,
+    value: structuredClone(value)
+  });
+}
+
+function mergeDirtyFields(latestState) {
+  const merged = normalizeState(latestState);
+  for (const [field, entry] of dirtyFields) {
+    if (field === "projectName") {
+      merged.projectName = entry.value;
+    } else if (field === "globalInstruction") {
+      merged.globalInstruction = entry.value;
+    } else if (field === "streamerName") {
+      merged.source.streamerName = entry.value;
+    } else if (field === "broadcastTitle") {
+      merged.source.broadcastTitle = entry.value;
+    } else if (field === "draft") {
+      merged.draft = structuredClone(entry.value);
+    }
+  }
+  return merged;
+}
+
+function stateSignature(value) {
+  const normalized = normalizeState(value);
+  const { updatedAt: _updatedAt, ...stableState } = normalized;
+  return JSON.stringify(stableState);
+}
+
+function persistState({ allowDuringReset = false } = {}) {
+  const generation = stateGeneration;
+  const dirtyVersions = new Map(
+    [...dirtyFields].map(([field, entry]) => [field, entry.version])
+  );
+  if (resetInProgress && !allowDuringReset) {
+    return Promise.resolve(false);
+  }
+  const signature = stateSignature(state);
+  if (signature === lastPersistedStateSignature && dirtyFields.size === 0) {
+    return Promise.resolve(false);
+  }
   state.updatedAt = new Date().toISOString();
-  await chrome.storage.local.set({ [STORAGE_KEY]: state });
+  const snapshot = structuredClone(state);
+  const operation = persistenceChain
+    .catch(() => {})
+    .then(async () => {
+      if (
+        generation !== stateGeneration ||
+        (resetInProgress && !allowDuringReset)
+      ) {
+        return false;
+      }
+      const expectedMeta = { ...workspaceMeta };
+      const response = await chrome.runtime.sendMessage({
+        type: "KIRINUKI_PERSIST_STATE",
+        state: snapshot,
+        writerId: panelWriterId,
+        expectedResetEpoch: expectedMeta.resetEpoch,
+        expectedRevision: expectedMeta.revision
+      });
+      if (!response?.ok) {
+        if (response?.workspaceMeta) {
+          queueWorkspaceSync(response.workspaceMeta);
+        }
+        throw new DOMException(
+          response?.error || "프로젝트 상태를 저장하지 못했습니다.",
+          response?.workspaceMeta ? "AbortError" : "OperationError"
+        );
+      }
+      const responseMeta = normalizeWorkspaceMeta(response.workspaceMeta);
+      const responseIsCurrent = (
+        responseMeta.resetEpoch === workspaceMeta.resetEpoch &&
+        responseMeta.revision >= workspaceMeta.revision
+      );
+      if (responseIsCurrent) {
+        workspaceMeta = responseMeta;
+        for (const [field, version] of dirtyVersions) {
+          if (dirtyFields.get(field)?.version === version) {
+            dirtyFields.delete(field);
+          }
+        }
+        lastPersistedStateSignature = signature;
+      }
+      return true;
+    });
+  persistenceChain = operation;
+  return operation;
 }
 
 function schedulePersist() {
+  if (resetInProgress) {
+    return;
+  }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    void persistState().catch((error) => setStatus(`저장 실패: ${error.message}`, "error"));
+    void persistState().catch((error) => {
+      if (error.name !== "AbortError") {
+        setStatus(`저장 실패: ${error.message}`, "error");
+      }
+    });
   }, 220);
 }
 
 async function loadState() {
-  const stored = await chrome.storage.local.get(STORAGE_KEY);
+  const stored = await chrome.storage.local.get([STORAGE_KEY, WORKSPACE_META_KEY]);
   state = normalizeState(stored[STORAGE_KEY]);
+  workspaceMeta = normalizeWorkspaceMeta(stored[WORKSPACE_META_KEY]);
+  lastPersistedStateSignature = stateSignature(state);
+}
+
+function queueWorkspaceSync(expectedMeta, { forceApply = false } = {}) {
+  const expected = normalizeWorkspaceMeta(expectedMeta);
+  workspaceSyncChain = workspaceSyncChain
+    .catch(() => {})
+    .then(async () => {
+      const stored = await chrome.storage.local.get([STORAGE_KEY, WORKSPACE_META_KEY]);
+      const latestMeta = normalizeWorkspaceMeta(stored[WORKSPACE_META_KEY]);
+      if (
+        latestMeta.revision < expected.revision ||
+        (
+          latestMeta.revision === workspaceMeta.revision &&
+          latestMeta.resetEpoch === workspaceMeta.resetEpoch
+        )
+      ) {
+        return;
+      }
+      if (latestMeta.writerId === panelWriterId && !forceApply) {
+        workspaceMeta = latestMeta;
+        return;
+      }
+
+      const resetChanged = latestMeta.resetEpoch !== workspaceMeta.resetEpoch;
+      workspaceMeta = latestMeta;
+      stateGeneration += 1;
+      contextRequestSequence += 1;
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      if (resetChanged) {
+        dirtyFields.clear();
+      }
+      const storedState = normalizeState(stored[STORAGE_KEY]);
+      lastPersistedStateSignature = stateSignature(storedState);
+      const preserveDirtyInput = !resetChanged && dirtyFields.size > 0;
+      state = preserveDirtyInput ? mergeDirtyFields(storedState) : storedState;
+      sourceConflict = currentContext
+        ? captureStateSourceConflict(state, contextAsSource(currentContext))
+        : false;
+      lastPrompt = "";
+      elements.promptResult.hidden = true;
+      elements.promptPreview.value = "";
+      syncStateToForm();
+      renderSegments();
+      renderSource();
+      setStatus(
+        resetChanged
+          ? "다른 창에서 모든 로컬 작업을 초기화했습니다."
+          : preserveDirtyInput
+            ? "다른 창의 변경을 반영하고 현재 입력은 보존했습니다."
+            : "다른 창의 최신 프로젝트 변경을 반영했습니다.",
+        "info",
+        6500
+      );
+      if (preserveDirtyInput) {
+        schedulePersist();
+      }
+    });
+  return workspaceSyncChain;
+}
+
+function handleStorageChange(changes, areaName) {
+  if (areaName !== "local" || !changes[WORKSPACE_META_KEY]) {
+    return;
+  }
+  const nextMeta = normalizeWorkspaceMeta(changes[WORKSPACE_META_KEY].newValue);
+  const resetChanged = nextMeta.resetEpoch !== workspaceMeta.resetEpoch;
+  if (
+    nextMeta.revision < workspaceMeta.revision ||
+    (
+      nextMeta.revision === workspaceMeta.revision &&
+      nextMeta.resetEpoch === workspaceMeta.resetEpoch
+    )
+  ) {
+    return;
+  }
+  if (nextMeta.writerId === panelWriterId && !resetChanged) {
+    workspaceMeta = nextMeta;
+    return;
+  }
+  void queueWorkspaceSync(nextMeta, { forceApply: resetChanged });
 }
 
 async function loadMarkdown(path) {
@@ -187,19 +387,27 @@ function clearDraft() {
   renderDraft();
 }
 
+const PERSISTED_SOURCE_KEYS = [
+  "platform",
+  "url",
+  "canonicalUrl",
+  "channelId",
+  "contentId",
+  "contentType",
+  "streamerName",
+  "broadcastTitle",
+  "broadcastStartedAt",
+  "clipActive",
+  "timeMachineActive",
+  "category"
+];
+
+function samePersistedSource(left, right) {
+  return PERSISTED_SOURCE_KEYS.every((key) => Object.is(left?.[key], right?.[key]));
+}
+
 function sourceIdentity(source) {
-  if (source.contentId) {
-    return `${source.contentType}:${source.contentId}`;
-  }
-  if (source.channelId) {
-    return `${source.contentType}:${source.channelId}`;
-  }
-  try {
-    const url = new URL(source.canonicalUrl || source.url);
-    return `${source.contentType}:${url.origin}${url.pathname.replace(/\/$/, "")}`;
-  } catch {
-    return "";
-  }
+  return sourceSessionIdentity(source);
 }
 
 function contextAsSource(context) {
@@ -224,22 +432,24 @@ function applyContextToProject(context) {
   const nextSource = contextAsSource(context);
   const previousIdentity = sourceIdentity(state.source);
   const nextIdentity = sourceIdentity(nextSource);
-  sourceConflict = Boolean(
-    state.segments.length > 0 &&
-    previousIdentity &&
-    nextIdentity &&
-    previousIdentity !== nextIdentity
-  );
+  sourceConflict = captureStateSourceConflict(state, nextSource);
 
   if (!sourceConflict) {
     const preserveStreamer = state.source.streamerName;
     const preserveTitle = state.source.broadcastTitle;
     const sourceChanged = previousIdentity && nextIdentity && previousIdentity !== nextIdentity;
-    state.source = {
+    const candidateSource = {
       ...nextSource,
       streamerName: sourceChanged ? nextSource.streamerName : (preserveStreamer || nextSource.streamerName),
       broadcastTitle: sourceChanged ? nextSource.broadcastTitle : (preserveTitle || nextSource.broadcastTitle)
     };
+    if (sourceChanged) {
+      state.editorProjectId = "";
+    }
+    if (!sourceChanged && samePersistedSource(state.source, candidateSource)) {
+      return;
+    }
+    state.source = candidateSource;
     elements.streamerName.value = state.source.streamerName;
     elements.broadcastTitle.value = state.source.broadcastTitle;
     renderPolicyMatch();
@@ -316,18 +526,43 @@ async function requestPageContext() {
   if (!response?.ok) {
     throw new Error(response?.error || "치지직 페이지 정보를 읽지 못했습니다.");
   }
-  return response.context;
+  return {
+    ...response.context,
+    sourceTabId: tab.id
+  };
+}
+
+async function requestLatestPageContext() {
+  const requestSequence = ++contextRequestSequence;
+  try {
+    const context = await requestPageContext();
+    if (requestSequence !== contextRequestSequence) {
+      throw new DOMException("현재 탭 정보가 갱신되었습니다. 다시 시도해 주세요.", "AbortError");
+    }
+    return context;
+  } catch (error) {
+    if (requestSequence !== contextRequestSequence) {
+      throw new DOMException("현재 탭 정보가 갱신되었습니다. 다시 시도해 주세요.", "AbortError");
+    }
+    throw error;
+  }
 }
 
 async function refreshSource({ silent = false } = {}) {
+  if (resetInProgress) {
+    return;
+  }
   try {
-    currentContext = await requestPageContext();
+    currentContext = await requestLatestPageContext();
     applyContextToProject(currentContext);
     renderSource();
     if (!silent) {
       setStatus("현재 치지직 탭과 플레이어 정보를 읽었습니다.", "success");
     }
   } catch (error) {
+    if (error.name === "AbortError") {
+      return;
+    }
     currentContext = null;
     sourceConflict = false;
     renderSource();
@@ -338,15 +573,20 @@ async function refreshSource({ silent = false } = {}) {
 }
 
 async function captureCurrentPosition(kind) {
+  if (resetInProgress) {
+    return;
+  }
+  const operationGeneration = stateGeneration;
   const button = kind === "start" ? elements.captureStart : elements.captureEnd;
   button.disabled = true;
   try {
-    const context = await requestPageContext();
+    const context = await requestLatestPageContext();
+    assertOperationCurrent(operationGeneration);
     currentContext = context;
     applyContextToProject(context);
     renderSource();
     if (sourceConflict) {
-      throw new Error("기존 구간과 다른 방송입니다. 프로젝트를 초기화한 뒤 기록해 주세요.");
+      throw new Error("기존 구간과 다른 방송입니다. 모든 로컬 작업을 초기화한 뒤 기록해 주세요.");
     }
 
     const position = context.player?.positionSeconds;
@@ -354,7 +594,7 @@ async function captureCurrentPosition(kind) {
       throw new Error("현재 플레이어 시각을 읽을 수 없습니다. 재생을 시작하거나 시각을 직접 입력해 주세요.");
     }
 
-    const rounded = Math.round(position);
+    const rounded = Math.round(position * 1000) / 1000;
     const capture = {
       method: context.player.positionSource,
       confidence: context.player.confidence,
@@ -363,26 +603,31 @@ async function captureCurrentPosition(kind) {
       observedAt: context.capturedAt,
       liveEdgeOffsetSeconds: context.player.liveEdgeOffsetSeconds,
       broadcastStartedAt: context.broadcastStartedAt,
-      pageUrl: context.canonicalUrl || context.url
+      pageUrl: context.canonicalUrl || context.url,
+      sourceSessionId: sourceIdentity(contextAsSource(context))
     };
 
     if (kind === "start") {
-      state.draft.startText = formatTimestamp(rounded);
+      state.draft.startText = formatTimestamp(rounded, { precision: 3 });
       state.draft.startCapture = capture;
     } else {
-      state.draft.endText = formatTimestamp(rounded);
+      state.draft.endText = formatTimestamp(rounded, { precision: 3 });
       state.draft.endCapture = capture;
     }
+    markDirtyField("draft", state.draft);
     renderDraft();
     await persistState();
-    setStatus(`${kind === "start" ? "시작" : "끝"} 스탬프를 ${formatTimestamp(rounded)}로 기록했습니다.`, "success");
+    assertOperationCurrent(operationGeneration);
+    setStatus(`${kind === "start" ? "시작" : "끝"} 스탬프를 ${formatTimestamp(rounded, { precision: 3 })}로 기록했습니다.`, "success");
     if (kind === "end") {
       elements.segmentDescription.focus();
     }
   } catch (error) {
-    setStatus(error.message, "error");
+    if (!resetInProgress && operationGeneration === stateGeneration) {
+      setStatus(error.message, "error");
+    }
   } finally {
-    button.disabled = false;
+    button.disabled = resetInProgress;
   }
 }
 
@@ -403,8 +648,8 @@ function renderSegments() {
     item.dataset.id = segment.id;
     item.classList.toggle("is-editing", state.draft.editingId === segment.id);
     fragment.querySelector(".segment-number").textContent = String(index + 1);
-    fragment.querySelector(".segment-time").textContent = `${formatTimestamp(segment.startSeconds)} → ${formatTimestamp(segment.endSeconds)}`;
-    fragment.querySelector(".segment-duration").textContent = `${Math.round(segment.endSeconds - segment.startSeconds)}초`;
+    fragment.querySelector(".segment-time").textContent = `${formatTimestamp(segment.startSeconds, { precision: 3 })} → ${formatTimestamp(segment.endSeconds, { precision: 3 })}`;
+    fragment.querySelector(".segment-duration").textContent = `${(segment.endSeconds - segment.startSeconds).toFixed(3)}초`;
     fragment.querySelector(".segment-description").textContent = segment.description;
     fragment.querySelector(".segment-origin").textContent = captureOriginLabel(segment);
 
@@ -417,6 +662,14 @@ function renderSegments() {
 }
 
 async function saveSegment() {
+  if (resetInProgress) {
+    return;
+  }
+  const operationGeneration = stateGeneration;
+  if (sourceConflict) {
+    setStatus("기존 구간과 다른 방송입니다. 모든 로컬 작업을 초기화한 뒤 기록해 주세요.", "error", 0);
+    return;
+  }
   syncDraftFromForm();
   const validation = validateSegmentInput(state.draft);
   if (!validation.ok) {
@@ -425,6 +678,17 @@ async function saveSegment() {
   }
 
   try {
+    const expectedSessionId = sourceIdentity(state.source);
+    const capturedSessionIds = [
+      state.draft.startCapture?.sourceSessionId,
+      state.draft.endCapture?.sourceSessionId
+    ].filter(Boolean);
+    if (
+      expectedSessionId &&
+      capturedSessionIds.some((sessionId) => sessionId !== expectedSessionId)
+    ) {
+      throw new Error("시작과 끝이 서로 다른 방송에서 기록되었습니다. 구간을 다시 찍어 주세요.");
+    }
     const editingIndex = state.draft.editingId
       ? state.segments.findIndex((segment) => segment.id === state.draft.editingId)
       : -1;
@@ -448,9 +712,12 @@ async function saveSegment() {
     clearDraft();
     renderSegments();
     await persistState();
+    assertOperationCurrent(operationGeneration);
     setStatus(editingIndex >= 0 ? "구간을 수정했습니다." : "관심 구간을 저장했습니다.", "success");
   } catch (error) {
-    setStatus(error.message, "error");
+    if (!resetInProgress && operationGeneration === stateGeneration) {
+      setStatus(error.message, "error");
+    }
   }
 }
 
@@ -460,13 +727,14 @@ function startEditingSegment(id) {
     return;
   }
   state.draft = {
-    startText: formatTimestamp(segment.startSeconds),
-    endText: formatTimestamp(segment.endSeconds),
+    startText: formatTimestamp(segment.startSeconds, { precision: 3 }),
+    endText: formatTimestamp(segment.endSeconds, { precision: 3 }),
     description: segment.description,
     startCapture: segment.startCapture,
     endCapture: segment.endCapture,
     editingId: segment.id
   };
+  markDirtyField("draft", state.draft);
   renderDraft();
   renderSegments();
   schedulePersist();
@@ -475,6 +743,10 @@ function startEditingSegment(id) {
 }
 
 async function deleteSegment(id) {
+  if (resetInProgress) {
+    return;
+  }
+  const operationGeneration = stateGeneration;
   const index = state.segments.findIndex((segment) => segment.id === id);
   if (index < 0) {
     return;
@@ -487,11 +759,27 @@ async function deleteSegment(id) {
     clearDraft();
   }
   renderSegments();
-  await persistState();
-  setStatus("구간을 삭제했습니다.", "success");
+  try {
+    await persistState();
+    if (!resetInProgress && operationGeneration === stateGeneration) {
+      setStatus("구간을 삭제했습니다.", "success");
+    }
+  } catch (error) {
+    if (
+      error.name !== "AbortError" &&
+      !resetInProgress &&
+      operationGeneration === stateGeneration
+    ) {
+      setStatus(`구간을 삭제하지 못했습니다: ${error.message}`, "error");
+    }
+  }
 }
 
 async function moveSegment(id, direction) {
+  if (resetInProgress) {
+    return;
+  }
+  const operationGeneration = stateGeneration;
   const index = state.segments.findIndex((segment) => segment.id === id);
   const nextIndex = index + direction;
   if (index < 0 || nextIndex < 0 || nextIndex >= state.segments.length) {
@@ -499,7 +787,17 @@ async function moveSegment(id, direction) {
   }
   [state.segments[index], state.segments[nextIndex]] = [state.segments[nextIndex], state.segments[index]];
   renderSegments();
-  await persistState();
+  try {
+    await persistState();
+  } catch (error) {
+    if (
+      error.name !== "AbortError" &&
+      !resetInProgress &&
+      operationGeneration === stateGeneration
+    ) {
+      setStatus(`구간 순서를 저장하지 못했습니다: ${error.message}`, "error");
+    }
+  }
 }
 
 function createPromptBundle(generatedAt = new Date().toISOString()) {
@@ -538,13 +836,20 @@ function showPrompt(prompt) {
 }
 
 async function generatePrompt() {
+  if (resetInProgress) {
+    return;
+  }
+  const operationGeneration = stateGeneration;
   try {
     showPrompt(createPrompt());
     await persistState();
+    assertOperationCurrent(operationGeneration);
     setStatus("Codex용 uniform 프롬프트를 생성했습니다.", "success");
     elements.promptPreview.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (error) {
-    setStatus(error.message, "error");
+    if (!resetInProgress && operationGeneration === stateGeneration) {
+      setStatus(error.message, "error");
+    }
   }
 }
 
@@ -582,6 +887,10 @@ function codexJobFolderName(generatedAt) {
 }
 
 async function createCodexJobFolder() {
+  if (resetInProgress) {
+    return;
+  }
+  const operationGeneration = stateGeneration;
   if (typeof window.showDirectoryPicker !== "function") {
     setStatus("이 브라우저는 작업폴더 저장을 지원하지 않습니다. MD 다운로드를 사용해 주세요.", "error", 0);
     return;
@@ -622,8 +931,13 @@ async function createCodexJobFolder() {
       id: "chzzk-kirinuki-codex-jobs",
       mode: "readwrite"
     });
+    assertOperationCurrent(operationGeneration);
   } catch (error) {
-    if (error.name !== "AbortError") {
+    if (
+      error.name !== "AbortError" &&
+      !resetInProgress &&
+      operationGeneration === stateGeneration
+    ) {
       setStatus(`폴더를 열지 못했습니다: ${error.message}`, "error");
     }
     return;
@@ -633,6 +947,7 @@ async function createCodexJobFolder() {
   try {
     const folderName = codexJobFolderName(generatedAt);
     const jobDirectory = await parentDirectory.getDirectoryHandle(folderName, { create: true });
+    assertOperationCurrent(operationGeneration);
     await Promise.all([
       writeTextFile(jobDirectory, "edit-brief.md", prompt),
       writeTextFile(jobDirectory, "creator-policy.md", compiledPolicyMarkdown),
@@ -642,14 +957,81 @@ async function createCodexJobFolder() {
       writeTextFile(jobDirectory, "job-manifest.json", `${JSON.stringify(manifest, null, 2)}\n`)
     ]);
     const cacheCount = await writePolicyCacheFiles(jobDirectory, resolvedPolicies);
+    assertOperationCurrent(operationGeneration);
     showPrompt(prompt);
     await persistState();
+    assertOperationCurrent(operationGeneration);
     const cacheMessage = cacheCount > 0 ? ` 선택 정책 캐시 ${cacheCount}개도 별도 저장했습니다.` : "";
     setStatus(`${folderName} 작업폴더를 만들었습니다.${cacheMessage} 풀영상 하나를 넣고 START_HERE.md를 따라가세요.`, "success", 8_000);
   } catch (error) {
-    setStatus(`작업폴더를 만들지 못했습니다: ${error.message}`, "error", 0);
+    if (!resetInProgress && operationGeneration === stateGeneration) {
+      setStatus(`작업폴더를 만들지 못했습니다: ${error.message}`, "error", 0);
+    }
   } finally {
-    elements.createCodexJob.disabled = false;
+    elements.createCodexJob.disabled = resetInProgress;
+  }
+}
+
+async function openIntegratedEditor() {
+  if (resetInProgress) {
+    return;
+  }
+  const operationGeneration = stateGeneration;
+  syncDraftFromForm();
+  state.projectName = elements.projectName.value.trim();
+  state.globalInstruction = elements.globalInstruction.value.trim();
+  state.source.streamerName = elements.streamerName.value.trim();
+  state.source.broadcastTitle = elements.broadcastTitle.value.trim();
+  if (state.segments.length === 0) {
+    setStatus("편집기로 넘길 구간을 하나 이상 저장해 주세요.", "error");
+    return;
+  }
+
+  elements.openEditor.disabled = true;
+  try {
+    const context = await requestLatestPageContext();
+    assertOperationCurrent(operationGeneration);
+    currentContext = context;
+    applyContextToProject(context);
+    renderSource();
+    const expectedSessionId = sourceIdentity(state.source);
+    const activeSessionId = sourceIdentity(contextAsSource(context));
+    if (
+      sourceConflict ||
+      !expectedSessionId ||
+      !activeSessionId ||
+      expectedSessionId !== activeSessionId
+    ) {
+      throw new Error("저장 구간과 현재 치지직 탭이 다른 방송입니다. 원래 방송 탭에서 다시 열어 주세요.");
+    }
+    if (!state.editorProjectId) {
+      state.editorProjectId = `project-${crypto.randomUUID()}`;
+    }
+    await persistState();
+    assertOperationCurrent(operationGeneration);
+    const projectId = state.editorProjectId;
+    const response = await chrome.runtime.sendMessage({
+      type: "KIRINUKI_OPEN_EDITOR",
+      projectId,
+      sourceTabId: context.sourceTabId,
+      captureState: state,
+      expectedResetEpoch: workspaceMeta.resetEpoch,
+      expectedRevision: workspaceMeta.revision
+    });
+    if (!response?.ok) {
+      if (response?.workspaceMeta) {
+        queueWorkspaceSync(response.workspaceMeta);
+      }
+      throw new Error(response?.error || "통합 편집기를 열지 못했습니다.");
+    }
+    assertOperationCurrent(operationGeneration);
+    setStatus("선택 구간을 통합 편집기로 넘겼습니다.", "success");
+  } catch (error) {
+    if (!resetInProgress && operationGeneration === stateGeneration) {
+      setStatus(error.message, "error", 0);
+    }
+  } finally {
+    elements.openEditor.disabled = resetInProgress;
   }
 }
 
@@ -681,58 +1063,121 @@ function downloadPrompt() {
   setStatus(`${fileName} 파일을 만들었습니다.`, "success");
 }
 
+function lockControlsForReset() {
+  document.body.inert = true;
+  for (const control of document.querySelectorAll("button, input, textarea, select")) {
+    control.disabled = true;
+  }
+}
+
+function restoreControlsAfterReset() {
+  document.body.inert = false;
+  for (const control of document.querySelectorAll("button, input, textarea, select")) {
+    control.disabled = false;
+  }
+  renderSegments();
+}
+
 async function resetProject() {
-  if (!confirm("저장된 모든 구간과 프로젝트 설정을 초기화할까요?")) {
+  if (resetInProgress) {
     return;
   }
-  state = createInitialState();
-  lastPrompt = "";
-  elements.promptResult.hidden = true;
-  elements.promptPreview.value = "";
-  syncStateToForm();
-  renderSegments();
-  if (currentContext) {
-    applyContextToProject(currentContext);
+  if (!confirm("열린 통합 편집기를 닫고 저장된 모든 구간·프로젝트·원본 파일 권한을 초기화할까요? Whisper 모델 캐시는 유지됩니다.")) {
+    return;
   }
-  renderSource();
-  await persistState();
-  setStatus("프로젝트를 초기화했습니다.", "success");
+  resetInProgress = true;
+  stateGeneration += 1;
+  contextRequestSequence += 1;
+  dirtyFields.clear();
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  lockControlsForReset();
+  try {
+    await persistenceChain.catch(() => {});
+    const response = await chrome.runtime.sendMessage({
+      type: "KIRINUKI_RESET_BINDINGS",
+      writerId: panelWriterId
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "치지직 탭 연결 정보를 지우지 못했습니다.");
+    }
+    await loadState();
+    sourceConflict = false;
+    lastPrompt = "";
+    elements.promptResult.hidden = true;
+    elements.promptPreview.value = "";
+    syncStateToForm();
+    renderSegments();
+    if (currentContext) {
+      applyContextToProject(currentContext);
+    }
+    renderSource();
+    await persistState({ allowDuringReset: true });
+    const cleanupErrors = Array.isArray(response.cleanupErrors) ? response.cleanupErrors : [];
+    if (cleanupErrors.length > 0) {
+      setStatus(
+        `프로젝트 상태는 초기화했지만 일부 정리가 남았습니다: ${cleanupErrors.join(" · ")} 다시 초기화해 주세요.`,
+        "error",
+        0
+      );
+    } else {
+      setStatus("구간·편집 프로젝트·원본 파일 권한을 초기화했습니다. 모델 캐시는 유지했습니다.", "success", 6500);
+    }
+  } catch (error) {
+    setStatus(`프로젝트를 완전히 초기화하지 못했습니다: ${error.message}`, "error", 0);
+  } finally {
+    resetInProgress = false;
+    restoreControlsAfterReset();
+  }
 }
 
 function bindInputPersistence() {
   elements.projectName.addEventListener("input", () => {
     state.projectName = elements.projectName.value;
+    markDirtyField("projectName", state.projectName);
     schedulePersist();
   });
   elements.globalInstruction.addEventListener("input", () => {
     state.globalInstruction = elements.globalInstruction.value;
+    markDirtyField("globalInstruction", state.globalInstruction);
     schedulePersist();
   });
   elements.streamerName.addEventListener("input", () => {
     state.source.streamerName = elements.streamerName.value;
+    markDirtyField("streamerName", state.source.streamerName);
     renderPolicyMatch();
     schedulePersist();
   });
   elements.broadcastTitle.addEventListener("input", () => {
     state.source.broadcastTitle = elements.broadcastTitle.value;
+    markDirtyField("broadcastTitle", state.source.broadcastTitle);
     schedulePersist();
   });
   elements.startTime.addEventListener("input", () => {
     state.draft.startText = elements.startTime.value;
-    if (state.draft.startCapture && parseTimestamp(elements.startTime.value) !== Math.round(state.draft.startCapture.rawSeconds)) {
+    if (
+      state.draft.startCapture &&
+      Math.abs((parseTimestamp(elements.startTime.value) ?? -1) - state.draft.startCapture.rawSeconds) > 0.001
+    ) {
       state.draft.startCapture = null;
     }
+    markDirtyField("draft", state.draft);
     schedulePersist();
   });
   elements.endTime.addEventListener("input", () => {
     state.draft.endText = elements.endTime.value;
-    if (state.draft.endCapture && parseTimestamp(elements.endTime.value) !== Math.round(state.draft.endCapture.rawSeconds)) {
+    if (
+      state.draft.endCapture &&
+      Math.abs((parseTimestamp(elements.endTime.value) ?? -1) - state.draft.endCapture.rawSeconds) > 0.001
+    ) {
       state.draft.endCapture = null;
     }
+    markDirtyField("draft", state.draft);
     schedulePersist();
   });
   elements.segmentDescription.addEventListener("input", () => {
     state.draft.description = elements.segmentDescription.value;
+    markDirtyField("draft", state.draft);
     elements.descriptionCount.textContent = String(elements.segmentDescription.value.length);
     schedulePersist();
   });
@@ -745,6 +1190,7 @@ function bindActions() {
   elements.saveSegment.addEventListener("click", () => void saveSegment());
   elements.cancelEdit.addEventListener("click", () => {
     clearDraft();
+    markDirtyField("draft", state.draft);
     renderSegments();
     schedulePersist();
   });
@@ -767,6 +1213,7 @@ function bindActions() {
     }
   });
   elements.generatePrompt.addEventListener("click", () => void generatePrompt());
+  elements.openEditor.addEventListener("click", () => void openIntegratedEditor());
   elements.createCodexJob.addEventListener("click", () => void createCodexJobFolder());
   elements.copyPrompt.addEventListener("click", () => void copyPrompt());
   elements.downloadPrompt.addEventListener("click", downloadPrompt);
@@ -799,7 +1246,20 @@ async function initialize() {
 window.addEventListener("beforeunload", () => {
   clearInterval(refreshTimer);
   clearTimeout(saveTimer);
-  void persistState();
+  void persistState().catch(() => {});
 });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearTimeout(saveTimer);
+    void persistState().catch((error) => {
+      if (error.name !== "AbortError") {
+        setStatus(`저장 실패: ${error.message}`, "error");
+      }
+    });
+  }
+});
+
+chrome.storage.onChanged.addListener(handleStorageChange);
 
 void initialize();

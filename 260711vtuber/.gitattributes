@@ -1,0 +1,2 @@
+extension/editor/asr-worker.js -whitespace
+extension/editor/vendor/*.mjs -whitespace
