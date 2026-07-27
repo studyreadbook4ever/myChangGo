@@ -26,12 +26,14 @@
   --topbar: 74px;
   --ruler-height: 31px;
   --video-track-height: 58px;
+  --asset-track-height: 54px;
   --audio-track-height: 54px;
   --subtitle-track-height: 48px;
   --subtitle-lane-count: 2;
   --timeline-content-height: calc(
     var(--ruler-height) +
     var(--video-track-height) +
+    var(--asset-track-height) +
     var(--audio-track-height) +
     var(--subtitle-track-height) * var(--subtitle-lane-count)
   );
@@ -840,14 +842,70 @@ svg {
   transition: opacity 120ms ease;
 }
 
-.stage.dragging-subtitle .safe-area {
+.stage.dragging-subtitle .safe-area,
+.stage.dragging-asset .safe-area {
   opacity: 1;
 }
 
+.image-asset-overlays,
 .subtitle-overlays {
   position: absolute;
   inset: 0;
   pointer-events: none;
+}
+
+.image-asset-overlays {
+  z-index: 2;
+}
+
+.subtitle-overlays {
+  z-index: 3;
+}
+
+.image-asset-overlay {
+  position: absolute;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  appearance: none;
+  background: transparent;
+  transform: translate(-50%, -50%);
+  user-select: none;
+  touch-action: none;
+  pointer-events: auto;
+}
+
+.image-asset-overlay img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.image-asset-overlay:hover,
+.image-asset-overlay.selected {
+  border-color: #64b5ff;
+  box-shadow: 0 0 0 2px rgba(73, 158, 255, 0.2);
+}
+
+.image-asset-overlay .asset-drag-indicator {
+  width: 16px;
+  height: 16px;
+  position: absolute;
+  right: -9px;
+  top: -9px;
+  display: none;
+  border: 2px solid #07111a;
+  border-radius: 50%;
+  background: #64b5ff;
+}
+
+.image-asset-overlay:hover .asset-drag-indicator,
+.image-asset-overlay.selected .asset-drag-indicator {
+  display: block;
 }
 
 .subtitle-overlay {
@@ -984,7 +1042,7 @@ svg {
 
 .property-mode-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   margin-bottom: 14px;
   padding: 3px;
@@ -1350,6 +1408,115 @@ svg {
   font-size: 10px;
 }
 
+.asset-import-actions {
+  padding: 12px 0 4px;
+}
+
+.asset-paste-button {
+  width: 100%;
+  min-height: 34px;
+  justify-content: center;
+  color: #dcebff;
+  border-color: rgba(100, 181, 255, 0.4);
+  background: linear-gradient(135deg, rgba(73, 158, 255, 0.24), rgba(73, 158, 255, 0.09));
+  font-size: 9px;
+}
+
+.asset-paste-button:hover:not(:disabled) {
+  border-color: rgba(100, 181, 255, 0.72);
+}
+
+.asset-heading {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 9px;
+  margin-bottom: 12px;
+  border: 1px solid rgba(100, 181, 255, 0.2);
+  border-radius: 8px;
+  background: rgba(73, 158, 255, 0.055);
+}
+
+.asset-heading > div:last-child {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.asset-heading strong,
+.asset-heading #asset-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-heading strong {
+  color: #e2efff;
+  font-size: 10px;
+}
+
+.asset-heading #asset-meta {
+  color: var(--muted);
+  font-size: 7.5px;
+}
+
+.asset-thumbnail-wrap {
+  width: 64px;
+  height: 48px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 5px;
+  background:
+    linear-gradient(45deg, #252b34 25%, transparent 25%),
+    linear-gradient(-45deg, #252b34 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #252b34 75%),
+    linear-gradient(-45deg, transparent 75%, #252b34 75%),
+    #151a21;
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+  background-size: 12px 12px;
+}
+
+.asset-thumbnail-wrap img {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.asset-position-values {
+  margin-top: 15px;
+}
+
+.asset-position-values input,
+.asset-slider input {
+  width: 100%;
+  accent-color: #64b5ff;
+}
+
+.asset-slider {
+  margin-top: 14px;
+}
+
+.asset-slider > span {
+  display: flex;
+  justify-content: space-between;
+}
+
+.asset-slider b {
+  color: #b9d9ff;
+  font-size: 8px;
+}
+
+.asset-tool-button {
+  color: #b9d9ff;
+  border-color: rgba(100, 181, 255, 0.22);
+  background: rgba(73, 158, 255, 0.07);
+}
+
 .audio-volume-field {
   margin-top: 16px;
 }
@@ -1544,6 +1711,11 @@ svg {
   height: var(--video-track-height);
 }
 
+.track-labels .asset-track-label {
+  height: var(--asset-track-height);
+  color: #99cbff;
+}
+
 .track-labels .audio-track-label {
   height: var(--audio-track-height);
   color: #caa96e;
@@ -1658,6 +1830,10 @@ svg {
   height: var(--video-track-height);
 }
 
+.asset-track {
+  height: var(--asset-track-height);
+}
+
 .audio-track {
   height: var(--audio-track-height);
 }
@@ -1671,6 +1847,7 @@ svg {
 }
 
 .clip-block,
+.asset-block,
 .audio-block,
 .cue-block {
   position: absolute;
@@ -1712,6 +1889,36 @@ svg {
 .audio-source-block:hover {
   color: #ffe0ae;
   border-color: rgba(255, 189, 89, 0.32);
+}
+
+.asset-block {
+  top: var(--asset-block-top, 7px);
+  height: 40px;
+  z-index: 2;
+  border: 1px solid rgba(100, 181, 255, 0.48);
+  background:
+    linear-gradient(135deg, rgba(73, 158, 255, 0.28), rgba(33, 92, 151, 0.16)),
+    repeating-linear-gradient(45deg, transparent 0 5px, rgba(255, 255, 255, 0.035) 5px 6px);
+}
+
+.asset-block.selected {
+  z-index: 4;
+  border-color: #99cbff;
+  box-shadow: 0 0 0 1px rgba(100, 181, 255, 0.24);
+}
+
+.asset-block-body {
+  width: 100%;
+  height: 100%;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 0;
+  color: #d8ebff;
+  background: transparent;
+  text-align: left;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .audio-block {
@@ -1806,7 +2013,7 @@ svg {
 }
 
 .trim-handle {
-  width: 14px;
+  width: 20px;
   position: absolute;
   inset-block: -1px;
   z-index: 9;
@@ -1818,7 +2025,7 @@ svg {
 
 .trim-handle::after {
   content: "";
-  width: 2px;
+  width: 3px;
   position: absolute;
   top: 9px;
   bottom: 9px;
@@ -1828,19 +2035,19 @@ svg {
 }
 
 .trim-handle.left {
-  left: -4px;
+  left: -6px;
 }
 
 .trim-handle.right {
-  right: -4px;
+  right: -6px;
 }
 
 .trim-handle.left::after {
-  left: 6px;
+  left: 8px;
 }
 
 .trim-handle.right::after {
-  right: 6px;
+  right: 8px;
 }
 
 .clip-block .trim-handle {
@@ -1853,6 +2060,10 @@ svg {
 
 .audio-block .trim-handle {
   color: #ffd18c;
+}
+
+.asset-block .trim-handle {
+  color: #99cbff;
 }
 
 .playhead {

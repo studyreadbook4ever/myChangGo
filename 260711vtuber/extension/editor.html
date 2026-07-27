@@ -117,6 +117,7 @@
               <span>긴 영상도 디스크에서 필요한 부분만 읽습니다</span>
               <button id="pick-media-empty" class="button primary" type="button">원본 영상 선택</button>
             </div>
+            <div id="image-asset-overlays" class="image-asset-overlays" aria-live="off"></div>
             <div id="subtitle-overlays" class="subtitle-overlays" aria-live="off"></div>
             <div class="safe-area" aria-hidden="true"></div>
           </div>
@@ -145,6 +146,7 @@
         <aside class="inspector panel">
           <div class="property-mode-tabs" role="tablist" aria-label="속성 편집 종류">
             <button id="caption-mode-tab" class="active" type="button" role="tab" aria-selected="true">자막</button>
+            <button id="asset-mode-tab" type="button" role="tab" aria-selected="false">에셋</button>
             <button id="audio-mode-tab" type="button" role="tab" aria-selected="false">음성</button>
           </div>
           <div class="panel-heading inspector-heading">
@@ -262,6 +264,74 @@
             <div id="cue-list" class="cue-list" hidden role="tabpanel" aria-labelledby="cue-list-tab"></div>
           </div>
 
+          <div id="asset-inspector-content" hidden>
+            <div class="asset-import-actions">
+              <button id="asset-paste" class="button asset-paste-button" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h8v3H8Z"/><path d="M7 7H5v14h14V7h-2"/><path d="m8 16 3-3 2 2 2-2 2 3"/><circle cx="15.5" cy="11" r="1"/></svg>
+                클립보드 이미지 붙여넣기
+              </button>
+              <button id="asset-pick-file" class="secondary-action" type="button">이미지 파일 선택</button>
+              <p class="field-help">웹에서 ‘이미지 복사’ 후 Ctrl/Cmd+V를 눌러도 됩니다. PNG·WebP의 투명 배경은 그대로 유지됩니다.</p>
+            </div>
+
+            <div id="asset-empty" class="inspector-empty">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m6 17 4-5 3 3 2-2 3 4"/><circle cx="16.5" cy="8.5" r="1.5"/></svg>
+              <strong>이미지 에셋을 추가해 주세요</strong>
+              <span>붙여넣은 이미지는 현재 재생 위치부터 영상 위에 표시됩니다.</span>
+            </div>
+
+            <div id="asset-editor" class="cue-editor" hidden>
+              <div class="asset-heading">
+                <div class="asset-thumbnail-wrap">
+                  <img id="asset-thumbnail" alt="">
+                </div>
+                <div>
+                  <span class="overline">SELECTED ASSET</span>
+                  <strong id="asset-name">이미지 에셋</strong>
+                  <span id="asset-meta">투명 이미지 지원</span>
+                </div>
+              </div>
+
+              <div class="time-fields">
+                <label class="field">
+                  <span>시작</span>
+                  <input id="asset-start" type="text" inputmode="decimal" value="00:00.000">
+                </label>
+                <label class="field">
+                  <span>끝</span>
+                  <input id="asset-end" type="text" inputmode="decimal" value="00:02.000">
+                </label>
+              </div>
+              <p class="field-help">에셋 트랙 양끝 손잡이로도 표시 시간을 조정할 수 있어요.</p>
+
+              <div class="position-values asset-position-values">
+                <label class="field">
+                  <span>가로 <b id="asset-x-value">50%</b></span>
+                  <input id="asset-x" type="range" min="0" max="100" value="50">
+                </label>
+                <label class="field">
+                  <span>세로 <b id="asset-y-value">50%</b></span>
+                  <input id="asset-y" type="range" min="0" max="100" value="50">
+                </label>
+              </div>
+              <p class="field-help">영상 위 이미지를 직접 끌어서 위치를 바꿀 수도 있습니다.</p>
+
+              <label class="field asset-slider">
+                <span>크기 <b id="asset-scale-value">100%</b></span>
+                <input id="asset-scale" type="range" min="5" max="500" step="1" value="100">
+              </label>
+              <label class="field asset-slider">
+                <span>불투명도 <b id="asset-opacity-value">100%</b></span>
+                <input id="asset-opacity" type="range" min="0" max="100" step="1" value="100">
+              </label>
+
+              <button id="delete-asset" class="danger-action" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>
+                이 이미지 에셋 삭제
+              </button>
+            </div>
+          </div>
+
           <div id="audio-inspector-content" hidden>
             <div id="audio-empty" class="inspector-empty">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h4l5-4v14l-5-4H5Z"/><path d="M17 9a4 4 0 0 1 0 6"/></svg>
@@ -320,9 +390,10 @@
           <div class="timeline-toolbar">
             <div class="timeline-title">
               <span class="overline">TIMELINE</span>
-              <strong>영상 · 음성 · 자막</strong>
+              <strong>영상 · 에셋 · 음성 · 자막</strong>
             </div>
             <div class="timeline-tools">
+              <button id="paste-image-asset" class="tool-button asset-tool-button" type="button">+ 이미지 붙여넣기</button>
               <button id="add-audio-region" class="tool-button" type="button">+ 현재 위치 음성 설정</button>
               <button id="add-cue" class="tool-button" type="button">+ 현재 위치에 자막</button>
               <button id="fit-timeline" class="tool-button" type="button">전체 보기</button>
@@ -338,6 +409,10 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 10 5-3v10l-5-3Z"/><rect x="3" y="5" width="12" height="14" rx="2"/></svg>
                 영상
               </div>
+              <div class="track-label asset-track-label">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m6 17 4-5 3 3 2-2 3 4"/><circle cx="16.5" cy="8.5" r="1.5"/></svg>
+                에셋
+              </div>
               <div class="track-label audio-track-label">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h4l5-4v14l-5-4H5Z"/><path d="M17 9a4 4 0 0 1 0 6"/></svg>
                 음성
@@ -352,6 +427,7 @@
               <div id="timeline-content" class="timeline-content">
                 <div id="timeline-ruler" class="timeline-ruler"></div>
                 <div id="video-track" class="timeline-track video-track"></div>
+                <div id="asset-track" class="timeline-track asset-track" aria-label="이미지 에셋 트랙"></div>
                 <div id="audio-track" class="timeline-track audio-track"></div>
                 <div id="caption-tracks" class="caption-tracks"></div>
                 <button id="playhead" class="playhead" type="button" role="slider" aria-label="편집 재생 시각" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00:00.000">
@@ -365,11 +441,15 @@
     </div>
 
     <input id="media-input" type="file" accept="video/*,audio/*" hidden>
+    <input id="asset-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
 
     <div id="timeline-context-menu" class="timeline-context-menu" hidden role="menu" aria-label="타임라인 메뉴">
       <button id="context-add-cue" type="button" role="menuitem">이 위치에 자막 추가</button>
+      <button id="context-paste-asset" type="button" role="menuitem">이 위치에 이미지 붙여넣기</button>
+      <button id="context-pick-asset" type="button" role="menuitem">이 위치에 이미지 파일 선택…</button>
       <button id="context-add-audio" type="button" role="menuitem">이 위치에 음성 설정 추가</button>
       <button id="context-delete-cue" class="danger" type="button" role="menuitem">이 자막 삭제</button>
+      <button id="context-delete-asset" class="danger" type="button" role="menuitem">이 이미지 에셋 삭제</button>
       <button id="context-delete-audio" class="danger" type="button" role="menuitem">이 음성 설정 삭제</button>
       <button id="context-add-lane" type="button" role="menuitem">자막 레인 하나 더</button>
     </div>

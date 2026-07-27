@@ -1,13 +1,25 @@
-export const EDITOR_SCHEMA = "chzzk-kirinuki-editor/v2";
+export const EDITOR_SCHEMA = "chzzk-kirinuki-editor/v3";
 export const EDITOR_PROJECTS_STORE_KEY = "chzzkKirinukiEditorProjectsV1";
 export const EDITOR_SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 export const EDITOR_DATABASE_NAME = "chzzk-kirinuki-studio";
 export const MIN_SUBTITLE_LANES = 2;
 export const MAX_SUBTITLE_LANES = 8;
+export const SUPPORTED_IMAGE_ASSET_MIME_TYPES = Object.freeze([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif"
+]);
 
 const MIN_CLIP_DURATION_MS = 100;
 const MIN_CUE_DURATION_MS = 100;
-const LEGACY_EDITOR_SCHEMA = "chzzk-kirinuki-editor/v1";
+const LEGACY_EDITOR_SCHEMA_V1 = "chzzk-kirinuki-editor/v1";
+const LEGACY_EDITOR_SCHEMA_V2 = "chzzk-kirinuki-editor/v2";
+const ACCEPTED_EDITOR_SCHEMAS = new Set([
+  EDITOR_SCHEMA,
+  LEGACY_EDITOR_SCHEMA_V1,
+  LEGACY_EDITOR_SCHEMA_V2
+]);
 
 const nowIso = () => new Date().toISOString();
 const makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
@@ -30,6 +42,54 @@ export function normalizeHexColor(value, fallback = "#ffffff") {
     return `#${[...candidate.slice(1)].map((character) => character.repeat(2)).join("")}`;
   }
   return fallback;
+}
+
+function normalizeImageMimeType(value) {
+  const candidate = String(value || "").trim().toLowerCase();
+  const normalized = candidate === "image/jpg" ? "image/jpeg" : candidate;
+  return SUPPORTED_IMAGE_ASSET_MIME_TYPES.includes(normalized) ? normalized : "";
+}
+
+function imageMimeTypeFromDataUrl(value) {
+  const match = /^data:([^;,]+)(?:;[^,]*)?,/iu.exec(String(value || "").trim());
+  return normalizeImageMimeType(match?.[1]);
+}
+
+export function normalizeImageAssetSource(raw, mimeType = "") {
+  const candidate = raw && typeof raw === "object"
+    ? raw
+    : typeof raw === "string"
+      ? { kind: raw.startsWith("data:") ? "data-url" : "blob-key", value: raw }
+      : null;
+  if (!candidate) {
+    return null;
+  }
+  const kind = candidate.kind === "blob-key" ? "blob-key" : "data-url";
+  const value = String(
+    candidate.value
+      ?? candidate.dataUrl
+      ?? candidate.blobKey
+      ?? ""
+  ).trim();
+  if (!value) {
+    return null;
+  }
+  if (kind === "blob-key") {
+    return { kind, value };
+  }
+  const dataMimeType = imageMimeTypeFromDataUrl(value);
+  if (
+    !dataMimeType
+    || !value.startsWith(`data:${dataMimeType}`)
+    || !value.includes(",")
+  ) {
+    return null;
+  }
+  const requestedMimeType = normalizeImageMimeType(mimeType);
+  if (requestedMimeType && requestedMimeType !== dataMimeType) {
+    return null;
+  }
+  return { kind, value };
 }
 
 export function normalizeMediaAsset(raw) {
@@ -182,10 +242,12 @@ export function createEditorProjectFromCapture(captureState = {}, {
     broadcastSession: createBroadcastSession(source),
     mediaAsset: null,
     clips,
+    imageAssets: [],
     subtitles: [],
     subtitleLaneCount: MIN_SUBTITLE_LANES,
     audioRegions: [],
     selectedClipId: clips[0]?.id || null,
+    selectedImageAssetId: null,
     selectedCueId: null,
     selectedAudioRegionId: null,
     playheadMs: 0,
@@ -221,10 +283,10 @@ export function createEditorProjectFromCapture(captureState = {}, {
 }
 
 export function normalizeEditorProject(raw) {
-  if (!raw || ![EDITOR_SCHEMA, LEGACY_EDITOR_SCHEMA].includes(raw.schema)) {
+  if (!raw || !ACCEPTED_EDITOR_SCHEMAS.has(raw.schema)) {
     return null;
   }
-  const migratingLegacyProject = raw.schema === LEGACY_EDITOR_SCHEMA;
+  const migratingLegacyProject = raw.schema === LEGACY_EDITOR_SCHEMA_V1;
   const clips = reflowClips(Array.isArray(raw.clips) ? raw.clips : []);
   const defaults = createEditorProjectFromCapture({}, {
     id: raw.id || makeId("project"),
@@ -269,6 +331,15 @@ export function normalizeEditorProject(raw) {
       region,
       clips.find((clip) => clip.id === region.clipId)
     ));
+  const imageAssets = (Array.isArray(raw.imageAssets) ? raw.imageAssets : [])
+    .filter((asset) => asset && clipIds.has(asset.clipId))
+    .flatMap((asset) => {
+      const normalized = normalizeImageAsset(
+        asset,
+        clips.find((clip) => clip.id === asset.clipId)
+      );
+      return normalized ? [normalized] : [];
+    });
   const subtitleDefaults = {
     ...defaults.subtitleDefaults,
     ...(raw.subtitleDefaults || {}),
@@ -301,6 +372,10 @@ export function normalizeEditorProject(raw) {
     subtitles,
     subtitleLaneCount,
     audioRegions,
+    imageAssets,
+    selectedImageAssetId: imageAssets.some((asset) => asset.id === raw.selectedImageAssetId)
+      ? raw.selectedImageAssetId
+      : null,
     selectedAudioRegionId: audioRegions.some((region) => region.id === raw.selectedAudioRegionId)
       ? raw.selectedAudioRegionId
       : null
@@ -416,6 +491,26 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
       endOffsetMs: overlapEndMs - nextClip.sourceStartMs
     }, nextClip)];
   });
+  const imageAssets = normalized.imageAssets.flatMap((asset) => {
+    const previousClip = previousClipsById.get(asset.clipId);
+    const nextClip = nextClipsById.get(asset.clipId);
+    if (!previousClip || !nextClip) {
+      return [];
+    }
+    const assetSourceStartMs = previousClip.sourceStartMs + asset.startOffsetMs;
+    const assetSourceEndMs = previousClip.sourceStartMs + asset.endOffsetMs;
+    const overlapStartMs = Math.max(nextClip.sourceStartMs, assetSourceStartMs);
+    const overlapEndMs = Math.min(nextClip.sourceEndMs, assetSourceEndMs);
+    if (overlapEndMs - overlapStartMs < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    const next = normalizeImageAsset({
+      ...asset,
+      startOffsetMs: overlapStartMs - nextClip.sourceStartMs,
+      endOffsetMs: overlapEndMs - nextClip.sourceStartMs
+    }, nextClip);
+    return next ? [next] : [];
+  });
   const source = { ...normalized.source, ...(captureState.source || {}) };
   const incomingSession = createBroadcastSession(source);
 
@@ -435,11 +530,17 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
     clips: reflowedClips,
     subtitles,
     audioRegions,
+    imageAssets,
     selectedClipId: nextClipIds.has(normalized.selectedClipId)
       ? normalized.selectedClipId
       : nextClips[0]?.id || null,
     selectedCueId: subtitles.some((cue) => cue.id === normalized.selectedCueId)
       ? normalized.selectedCueId
+      : null,
+    selectedImageAssetId: imageAssets.some((asset) => (
+      asset.id === normalized.selectedImageAssetId
+    ))
+      ? normalized.selectedImageAssetId
       : null,
     selectedAudioRegionId: audioRegions.some((region) => (
       region.id === normalized.selectedAudioRegionId
@@ -558,6 +659,138 @@ export function createSubtitleCue(project, {
   }, clip, project.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
 }
 
+export function normalizeImageAsset(asset, clip) {
+  if (!asset || !clip) {
+    return null;
+  }
+  const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
+  const startOffsetMs = clamp(
+    Math.round(finiteNumber(asset.startOffsetMs)),
+    0,
+    Math.max(0, duration - MIN_CUE_DURATION_MS)
+  );
+  const endOffsetMs = clamp(
+    Math.round(finiteNumber(asset.endOffsetMs, startOffsetMs + 2000)),
+    startOffsetMs + MIN_CUE_DURATION_MS,
+    duration
+  );
+  const requestedSource = asset.source
+    ?? (asset.dataUrl ? { kind: "data-url", value: asset.dataUrl } : null)
+    ?? (asset.blobKey ? { kind: "blob-key", value: asset.blobKey } : null);
+  const source = normalizeImageAssetSource(requestedSource, asset.mimeType);
+  const mimeType = source?.kind === "data-url"
+    ? imageMimeTypeFromDataUrl(source.value)
+    : normalizeImageMimeType(asset.mimeType);
+  if (!source || !mimeType) {
+    return null;
+  }
+  const naturalWidth = Math.round(finiteNumber(asset.naturalWidth));
+  const naturalHeight = Math.round(finiteNumber(asset.naturalHeight));
+  return {
+    id: asset.id || makeId("asset"),
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    name: String(asset.name || "이미지 에셋").trim() || "이미지 에셋",
+    mimeType,
+    source,
+    sourceUrl: String(asset.sourceUrl || "").trim(),
+    x: clamp(finiteNumber(asset.x, 0.5), 0, 1),
+    y: clamp(finiteNumber(asset.y, 0.5), 0, 1),
+    scale: clamp(finiteNumber(asset.scale, 1), 0.05, 5),
+    opacity: clamp(finiteNumber(asset.opacity, 1), 0, 1),
+    naturalWidth: naturalWidth > 0 ? naturalWidth : null,
+    naturalHeight: naturalHeight > 0 ? naturalHeight : null,
+    createdAt: asset.createdAt || nowIso(),
+    updatedAt: asset.updatedAt || asset.createdAt || nowIso()
+  };
+}
+
+export function createImageAsset(project, {
+  id,
+  clipId,
+  startOffsetMs = 0,
+  endOffsetMs = 2000,
+  name = "이미지 에셋",
+  mimeType = "",
+  source = null,
+  dataUrl = "",
+  blobKey = "",
+  sourceUrl = "",
+  x = 0.5,
+  y = 0.5,
+  scale = 1,
+  opacity = 1,
+  naturalWidth = null,
+  naturalHeight = null,
+  createdAt = nowIso()
+} = {}) {
+  const clip = project?.clips?.find((candidate) => candidate.id === clipId) || project?.clips?.[0];
+  if (!clip) {
+    throw new Error("에셋을 추가할 영상 구간이 없습니다.");
+  }
+  const normalized = normalizeImageAsset({
+    id,
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    name,
+    mimeType,
+    source: source
+      ?? (dataUrl ? { kind: "data-url", value: dataUrl } : null)
+      ?? (blobKey ? { kind: "blob-key", value: blobKey } : null),
+    sourceUrl,
+    x,
+    y,
+    scale,
+    opacity,
+    naturalWidth,
+    naturalHeight,
+    createdAt,
+    updatedAt: createdAt
+  }, clip);
+  if (!normalized) {
+    throw new Error("PNG, JPEG, WebP 또는 GIF 이미지 데이터가 필요합니다.");
+  }
+  return normalized;
+}
+
+export function updateImageAsset(project, assetId, patch = {}) {
+  const index = (project.imageAssets || []).findIndex((asset) => asset.id === assetId);
+  if (index < 0) {
+    return project;
+  }
+  const current = project.imageAssets[index];
+  const clip = project.clips.find((candidate) => candidate.id === current.clipId);
+  const next = normalizeImageAsset({
+    ...current,
+    ...patch,
+    updatedAt: nowIso()
+  }, clip);
+  if (!next) {
+    throw new Error("PNG, JPEG, WebP 또는 GIF 이미지 데이터가 필요합니다.");
+  }
+  const imageAssets = [...project.imageAssets];
+  imageAssets[index] = next;
+  return {
+    ...project,
+    imageAssets,
+    selectedImageAssetId: assetId,
+    updatedAt: nowIso()
+  };
+}
+
+export function deleteImageAsset(project, assetId) {
+  return {
+    ...project,
+    imageAssets: (project.imageAssets || []).filter((asset) => asset.id !== assetId),
+    selectedImageAssetId: project.selectedImageAssetId === assetId
+      ? null
+      : project.selectedImageAssetId,
+    updatedAt: nowIso()
+  };
+}
+
 function normalizeAudioRegion(region, clip) {
   const duration = Math.max(MIN_CUE_DURATION_MS, clipDurationMs(clip));
   const startOffsetMs = clamp(
@@ -666,6 +899,17 @@ export function cueTimelineRange(project, cue) {
   };
 }
 
+export function imageAssetTimelineRange(project, asset) {
+  const clip = project?.clips?.find((candidate) => candidate.id === asset?.clipId);
+  if (!clip || clip.enabled === false) {
+    return null;
+  }
+  return {
+    startMs: clip.timelineStartMs + asset.startOffsetMs,
+    endMs: clip.timelineStartMs + asset.endOffsetMs
+  };
+}
+
 export function audioRegionTimelineRange(project, region) {
   const clip = project?.clips?.find((candidate) => candidate.id === region?.clipId);
   if (!clip || clip.enabled === false) {
@@ -692,6 +936,45 @@ export function cuesAtTimeline(project, timelineMs) {
       a.cue.id.localeCompare(b.cue.id)
     ))
     .map(({ cue }) => cue);
+}
+
+export function imageAssetsAtTimeline(project, timelineMs) {
+  const target = Math.round(finiteNumber(timelineMs));
+  // Array order is the stable z-order: earlier assets are behind later assets.
+  return (project?.imageAssets || []).filter((asset) => {
+    const range = imageAssetTimelineRange(project, asset);
+    return range && target >= range.startMs && target < range.endMs;
+  });
+}
+
+export function findImageAssetOverlaps(project) {
+  const assets = (project?.imageAssets || [])
+    .map((asset, order) => ({
+      asset,
+      order,
+      range: imageAssetTimelineRange(project, asset)
+    }))
+    .filter(({ range }) => range)
+    .sort((a, b) => a.range.startMs - b.range.startMs || a.order - b.order);
+  const overlaps = [];
+  for (let leftIndex = 0; leftIndex < assets.length; leftIndex += 1) {
+    const left = assets[leftIndex];
+    for (let rightIndex = leftIndex + 1; rightIndex < assets.length; rightIndex += 1) {
+      const right = assets[rightIndex];
+      if (right.range.startMs >= left.range.endMs) {
+        break;
+      }
+      if (right.range.endMs > left.range.startMs) {
+        overlaps.push({
+          firstAssetId: left.asset.id,
+          secondAssetId: right.asset.id,
+          startMs: Math.max(left.range.startMs, right.range.startMs),
+          endMs: Math.min(left.range.endMs, right.range.endMs)
+        });
+      }
+    }
+  }
+  return overlaps;
 }
 
 export function findSubtitleOverlaps(project) {
@@ -1016,6 +1299,24 @@ export function updateClipTrim(project, clipId, {
       endOffsetMs: overlapEnd - start
     }, nextClip)];
   });
+  const imageAssets = (project.imageAssets || []).flatMap((asset) => {
+    if (asset.clipId !== clipId) {
+      return [asset];
+    }
+    const assetSourceStart = current.sourceStartMs + asset.startOffsetMs;
+    const assetSourceEnd = current.sourceStartMs + asset.endOffsetMs;
+    const overlapStart = Math.max(start, assetSourceStart);
+    const overlapEnd = Math.min(end, assetSourceEnd);
+    if (overlapEnd - overlapStart < MIN_CUE_DURATION_MS) {
+      return [];
+    }
+    const next = normalizeImageAsset({
+      ...asset,
+      startOffsetMs: overlapStart - start,
+      endOffsetMs: overlapEnd - start
+    }, nextClip);
+    return next ? [next] : [];
+  });
   const selectedCueId = subtitles.some((cue) => cue.id === project.selectedCueId)
     ? project.selectedCueId
     : null;
@@ -1024,13 +1325,20 @@ export function updateClipTrim(project, clipId, {
   ))
     ? project.selectedAudioRegionId
     : null;
+  const selectedImageAssetId = imageAssets.some((asset) => (
+    asset.id === project.selectedImageAssetId
+  ))
+    ? project.selectedImageAssetId
+    : null;
   return {
     ...project,
     clips,
     subtitles,
     audioRegions,
+    imageAssets,
     selectedCueId,
     selectedAudioRegionId,
+    selectedImageAssetId,
     updatedAt: nowIso()
   };
 }

@@ -337,6 +337,7 @@ async function pointerDrag(selector, moves) {
           x: event.clientX,
           y: event.clientY,
           pointerId: event.pointerId,
+          trusted: event.isTrusted,
           target: event.target?.className || event.target?.id || event.target?.tagName
         });
       }, true);
@@ -348,6 +349,7 @@ async function pointerDrag(selector, moves) {
             x: event.clientX,
             y: event.clientY,
             pointerId: event.pointerId,
+            trusted: event.isTrusted,
             target: event.target?.className || event.target?.id || event.target?.tagName
           });
         }
@@ -358,6 +360,7 @@ async function pointerDrag(selector, moves) {
           x: event.clientX,
           y: event.clientY,
           pointerId: event.pointerId,
+          trusted: event.isTrusted,
           target: event.target?.className || event.target?.id || event.target?.tagName
         });
         globalThis.__kirinukiE2ePointerDown = false;
@@ -419,11 +422,47 @@ async function contextClickElement(selector) {
   }
 }
 
+async function dispatchTransparentPngPaste() {
+  return executeAsync(`
+    const done = arguments[arguments.length - 1];
+    const canvas = document.createElement("canvas");
+    canvas.width = 24;
+    canvas.height = 24;
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, 24, 24);
+    context.fillStyle = "rgba(30, 220, 120, 0.55)";
+    context.fillRect(6, 6, 12, 12);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        done({ error: "PNG Blob 생성 실패" });
+        return;
+      }
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([blob], "transparent-e2e.png", { type: "image/png" }));
+      const event = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: transfer
+      });
+      if (!event.clipboardData) {
+        Object.defineProperty(event, "clipboardData", { value: transfer });
+      }
+      const dispatched = document.dispatchEvent(event);
+      done({
+        dispatched,
+        defaultPrevented: event.defaultPrevented,
+        size: blob.size,
+        type: blob.type
+      });
+    }, "image/png");
+  `);
+}
+
 async function readStoredProject() {
   const result = await executeAsync(`
     const projectId = arguments[0];
     const done = arguments[arguments.length - 1];
-    const open = indexedDB.open(arguments[1], 1);
+    const open = indexedDB.open(arguments[1]);
     open.onerror = () => done({ error: String(open.error || "IndexedDB open failed") });
     open.onsuccess = () => {
       const database = open.result;
@@ -442,6 +481,34 @@ async function readStoredProject() {
   `, [PROJECT_ID, DATABASE_NAME, PROJECT_STORE]);
   assert(!result?.error, `IndexedDB 읽기 실패: ${result?.error}`);
   return result?.value || null;
+}
+
+async function readImageAssetBlobKeys() {
+  const result = await executeAsync(`
+    const [databaseName, projectId] = arguments;
+    const done = arguments[arguments.length - 1];
+    const open = indexedDB.open(databaseName);
+    open.onerror = () => done({ error: String(open.error || "IndexedDB open failed") });
+    open.onsuccess = () => {
+      const database = open.result;
+      const transaction = database.transaction("image-assets", "readonly");
+      const request = transaction.objectStore("image-assets").getAllKeys();
+      request.onerror = () => {
+        database.close();
+        done({ error: String(request.error || "image asset key read failed") });
+      };
+      request.onsuccess = () => {
+        const keys = request.result
+          .filter((key) => Array.isArray(key) && String(key[0]) === String(projectId))
+          .map((key) => String(key[1]))
+          .sort();
+        database.close();
+        done({ keys });
+      };
+    };
+  `, [DATABASE_NAME, PROJECT_ID]);
+  assert(!result?.error, `이미지 에셋 Blob 키 읽기 실패: ${result?.error}`);
+  return result?.keys || [];
 }
 
 async function waitForStoredProject(predicate, description, options) {
@@ -1061,8 +1128,9 @@ async function main() {
   );
   assert(leftDrag.moves >= 3, `왼쪽 cue drag pointermove가 부족합니다: ${JSON.stringify(leftDrag)}`);
   assert(
-    String(leftDrag.trace[0]?.target || "").includes("trim-handle"),
-    `왼쪽 cue 손잡이가 pointerdown target이 아닙니다: ${JSON.stringify(leftDrag)}`
+    leftDrag.trace[0]?.trusted === true &&
+      String(leftDrag.trace[0]?.target || "").includes("trim-handle"),
+    `왼쪽 cue 손잡이가 신뢰된 pointerdown target이 아닙니다: ${JSON.stringify(leftDrag)}`
   );
   let afterLeftTrim;
   try {
@@ -1083,8 +1151,9 @@ async function main() {
   );
   assert(rightDrag.moves >= 3, `오른쪽 cue drag pointermove가 부족합니다: ${JSON.stringify(rightDrag)}`);
   assert(
-    String(rightDrag.trace[0]?.target || "").includes("trim-handle"),
-    `오른쪽 cue 손잡이가 pointerdown target이 아닙니다: ${JSON.stringify(rightDrag)}`
+    rightDrag.trace[0]?.trusted === true &&
+      String(rightDrag.trace[0]?.target || "").includes("trim-handle"),
+    `오른쪽 cue 손잡이가 신뢰된 pointerdown target이 아닙니다: ${JSON.stringify(rightDrag)}`
   );
   await waitForStoredProject(
     (project) => project.subtitles.some((cue) => {
@@ -1198,6 +1267,303 @@ async function main() {
     "우클릭 자막 삭제"
   );
 
+  const transparentAssetPaste = await dispatchTransparentPngPaste();
+  assert(
+    !transparentAssetPaste?.error &&
+      transparentAssetPaste.defaultPrevented === true &&
+      transparentAssetPaste.size > 0 &&
+      transparentAssetPaste.type === "image/png",
+    `투명 PNG paste 이벤트를 처리하지 못했습니다: ${JSON.stringify(transparentAssetPaste)}`
+  );
+  const assetProject = await waitForStoredProject(
+    (project) => (
+      project.imageAssets?.length === 1 &&
+      project.selectedImageAssetId === project.imageAssets[0]?.id &&
+      project.imageAssets[0]?.source?.kind === "blob-key"
+    ),
+    "투명 PNG 붙여넣기와 프로젝트 autosave"
+  );
+  const imageAssetId = assetProject.imageAssets[0].id;
+  const assetUi = await waitUntil(async () => {
+    const state = await executeSync(`
+      const overlay = document.querySelector(
+        '#image-asset-overlays .image-asset-overlay[data-asset-id="' + arguments[0] + '"]'
+      );
+      return {
+        block: Boolean(document.querySelector('.asset-block[data-id="' + arguments[0] + '"]')),
+        editorHidden: document.querySelector("#asset-editor")?.hidden,
+        assetTabSelected: document.querySelector("#asset-mode-tab")?.getAttribute("aria-selected"),
+        overlay: Boolean(overlay),
+        overlayImageLoaded: Boolean(overlay?.querySelector("img")?.complete),
+        thumbnailLoaded: Boolean(document.querySelector("#asset-thumbnail")?.complete)
+      };
+    `, [imageAssetId]);
+    return (
+      state.block &&
+      state.editorHidden === false &&
+      state.assetTabSelected === "true" &&
+      state.overlay &&
+      state.overlayImageLoaded &&
+      state.thumbnailLoaded
+    ) ? state : false;
+  }, "투명 이미지 에셋 타임라인·미리보기·속성 UI");
+  const assetBlobAudit = await executeAsync(`
+    const [databaseName, projectId, assetId] = arguments;
+    const done = arguments[arguments.length - 1];
+    const open = indexedDB.open(databaseName);
+    open.onerror = () => done({ error: String(open.error || "IndexedDB open failed") });
+    open.onsuccess = () => {
+      const database = open.result;
+      const transaction = database.transaction("image-assets", "readonly");
+      const request = transaction.objectStore("image-assets").get([projectId, assetId]);
+      request.onerror = () => done({ error: String(request.error || "asset Blob read failed") });
+      request.onsuccess = async () => {
+        try {
+          const blob = request.result;
+          const bitmap = await createImageBitmap(blob);
+          const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+          const context = canvas.getContext("2d");
+          context.drawImage(bitmap, 0, 0);
+          const cornerAlpha = context.getImageData(0, 0, 1, 1).data[3];
+          const centerAlpha = context.getImageData(12, 12, 1, 1).data[3];
+          bitmap.close();
+          database.close();
+          done({
+            isBlob: blob instanceof Blob,
+            type: blob.type,
+            size: blob.size,
+            width: canvas.width,
+            height: canvas.height,
+            cornerAlpha,
+            centerAlpha
+          });
+        } catch (error) {
+          done({ error: error instanceof Error ? error.message : String(error) });
+        }
+      };
+    };
+  `, [DATABASE_NAME, PROJECT_ID, imageAssetId]);
+  assert(
+    !assetBlobAudit?.error &&
+      assetBlobAudit.isBlob &&
+      assetBlobAudit.type === "image/png" &&
+      assetBlobAudit.width === 24 &&
+      assetBlobAudit.height === 24 &&
+      assetBlobAudit.cornerAlpha === 0 &&
+      assetBlobAudit.centerAlpha > 0 &&
+      assetBlobAudit.centerAlpha < 255,
+    `IndexedDB 투명 PNG Blob 보존 실패: ${JSON.stringify(assetBlobAudit)}`
+  );
+
+  const overlappingAssetPaste = await dispatchTransparentPngPaste();
+  assert(
+    !overlappingAssetPaste?.error &&
+      overlappingAssetPaste.defaultPrevented === true &&
+      overlappingAssetPaste.size > 0,
+    `완전 겹침 검증용 PNG paste 이벤트를 처리하지 못했습니다: ${JSON.stringify(overlappingAssetPaste)}`
+  );
+  const overlappingAssetProject = await waitForStoredProject(
+    (project) => {
+      const first = project.imageAssets?.find((asset) => asset.id === imageAssetId);
+      const second = project.imageAssets?.find((asset) => asset.id !== imageAssetId);
+      return (
+        project.imageAssets?.length === 2 &&
+        first &&
+        second &&
+        first.clipId === second.clipId &&
+        first.startOffsetMs === second.startOffsetMs &&
+        first.endOffsetMs === second.endOffsetMs
+      );
+    },
+    "완전히 겹치는 두 이미지 에셋 autosave"
+  );
+  const overlappingImageAssetId = overlappingAssetProject.imageAssets.find(
+    (asset) => asset.id !== imageAssetId
+  ).id;
+  const overlappingAssetLayout = await waitUntil(async () => {
+    const state = await executeSync(`
+      const first = document.querySelector(
+        '.asset-block[data-id="' + arguments[0] + '"]'
+      );
+      const second = document.querySelector(
+        '.asset-block[data-id="' + arguments[1] + '"]'
+      );
+      const track = document.querySelector("#asset-track");
+      const label = document.querySelector(".asset-track-label");
+      if (!first || !second || !track || !label) {
+        return null;
+      }
+      const firstRect = first.getBoundingClientRect();
+      const secondRect = second.getBoundingClientRect();
+      return {
+        firstSubrow: Number(first.dataset.subrow),
+        secondSubrow: Number(second.dataset.subrow),
+        firstTop: Number.parseFloat(getComputedStyle(first).top),
+        secondTop: Number.parseFloat(getComputedStyle(second).top),
+        verticallySeparated:
+          firstRect.bottom <= secondRect.top || secondRect.bottom <= firstRect.top,
+        trackHeight: track.getBoundingClientRect().height,
+        labelHeight: label.getBoundingClientRect().height,
+        assetTrackHeightVariable: Number.parseFloat(
+          getComputedStyle(document.documentElement).getPropertyValue("--asset-track-height")
+        )
+      };
+    `, [imageAssetId, overlappingImageAssetId]);
+    return (
+      state &&
+      state.firstSubrow !== state.secondSubrow &&
+      state.firstTop !== state.secondTop &&
+      state.verticallySeparated &&
+      state.trackHeight > 54 &&
+      Math.abs(state.trackHeight - state.labelHeight) < 0.01 &&
+      Math.abs(state.trackHeight - state.assetTrackHeightVariable) < 0.01
+    ) ? state : false;
+  }, "완전히 겹치는 에셋의 최소 subrow 분리와 트랙 높이 확장");
+
+  await clickElement(`.asset-block[data-id="${imageAssetId}"] .asset-block-body`);
+  await waitForStoredProject(
+    (project) => project.selectedImageAssetId === imageAssetId,
+    "완전 겹침 첫 번째 에셋 선택"
+  );
+  await clickElement(`.asset-block[data-id="${overlappingImageAssetId}"] .asset-block-body`);
+  await waitForStoredProject(
+    (project) => project.selectedImageAssetId === overlappingImageAssetId,
+    "완전 겹침 두 번째 에셋 선택"
+  );
+  await contextClickElement(`.asset-block[data-id="${overlappingImageAssetId}"]`);
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#context-delete-asset")?.hidden === false;`),
+    "완전 겹침 두 번째 에셋 우클릭 메뉴"
+  );
+  await clickElement("#context-delete-asset");
+  await waitForStoredProject(
+    (project) => (
+      project.imageAssets?.length === 1 &&
+      project.imageAssets[0]?.id === imageAssetId
+    ),
+    "완전 겹침 검증용 두 번째 에셋 삭제"
+  );
+  const compactAssetTrack = await waitUntil(async () => {
+    const state = await executeSync(`
+      const track = document.querySelector("#asset-track");
+      const block = document.querySelector(
+        '.asset-block[data-id="' + arguments[0] + '"]'
+      );
+      return {
+        trackHeight: track?.getBoundingClientRect().height || 0,
+        subrow: Number(block?.dataset.subrow),
+        top: Number.parseFloat(block ? getComputedStyle(block).top : "NaN")
+      };
+    `, [imageAssetId]);
+    return (
+      Math.abs(state.trackHeight - 54) < 0.01 &&
+      state.subrow === 0 &&
+      state.top === 7
+    ) ? state : false;
+  }, "겹침 해소 뒤 기본 에셋 트랙 높이 복원");
+  await clickElement(`.asset-block[data-id="${imageAssetId}"] .asset-block-body`);
+  await waitForStoredProject(
+    (project) => project.selectedImageAssetId === imageAssetId,
+    "겹침 검증 뒤 첫 번째 에셋 선택 복원"
+  );
+
+  const assetBeforeTrim = assetProject.imageAssets[0];
+  const assetLeftDrag = await pointerDrag(
+    `.asset-block[data-id="${imageAssetId}"] .trim-handle.left`,
+    [{ x: 10, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 0 }]
+  );
+  assert(
+    assetLeftDrag.moves >= 3 &&
+      assetLeftDrag.trace[0]?.trusted === true &&
+      String(assetLeftDrag.trace[0]?.target || "").includes("trim-handle"),
+    `에셋 왼쪽 손잡이의 신뢰된 drag가 없습니다: ${JSON.stringify(assetLeftDrag)}`
+  );
+  const assetAfterLeftTrimProject = await waitForStoredProject(
+    (project) => project.imageAssets.some((asset) => (
+      asset.id === imageAssetId && asset.startOffsetMs >= assetBeforeTrim.startOffsetMs + 50
+    )),
+    "에셋 왼쪽 손잡이 drag autosave"
+  );
+  const assetAfterLeftTrim = assetAfterLeftTrimProject.imageAssets.find(
+    (asset) => asset.id === imageAssetId
+  );
+  const assetRightDrag = await pointerDrag(
+    `.asset-block[data-id="${imageAssetId}"] .trim-handle.right`,
+    [{ x: -10, y: 0 }, { x: -10, y: 0 }, { x: -10, y: 0 }]
+  );
+  assert(
+    assetRightDrag.moves >= 3 &&
+      assetRightDrag.trace[0]?.trusted === true &&
+      String(assetRightDrag.trace[0]?.target || "").includes("trim-handle"),
+    `에셋 오른쪽 손잡이의 신뢰된 drag가 없습니다: ${JSON.stringify(assetRightDrag)}`
+  );
+  await waitForStoredProject(
+    (project) => project.imageAssets.some((asset) => (
+      asset.id === imageAssetId &&
+      asset.endOffsetMs <= assetAfterLeftTrim.endOffsetMs - 50 &&
+      asset.endOffsetMs > asset.startOffsetMs
+    )),
+    "에셋 오른쪽 손잡이 drag autosave"
+  );
+
+  await clickElement(`.asset-block[data-id="${imageAssetId}"] .asset-block-body`);
+  await waitUntil(
+    () => executeSync(
+      `return Boolean(document.querySelector(
+        '#image-asset-overlays .image-asset-overlay[data-asset-id="' + arguments[0] + '"]'
+      ));`,
+      [imageAssetId]
+    ),
+    "트림 뒤 이미지 에셋 overlay 복원"
+  );
+  const assetOverlayDrag = await pointerDrag(
+    `#image-asset-overlays .image-asset-overlay[data-asset-id="${imageAssetId}"]`,
+    [{ x: 18, y: -12 }, { x: 18, y: -12 }, { x: 18, y: -12 }]
+  );
+  assert(
+    assetOverlayDrag.moves >= 3 && assetOverlayDrag.trace[0]?.trusted === true,
+    `이미지 에셋 overlay의 신뢰된 drag가 없습니다: ${JSON.stringify(assetOverlayDrag)}`
+  );
+  await executeSync(`
+    const scale = document.querySelector("#asset-scale");
+    const opacity = document.querySelector("#asset-opacity");
+    scale.value = "135";
+    scale.dispatchEvent(new Event("input", { bubbles: true }));
+    scale.dispatchEvent(new Event("change", { bubbles: true }));
+    opacity.value = "42";
+    opacity.dispatchEvent(new Event("input", { bubbles: true }));
+    opacity.dispatchEvent(new Event("change", { bubbles: true }));
+  `);
+  const styledAssetProject = await waitForStoredProject(
+    (project) => project.imageAssets.some((asset) => (
+      asset.id === imageAssetId &&
+      asset.x > 0.5 &&
+      asset.y < 0.5 &&
+      Math.abs(asset.scale - 1.35) < 0.001 &&
+      Math.abs(asset.opacity - 0.42) < 0.001
+    )),
+    "에셋 위치·크기·불투명도 autosave"
+  );
+
+  await contextClickElement(`.asset-block[data-id="${imageAssetId}"]`);
+  const assetContextMenu = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        menuHidden: document.querySelector("#timeline-context-menu")?.hidden,
+        pasteHidden: document.querySelector("#context-paste-asset")?.hidden,
+        pickHidden: document.querySelector("#context-pick-asset")?.hidden,
+        deleteHidden: document.querySelector("#context-delete-asset")?.hidden
+      };
+    `);
+    return (
+      state.menuHidden === false &&
+      state.pasteHidden === false &&
+      state.pickHidden === false &&
+      state.deleteHidden === false
+    ) ? state : false;
+  }, "에셋 우클릭 붙여넣기·파일·삭제 메뉴");
+  await pressKey(KEY.ESCAPE);
+
   await clickElement("#add-audio-region");
   const audioProject = await waitForStoredProject(
     (project) => project.audioRegions.length === 1 && project.selectedAudioRegionId,
@@ -1261,7 +1627,22 @@ async function main() {
     captionContextMenu,
     simultaneousCueLane: simultaneousCue.lane,
     simultaneousOverlayCount,
-    audioGain: quietAudioProject.audioRegions[0]?.gain
+    audioGain: quietAudioProject.audioRegions[0]?.gain,
+    asset: {
+      id: imageAssetId,
+      ui: assetUi,
+      blob: assetBlobAudit,
+      style: styledAssetProject.imageAssets.find((asset) => asset.id === imageAssetId),
+      contextMenu: assetContextMenu,
+      overlappingLayout: {
+        ...overlappingAssetLayout,
+        compact: compactAssetTrack
+      },
+      trim: {
+        left: assetLeftDrag,
+        right: assetRightDrag
+      }
+    }
   };
 
   const reorderKeyboardSetup = await executeSync(`
@@ -1473,6 +1854,8 @@ async function main() {
 
   const finalPersistedCue = hotSeedProject.subtitles.find((cue) => cue.id === cueId);
   assert(finalPersistedCue, "hot seed 저장본에서 자막을 찾지 못했습니다.");
+  const finalPersistedAsset = hotSeedProject.imageAssets?.find((asset) => asset.id === imageAssetId);
+  assert(finalPersistedAsset, "hot seed 저장본에서 이미지 에셋을 찾지 못했습니다.");
 
   await clickElement(`.cue-block[data-id="${cueId}"] .cue-block-body`);
   await waitUntil(async () => {
@@ -1499,6 +1882,7 @@ async function main() {
     x: finalPersistedCue.x,
     y: finalPersistedCue.y,
     color: finalPersistedCue.color,
+    asset: finalPersistedAsset,
     mediaName: reorderedProject.mediaAsset?.name
   };
 
@@ -1508,6 +1892,7 @@ async function main() {
   try {
     restored = await waitForStoredProject((project) => {
       const cue = project.subtitles.find((candidate) => candidate.id === cueId);
+      const asset = project.imageAssets?.find((candidate) => candidate.id === imageAssetId);
       return (
         project.clips.map((clip) => clip.id).join(",") === expected.clipOrder.join(",") &&
         project.clips.find((clip) => clip.id === "clip-selection-a")?.sourceStartMs ===
@@ -1520,6 +1905,13 @@ async function main() {
         Math.abs(cue.x - expected.x) < 0.0001 &&
         Math.abs(cue.y - expected.y) < 0.0001 &&
         cue.color === expected.color &&
+        asset?.startOffsetMs === expected.asset.startOffsetMs &&
+        asset?.endOffsetMs === expected.asset.endOffsetMs &&
+        Math.abs(asset.x - expected.asset.x) < 0.0001 &&
+        Math.abs(asset.y - expected.asset.y) < 0.0001 &&
+        Math.abs(asset.scale - expected.asset.scale) < 0.0001 &&
+        Math.abs(asset.opacity - expected.asset.opacity) < 0.0001 &&
+        asset.source?.kind === "blob-key" &&
         project.mediaAsset?.name === expected.mediaName
       );
     }, "reload 후 IndexedDB 프로젝트 복원");
@@ -1543,6 +1935,7 @@ async function main() {
         clipOrder: [...document.querySelectorAll("#clip-list .clip-item")].map((item) => item.dataset.id),
         cueText: document.querySelector("#cue-text")?.value || "",
         cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
+        assetCount: document.querySelectorAll("#asset-track .asset-block").length,
         mediaName: document.querySelector("#media-name")?.textContent || ""
       };
     `);
@@ -1550,9 +1943,31 @@ async function main() {
       state.clipOrder.join(",") === expected.clipOrder.join(",") &&
       state.cueText === expected.text &&
       state.cueCount === 1 &&
+      state.assetCount === 1 &&
       state.mediaName === expected.mediaName
     ) ? state : false;
   }, "reload 후 editor DOM 복원");
+  let prunedImageAssetBlobKeys;
+  try {
+    prunedImageAssetBlobKeys = await waitUntil(async () => {
+      const keys = await readImageAssetBlobKeys();
+      return keys.length === 1 && keys[0] === imageAssetId ? keys : false;
+    }, "reload 뒤 실행 취소 이력에서 사라진 이미지 Blob 정리", {
+      timeout: 12_000,
+      interval: 250
+    });
+  } catch (error) {
+    const actualKeys = await readImageAssetBlobKeys();
+    const tabUrls = await executeAsync(`
+      const done = arguments[arguments.length - 1];
+      chrome.tabs.query({}, (tabs) => done(tabs.map((tab) => tab.url || "")));
+    `);
+    const logs = await webdriver("POST", `/session/${sessionId}/log`, { type: "browser" });
+    throw new Error(
+      `${error.message}\nactualKeys=${JSON.stringify(actualKeys)}\n` +
+      `tabUrls=${JSON.stringify(tabUrls)}\nlogs=${JSON.stringify(logs)}`
+    );
+  }
 
   const primaryEditorHandle = await webdriver("GET", `/session/${sessionId}/window`);
   const staleWorkspaceState = {
@@ -1610,7 +2025,7 @@ async function main() {
       const cache = await caches.open(cacheName);
       await cache.put(cacheUrl, new Response(cacheText));
       const databaseFixture = await new Promise((resolve, reject) => {
-        const request = indexedDB.open(databaseName, 1);
+        const request = indexedDB.open(databaseName);
         request.onerror = () => reject(
           request.error || new Error("reset fixture IndexedDB open failed")
         );
@@ -2156,6 +2571,8 @@ async function main() {
       color: restoredCue.color,
       leftHandleHitAtCueStart: cueLeftHandleHit
     },
+    imageAsset: restored.imageAssets?.find((asset) => asset.id === imageAssetId),
+    imageAssetBlobKeysAfterPrune: prunedImageAssetBlobKeys,
     clipOrder: restored.clips.map((clip) => clip.id),
     hotSeed: {
       delivery: hotSeedDelivery,

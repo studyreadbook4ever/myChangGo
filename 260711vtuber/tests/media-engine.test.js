@@ -5,6 +5,7 @@ import { AudioSample } from "mediabunny";
 
 import {
   activeCuesAt,
+  activeImageAssetsAt,
   applyAudioAutomationToSample,
   audioAutomationGainAt,
   audioTrimFrameRange,
@@ -15,6 +16,10 @@ import {
   chooseOutputCodecs,
   clampCaptionBoxCenter,
   createFileWriteTransaction,
+  createImageAssetRenderCache,
+  drawImageAsset,
+  imageAssetDrawRect,
+  MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES,
   normalizeMediaTimeline,
   validateRenderTimeline,
   validateRenderClips,
@@ -175,6 +180,233 @@ test("겹치는 사람 자막과 네 줄을 넘는 텍스트를 렌더 단계에
   );
 });
 
+test("동시 이미지 에셋은 프로젝트 배열 순서대로 활성화한다", () => {
+  const project = {
+    clips: [{
+      id: "clip",
+      timelineStartMs: 1_000,
+      enabled: true
+    }],
+    imageAssets: [
+      {
+        id: "behind",
+        clipId: "clip",
+        startOffsetMs: 0,
+        endOffsetMs: 2_000
+      },
+      {
+        id: "front",
+        clipId: "clip",
+        startOffsetMs: 500,
+        endOffsetMs: 1_500
+      }
+    ]
+  };
+  assert.deepEqual(
+    activeImageAssetsAt(project, 1.75).map((asset) => asset.id),
+    ["behind", "front"]
+  );
+  assert.deepEqual(activeImageAssetsAt(project, 3), []);
+});
+
+test("이미지 에셋은 비율·투명도를 보존해 영상 위에 합성한다", () => {
+  const canvas = { width: 1_920, height: 1_080 };
+  const image = { width: 1_000, height: 500 };
+  const asset = {
+    x: 0.5,
+    y: 0.5,
+    scale: 1,
+    opacity: 0.4,
+    naturalWidth: 1_000,
+    naturalHeight: 500
+  };
+  assert.deepEqual(imageAssetDrawRect(canvas, asset, image), {
+    x: 624,
+    y: 372,
+    width: 672,
+    height: 336
+  });
+
+  const events = [];
+  const context = {
+    globalAlpha: 1,
+    globalCompositeOperation: "copy",
+    save() {
+      events.push(["save"]);
+    },
+    drawImage(...args) {
+      events.push([
+        "drawImage",
+        ...args,
+        this.globalAlpha,
+        this.globalCompositeOperation
+      ]);
+    },
+    restore() {
+      events.push(["restore"]);
+    }
+  };
+  drawImageAsset(context, canvas, asset, image);
+  assert.deepEqual(events, [
+    ["save"],
+    ["drawImage", image, 624, 372, 672, 336, 0.4, "source-over"],
+    ["restore"]
+  ]);
+});
+
+test("렌더 캐시는 현재 활성 이미지 에셋만 디코드하고 구간 종료 즉시 해제한다", async () => {
+  const firstBlob = new Blob(["first"], { type: "image/png" });
+  const secondBlob = new Blob(["second"], { type: "image/png" });
+  const blobs = new Map([
+    ["first-key", firstBlob],
+    ["second-key", secondBlob]
+  ]);
+  const dimensions = new Map([
+    [firstBlob, { width: 20, height: 10, id: "first" }],
+    [secondBlob, { width: 8, height: 8, id: "second" }]
+  ]);
+  const resolved = [];
+  const decoded = [];
+  const closed = [];
+  const project = {
+    clips: [{
+      id: "clip",
+      timelineStartMs: 0,
+      enabled: true
+    }],
+    imageAssets: [
+      {
+        id: "first",
+        clipId: "clip",
+        name: "첫 에셋",
+        mimeType: "image/png",
+        source: { kind: "blob-key", value: "first-key" },
+        startOffsetMs: 0,
+        endOffsetMs: 500
+      },
+      {
+        id: "second",
+        clipId: "clip",
+        name: "둘째 에셋",
+        mimeType: "image/png",
+        source: { kind: "blob-key", value: "second-key" },
+        startOffsetMs: 1_000,
+        endOffsetMs: 1_500
+      }
+    ]
+  };
+  const cache = createImageAssetRenderCache(project, {
+    resolveImageAsset: async (source) => {
+      resolved.push(source.value);
+      return blobs.get(source.value);
+    },
+    decodeImageAsset: async (blob) => {
+      const metadata = dimensions.get(blob);
+      decoded.push(metadata.id);
+      return {
+        width: metadata.width,
+        height: metadata.height,
+        close: () => closed.push(metadata.id)
+      };
+    }
+  });
+
+  assert.equal(MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES, 256 * 1024 * 1024);
+  assert.deepEqual(
+    (await cache.prepareAt(0.1)).map(({ asset }) => asset.id),
+    ["first"]
+  );
+  assert.deepEqual(resolved, ["first-key"]);
+  assert.deepEqual(decoded, ["first"]);
+  assert.equal(cache.decodedBytes, 20 * 10 * 4);
+
+  await cache.prepareAt(0.2);
+  assert.deepEqual(decoded, ["first"]);
+  cache.releaseThrough(0.4996);
+  assert.deepEqual(closed, ["first"]);
+  assert.equal(cache.decodedBytes, 0);
+
+  assert.deepEqual(
+    (await cache.prepareAt(1.1)).map(({ asset }) => asset.id),
+    ["second"]
+  );
+  assert.deepEqual(resolved, ["first-key", "second-key"]);
+  cache.closeAll();
+  assert.deepEqual(closed, ["first", "second"]);
+  assert.equal(cache.decodedCount, 0);
+});
+
+test("동시 활성 이미지의 실제 RGBA 용량이 상한을 넘으면 모두 닫고 명확히 실패한다", async () => {
+  const closed = [];
+  let decodeIndex = 0;
+  const project = {
+    clips: [{
+      id: "clip",
+      timelineStartMs: 0,
+      enabled: true
+    }],
+    imageAssets: ["behind", "front"].map((id) => ({
+      id,
+      clipId: "clip",
+      name: id,
+      mimeType: "image/png",
+      source: { kind: "blob-key", value: id },
+      startOffsetMs: 0,
+      endOffsetMs: 1_000,
+      naturalWidth: 4,
+      naturalHeight: 4
+    }))
+  };
+  const cache = createImageAssetRenderCache(project, {
+    maxDecodedBytes: 100,
+    resolveImageAsset: async () => new Blob(["image"], { type: "image/png" }),
+    decodeImageAsset: async (_blob) => {
+      const id = project.imageAssets[decodeIndex]?.id || "front";
+      decodeIndex += 1;
+      return {
+        width: 4,
+        height: 4,
+        close: () => closed.push(id)
+      };
+    }
+  });
+
+  await assert.rejects(
+    cache.prepareAt(0.1),
+    /디코드 메모리가 100 B를 넘습니다/
+  );
+  assert.equal(decodeIndex, 1);
+  assert.deepEqual(closed, ["behind"]);
+  assert.equal(cache.decodedBytes, 0);
+  assert.equal(cache.decodedCount, 0);
+
+  let mismatchedClosed = 0;
+  const mismatchedCache = createImageAssetRenderCache({
+    clips: project.clips,
+    imageAssets: [{
+      ...project.imageAssets[0],
+      naturalWidth: 1,
+      naturalHeight: 1
+    }]
+  }, {
+    maxDecodedBytes: 32,
+    resolveImageAsset: async () => new Blob(["image"], { type: "image/png" }),
+    decodeImageAsset: async () => ({
+      width: 4,
+      height: 4,
+      close: () => {
+        mismatchedClosed += 1;
+      }
+    })
+  });
+  await assert.rejects(
+    mismatchedCache.prepareAt(0.1),
+    /디코드 메모리가 32 B를 넘습니다/
+  );
+  assert.equal(mismatchedClosed, 1);
+  assert.equal(mismatchedCache.decodedBytes, 0);
+});
+
 test("오디오 경계는 가장 가까운 PCM 프레임으로 자른다", () => {
   const sample = {
     timestamp: 10,
@@ -201,6 +433,20 @@ test("렌더 검증은 다른 자막 레인의 동시 자막을 허용하고 같
   }];
   const simultaneousCaptions = {
     clips,
+    imageAssets: [
+      {
+        id: "asset-a",
+        clipId: "clip",
+        startOffsetMs: 0,
+        endOffsetMs: 2_000
+      },
+      {
+        id: "asset-b",
+        clipId: "clip",
+        startOffsetMs: 500,
+        endOffsetMs: 1_500
+      }
+    ],
     subtitles: [
       {
         id: "top",
@@ -219,6 +465,8 @@ test("렌더 검증은 다른 자막 레인의 동시 자막을 허용하고 같
     ],
     audioRegions: []
   };
+  // One visual lane deliberately permits overlap. Array order defines back→front,
+  // so export validation only rejects ambiguous subtitle/audio lane collisions.
   assert.doesNotThrow(() => validateRenderTimeline(simultaneousCaptions));
   assert.throws(
     () => validateRenderTimeline({

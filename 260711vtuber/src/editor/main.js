@@ -9,12 +9,16 @@ import {
   clipDurationMs,
   createAudioRegion,
   createEditorProjectFromCapture,
+  createImageAsset,
   createSubtitleCue,
   cuesAtTimeline,
   cueTimelineRange,
   deleteAudioRegion,
+  deleteImageAsset,
   deleteSubtitleCue,
   findAudioRegionOverlaps,
+  imageAssetsAtTimeline,
+  imageAssetTimelineRange,
   findSubtitleOverlaps,
   mapTimelineToSource,
   mergeCaptureIntoEditorProject,
@@ -26,6 +30,7 @@ import {
   transcriptChunksToCueDrafts,
   updateAudioRegion,
   updateClipTrim,
+  updateImageAsset,
   updateSubtitleCue
 } from "../../extension/lib/editor-core.js";
 import { STORAGE_KEY } from "../../extension/lib/core.js";
@@ -38,8 +43,11 @@ import {
 import {
   deleteMediaHandle,
   getFileFromStoredHandle,
+  loadImageAssetBlob,
   loadProject,
+  pruneImageAssetBlobs,
   saveMediaHandle,
+  saveProjectWithImageAssetBlob,
   saveProject
 } from "./project-store.js";
 
@@ -67,6 +75,7 @@ const elements = Object.fromEntries([
   "stage-empty",
   "pick-media-empty",
   "subtitle-overlays",
+  "image-asset-overlays",
   "previous-clip",
   "play-toggle",
   "next-clip",
@@ -75,10 +84,12 @@ const elements = Object.fromEntries([
   "toggle-mute",
   "volume",
   "caption-mode-tab",
+  "asset-mode-tab",
   "audio-mode-tab",
   "inspector-overline",
   "inspector-title",
   "caption-inspector-content",
+  "asset-inspector-content",
   "audio-inspector-content",
   "add-cue-top",
   "asr-model",
@@ -104,6 +115,24 @@ const elements = Object.fromEntries([
   "reset-font-color",
   "delete-cue",
   "cue-list",
+  "asset-empty",
+  "asset-editor",
+  "asset-thumbnail",
+  "asset-name",
+  "asset-meta",
+  "asset-start",
+  "asset-end",
+  "asset-x",
+  "asset-y",
+  "asset-x-value",
+  "asset-y-value",
+  "asset-scale",
+  "asset-scale-value",
+  "asset-opacity",
+  "asset-opacity-value",
+  "asset-paste",
+  "asset-pick-file",
+  "delete-asset",
   "audio-empty",
   "audio-editor",
   "audio-region-label",
@@ -120,6 +149,7 @@ const elements = Object.fromEntries([
   "reset-audio-region",
   "delete-audio-region",
   "add-audio-region",
+  "paste-image-asset",
   "add-cue",
   "subtitle-lane-count",
   "add-subtitle-lane",
@@ -129,16 +159,21 @@ const elements = Object.fromEntries([
   "timeline-content",
   "timeline-ruler",
   "video-track",
+  "asset-track",
   "audio-track",
   "caption-tracks",
   "playhead",
   "timeline-context-menu",
   "context-add-cue",
+  "context-paste-asset",
+  "context-pick-asset",
   "context-add-audio",
   "context-delete-cue",
+  "context-delete-asset",
   "context-delete-audio",
   "context-add-lane",
   "media-input",
+  "asset-input",
   "job-dialog",
   "job-title",
   "job-message",
@@ -158,6 +193,7 @@ let mediaUrl = null;
 let sourceBindingConnected = false;
 let pixelsPerSecond = 70;
 let saveTimer = null;
+let imageAssetPruneTimer = null;
 let toastTimer = null;
 let activeClipId = null;
 let undoStack = [];
@@ -179,8 +215,23 @@ let propertyInspectorMode = "caption";
 let previewVolume = 1;
 let previewMuted = false;
 let timelineContext = null;
+let pendingAssetTimelineMs = null;
+let imageAssetRenderSequence = 0;
+const imageAssetObjectUrls = new Map();
 
 const EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
+const MAX_IMAGE_ASSET_BYTES = 25 * 1024 * 1024;
+const MAX_IMAGE_ASSET_DIMENSION = 8192;
+const MAX_IMAGE_ASSET_PIXELS = 40_000_000;
+const ASSET_TRACK_BASE_HEIGHT_PX = 54;
+const ASSET_SUBROW_STRIDE_PX = 47;
+const ASSET_BLOCK_TOP_PX = 7;
+const ALLOWED_IMAGE_ASSET_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif"
+]);
 const cloneProject = (value) => structuredClone(value);
 
 function formatTime(milliseconds, { compact = false } = {}) {
@@ -265,16 +316,75 @@ function showToast(message, type = "info", timeout = 3600) {
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    void saveProject(project).catch((error) => {
-      showToast(`프로젝트 저장 실패: ${error.message}`, "error", 0);
-    });
+    void saveProject(project)
+      .then(() => scheduleImageAssetBlobPrune())
+      .catch((error) => {
+        showToast(`프로젝트 저장 실패: ${error.message}`, "error", 0);
+      });
   }, 180);
 }
 
 function flushSave() {
   clearTimeout(saveTimer);
   saveTimer = null;
-  return project ? saveProject(project) : Promise.resolve();
+  if (!project) {
+    return Promise.resolve();
+  }
+  return saveProject(project).then((savedProject) => {
+    scheduleImageAssetBlobPrune();
+    return savedProject;
+  });
+}
+
+function collectImageAssetBlobKeys(candidateProject, keys) {
+  for (const asset of candidateProject?.imageAssets || []) {
+    if (asset.source?.kind === "blob-key" && asset.source.value) {
+      keys.add(String(asset.source.value));
+    }
+  }
+}
+
+async function pruneUnusedImageAssetBlobs() {
+  if (!project?.id) {
+    return 0;
+  }
+  const projectId = project.id;
+  const editorUrl = chrome.runtime.getURL("editor.html");
+  const editorTabs = await chrome.tabs.query({});
+  const sameProjectTabs = editorTabs.filter((tab) => {
+    if (!String(tab.url || "").startsWith(editorUrl)) {
+      return false;
+    }
+    try {
+      return new URL(tab.url).searchParams.get("project") === projectId;
+    } catch {
+      return false;
+    }
+  });
+  if (sameProjectTabs.length > 1) {
+    return 0;
+  }
+  const keep = new Set();
+  collectImageAssetBlobKeys(project, keep);
+  for (const snapshot of undoStack) {
+    collectImageAssetBlobKeys(snapshot, keep);
+  }
+  for (const snapshot of redoStack) {
+    collectImageAssetBlobKeys(snapshot, keep);
+  }
+  collectImageAssetBlobKeys(fieldEditSession?.snapshot, keep);
+
+  return pruneImageAssetBlobs(projectId, keep);
+}
+
+function scheduleImageAssetBlobPrune() {
+  clearTimeout(imageAssetPruneTimer);
+  imageAssetPruneTimer = setTimeout(() => {
+    imageAssetPruneTimer = null;
+    void pruneUnusedImageAssetBlobs().catch((error) => {
+      console.warn("사용하지 않는 이미지 에셋 데이터를 정리하지 못했습니다.", error);
+    });
+  }, 3_000);
 }
 
 function pushUndo(snapshot) {
@@ -381,8 +491,74 @@ function selectedAudioRegion() {
   return project.audioRegions.find((region) => region.id === project.selectedAudioRegionId) || null;
 }
 
+function selectedImageAsset() {
+  return (project.imageAssets || []).find((asset) => asset.id === project.selectedImageAssetId) || null;
+}
+
 function selectedClip() {
   return project.clips.find((clip) => clip.id === project.selectedClipId) || project.clips[0] || null;
+}
+
+function formatFileSize(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(value >= 10 * 1024 * 1024 ? 0 : 1)}MB`;
+  }
+  return `${Math.max(1, Math.round(value / 1024))}KB`;
+}
+
+function releaseImageAssetObjectUrl(assetId) {
+  const cached = imageAssetObjectUrls.get(assetId);
+  if (cached?.url) {
+    URL.revokeObjectURL(cached.url);
+  }
+  imageAssetObjectUrls.delete(assetId);
+}
+
+function releaseAllImageAssetObjectUrls() {
+  for (const assetId of imageAssetObjectUrls.keys()) {
+    releaseImageAssetObjectUrl(assetId);
+  }
+}
+
+async function resolveImageAssetUrl(asset) {
+  if (!asset?.source) {
+    return null;
+  }
+  if (asset.source.kind === "data-url") {
+    return /^data:image\/(?:png|jpeg|webp|gif);base64,/i.test(asset.source.value)
+      ? asset.source.value
+      : null;
+  }
+  if (asset.source.kind !== "blob-key") {
+    return null;
+  }
+  const sourceKey = `${asset.source.kind}:${asset.source.value}`;
+  const cached = imageAssetObjectUrls.get(asset.id);
+  if (cached?.sourceKey === sourceKey) {
+    return cached.url;
+  }
+  releaseImageAssetObjectUrl(asset.id);
+  const blob = await loadImageAssetBlob(project.id, asset.source.value);
+  if (!(blob instanceof Blob) || !ALLOWED_IMAGE_ASSET_TYPES.has(blob.type)) {
+    return null;
+  }
+  const afterLoad = imageAssetObjectUrls.get(asset.id);
+  if (afterLoad?.sourceKey === sourceKey) {
+    return afterLoad.url;
+  }
+  const assetStillPresent = project.imageAssets?.some((candidate) => (
+    candidate.id === asset.id &&
+    candidate.source?.kind === asset.source.kind &&
+    candidate.source?.value === asset.source.value
+  ));
+  if (!assetStillPresent) {
+    return null;
+  }
+  releaseImageAssetObjectUrl(asset.id);
+  const url = URL.createObjectURL(blob);
+  imageAssetObjectUrls.set(asset.id, { sourceKey, url });
+  return url;
 }
 
 function renderHeader() {
@@ -487,6 +663,61 @@ function renderCueInspector() {
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
 }
 
+function renderImageAssetInspector() {
+  const asset = selectedImageAsset();
+  elements.asset_empty.hidden = Boolean(asset);
+  elements.asset_editor.hidden = !asset;
+  if (!asset) {
+    elements.asset_thumbnail.removeAttribute("src");
+    elements.asset_thumbnail.alt = "";
+    return;
+  }
+  const range = imageAssetTimelineRange(project, asset);
+  elements.asset_name.textContent = asset.name;
+  elements.asset_meta.textContent = [
+    asset.naturalWidth && asset.naturalHeight
+      ? `${asset.naturalWidth}×${asset.naturalHeight}`
+      : null,
+    asset.mimeType?.replace("image/", "").toUpperCase(),
+    asset.mimeType === "image/png" || asset.mimeType === "image/webp"
+      ? "투명 배경 지원"
+      : null
+  ].filter(Boolean).join(" · ");
+  if (document.activeElement !== elements.asset_start) {
+    elements.asset_start.value = formatTime(range?.startMs || 0, { compact: true });
+  }
+  if (document.activeElement !== elements.asset_end) {
+    elements.asset_end.value = formatTime(range?.endMs || 0, { compact: true });
+  }
+  const xPercent = Math.round(asset.x * 100);
+  const yPercent = Math.round(asset.y * 100);
+  const scalePercent = Math.round(asset.scale * 100);
+  const opacityPercent = Math.round(asset.opacity * 100);
+  elements.asset_x.value = String(xPercent);
+  elements.asset_y.value = String(yPercent);
+  elements.asset_x_value.textContent = `${xPercent}%`;
+  elements.asset_y_value.textContent = `${yPercent}%`;
+  elements.asset_scale.value = String(scalePercent);
+  elements.asset_scale_value.textContent = `${scalePercent}%`;
+  elements.asset_opacity.value = String(opacityPercent);
+  elements.asset_opacity_value.textContent = `${opacityPercent}%`;
+  elements.asset_thumbnail.alt = `${asset.name} 미리보기`;
+  const selectedId = asset.id;
+  void resolveImageAssetUrl(asset).then((url) => {
+    if (selectedImageAsset()?.id !== selectedId) {
+      return;
+    }
+    if (url) {
+      elements.asset_thumbnail.src = url;
+    } else {
+      elements.asset_thumbnail.removeAttribute("src");
+    }
+  }).catch((error) => {
+    console.warn("이미지 에셋 미리보기를 불러오지 못했습니다.", error);
+    elements.asset_thumbnail.removeAttribute("src");
+  });
+}
+
 function renderAudioInspector() {
   const region = selectedAudioRegion();
   elements.audio_empty.hidden = Boolean(region);
@@ -523,18 +754,33 @@ function renderAudioInspector() {
 
 function renderPropertyInspector() {
   const showingAudio = propertyInspectorMode === "audio";
-  elements.caption_mode_tab.classList.toggle("active", !showingAudio);
-  elements.caption_mode_tab.setAttribute("aria-selected", String(!showingAudio));
-  elements.caption_mode_tab.tabIndex = showingAudio ? -1 : 0;
+  const showingAsset = propertyInspectorMode === "asset";
+  const showingCaption = !showingAudio && !showingAsset;
+  elements.caption_mode_tab.classList.toggle("active", showingCaption);
+  elements.caption_mode_tab.setAttribute("aria-selected", String(showingCaption));
+  elements.caption_mode_tab.tabIndex = showingCaption ? 0 : -1;
+  elements.asset_mode_tab.classList.toggle("active", showingAsset);
+  elements.asset_mode_tab.setAttribute("aria-selected", String(showingAsset));
+  elements.asset_mode_tab.tabIndex = showingAsset ? 0 : -1;
   elements.audio_mode_tab.classList.toggle("active", showingAudio);
   elements.audio_mode_tab.setAttribute("aria-selected", String(showingAudio));
   elements.audio_mode_tab.tabIndex = showingAudio ? 0 : -1;
-  elements.caption_inspector_content.hidden = showingAudio;
+  elements.caption_inspector_content.hidden = !showingCaption;
+  elements.asset_inspector_content.hidden = !showingAsset;
   elements.audio_inspector_content.hidden = !showingAudio;
-  elements.inspector_overline.textContent = showingAudio ? "VOICE" : "CAPTIONS";
-  elements.inspector_title.textContent = showingAudio ? "구간별 음성" : "한글 자막";
-  elements.add_cue_top.hidden = showingAudio;
+  elements.inspector_overline.textContent = showingAudio
+    ? "VOICE"
+    : showingAsset
+      ? "IMAGE ASSETS"
+      : "CAPTIONS";
+  elements.inspector_title.textContent = showingAudio
+    ? "구간별 음성"
+    : showingAsset
+      ? "영상 위 이미지"
+      : "한글 자막";
+  elements.add_cue_top.hidden = !showingCaption;
   renderCueInspector();
+  renderImageAssetInspector();
   renderAudioInspector();
 }
 
@@ -572,6 +818,42 @@ function timelineWidth() {
 
 function timelineX(milliseconds) {
   return milliseconds / 1000 * pixelsPerSecond;
+}
+
+function layoutImageAssetSubrows(candidateProject) {
+  const entries = (candidateProject.imageAssets || [])
+    .map((asset, assetIndex) => ({
+      asset,
+      assetIndex,
+      range: imageAssetTimelineRange(candidateProject, asset)
+    }))
+    .filter((entry) => entry.range)
+    .sort((first, second) => (
+      first.range.startMs - second.range.startMs ||
+      first.range.endMs - second.range.endMs ||
+      first.assetIndex - second.assetIndex
+    ));
+  const subrowEndTimes = [];
+  const byAssetId = new Map();
+
+  entries.forEach((entry) => {
+    let subrow = subrowEndTimes.findIndex((endMs) => endMs <= entry.range.startMs);
+    if (subrow === -1) {
+      subrow = subrowEndTimes.length;
+      subrowEndTimes.push(entry.range.endMs);
+    } else {
+      subrowEndTimes[subrow] = entry.range.endMs;
+    }
+    byAssetId.set(entry.asset.id, {
+      range: entry.range,
+      subrow
+    });
+  });
+
+  return {
+    byAssetId,
+    subrowCount: Math.max(1, subrowEndTimes.length)
+  };
 }
 
 function renderRuler(width) {
@@ -618,10 +900,12 @@ function makeHandle(side, onStart, onNudge, {
     }
     event.preventDefault();
     event.stopPropagation();
-    const owner = handle.closest(".clip-block, .cue-block, .audio-block");
+    const owner = handle.closest(".clip-block, .asset-block, .cue-block, .audio-block");
     const ownerId = owner?.dataset.id;
     const ownerClass = owner?.classList.contains("clip-block")
       ? "clip-block"
+      : owner?.classList.contains("asset-block")
+        ? "asset-block"
       : owner?.classList.contains("audio-block")
         ? "audio-block"
         : "cue-block";
@@ -702,6 +986,15 @@ function bindCueTrim(handle, cue, side, event) {
   event.preventDefault();
   event.stopPropagation();
   beginPointerHistory();
+  propertyInspectorMode = "caption";
+  inspectorMode = "selected";
+  const originalProject = {
+    ...project,
+    selectedCueId: cue.id,
+    selectedClipId: cue.clipId
+  };
+  project = originalProject;
+  handle.closest(".cue-block")?.classList.add("selected");
   const startX = event.clientX;
   const originalStart = cue.startOffsetMs;
   const originalEnd = cue.endOffsetMs;
@@ -723,7 +1016,7 @@ function bindCueTrim(handle, cue, side, event) {
     const endOffsetMs = side === "right"
       ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta))
       : originalEnd;
-    const nextProject = updateSubtitleCue(project, cue.id, { startOffsetMs, endOffsetMs });
+    const nextProject = updateSubtitleCue(originalProject, cue.id, { startOffsetMs, endOffsetMs });
     if (cueHasOverlap(nextProject, cue.id)) {
       overlapBlocked = true;
       return;
@@ -751,6 +1044,64 @@ function bindCueTrim(handle, cue, side, event) {
     if (overlapBlocked) {
       showToast("같은 자막 레인 안에서는 자막이 겹칠 수 없습니다.", "error");
     }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+function bindImageAssetTrim(handle, asset, side, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  beginPointerHistory();
+  propertyInspectorMode = "asset";
+  const originalProject = {
+    ...project,
+    selectedImageAssetId: asset.id,
+    selectedClipId: asset.clipId
+  };
+  project = originalProject;
+  handle.closest(".asset-block")?.classList.add("selected");
+  const startX = event.clientX;
+  const originalStart = asset.startOffsetMs;
+  const originalEnd = asset.endOffsetMs;
+  const clip = project.clips.find((candidate) => candidate.id === asset.clipId);
+  const duration = clipDurationMs(clip);
+  const pointerId = event.pointerId;
+  const block = handle.closest(".asset-block");
+  handle.setPointerCapture(pointerId);
+
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1000);
+    const startOffsetMs = side === "left"
+      ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta))
+      : originalStart;
+    const endOffsetMs = side === "right"
+      ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta))
+      : originalEnd;
+    project = updateImageAsset(originalProject, asset.id, { startOffsetMs, endOffsetMs });
+    const nextAsset = selectedImageAsset();
+    const range = imageAssetTimelineRange(project, nextAsset);
+    if (block && range) {
+      block.style.left = `${timelineX(range.startMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    }
+    renderImageAssetInspector();
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    endPointerHistory();
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", finish);
@@ -828,16 +1179,23 @@ function renderTimeline({ keepScroll = false } = {}) {
   const scrollLeft = elements.timeline_scroll.scrollLeft;
   const width = timelineWidth();
   const laneCount = Math.max(2, project.subtitleLaneCount || 2);
+  const assetLayout = layoutImageAssetSubrows(project);
+  const assetTrackHeight = ASSET_TRACK_BASE_HEIGHT_PX +
+    (assetLayout.subrowCount - 1) * ASSET_SUBROW_STRIDE_PX;
   document.documentElement.style.setProperty("--subtitle-lane-count", String(laneCount));
+  document.documentElement.style.setProperty("--asset-track-height", `${assetTrackHeight}px`);
   elements.subtitle_lane_count.textContent = String(laneCount);
   elements.add_subtitle_lane.disabled = laneCount >= MAX_SUBTITLE_LANES;
   elements.timeline_content.style.width = `${width}px`;
   elements.video_track.style.width = `${width}px`;
+  elements.asset_track.style.width = `${width}px`;
   elements.audio_track.style.width = `${width}px`;
   elements.video_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+  elements.asset_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
   elements.audio_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
   renderRuler(width);
   elements.video_track.replaceChildren();
+  elements.asset_track.replaceChildren();
   elements.audio_track.replaceChildren();
   elements.caption_tracks.replaceChildren();
   const captionRows = Array.from({ length: laneCount }, (_, lane) => {
@@ -931,6 +1289,75 @@ function renderTimeline({ keepScroll = false } = {}) {
       addAudioRegionAtTimeline(timelineMs);
     });
     elements.audio_track.append(audioSource);
+  });
+
+  (project.imageAssets || []).forEach((asset, assetIndex) => {
+    const layout = assetLayout.byAssetId.get(asset.id);
+    if (!layout) {
+      return;
+    }
+    const { range, subrow } = layout;
+    const block = document.createElement("div");
+    block.className = "asset-block";
+    block.classList.toggle("selected", asset.id === project.selectedImageAssetId);
+    block.dataset.id = asset.id;
+    block.dataset.subrow = String(subrow);
+    block.style.left = `${timelineX(range.startMs)}px`;
+    block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    block.style.setProperty(
+      "--asset-block-top",
+      `${ASSET_BLOCK_TOP_PX + subrow * ASSET_SUBROW_STRIDE_PX}px`
+    );
+    block.style.zIndex = asset.id === project.selectedImageAssetId ? "12" : "2";
+    const body = document.createElement("button");
+    body.type = "button";
+    body.className = "asset-block-body";
+    body.textContent = asset.name || `이미지 ${assetIndex + 1}`;
+    body.title = `${asset.name || "이미지 에셋"} · 겹친 이미지는 에셋 트랙의 별도 줄에 표시됩니다.`;
+    body.addEventListener("click", () => selectImageAsset(asset.id, { seek: true }));
+    const assetClip = project.clips.find((candidate) => candidate.id === asset.clipId);
+    const nudgeAsset = (side, delta) => {
+      const current = project.imageAssets.find((candidate) => candidate.id === asset.id);
+      const currentClip = project.clips.find((candidate) => candidate.id === current.clipId);
+      const duration = clipDurationMs(currentClip);
+      const startOffsetMs = side === "left"
+        ? Math.max(0, Math.min(current.endOffsetMs - 100, current.startOffsetMs + delta))
+        : current.startOffsetMs;
+      const endOffsetMs = side === "right"
+        ? Math.min(duration, Math.max(current.startOffsetMs + 100, current.endOffsetMs + delta))
+        : current.endOffsetMs;
+      applyProject(
+        updateImageAsset(project, asset.id, { startOffsetMs, endOffsetMs }),
+        { render: false }
+      );
+      renderAll({ keepScroll: true });
+    };
+    block.append(
+      makeHandle(
+        "left",
+        (event) => bindImageAssetTrim(event.currentTarget, asset, "left", event),
+        (delta) => nudgeAsset("left", delta),
+        {
+          label: `${assetIndex + 1}번 이미지 에셋 시작 시각`,
+          valueMs: range.startMs,
+          minMs: assetClip.timelineStartMs,
+          maxMs: range.endMs - 100
+        }
+      ),
+      body,
+      makeHandle(
+        "right",
+        (event) => bindImageAssetTrim(event.currentTarget, asset, "right", event),
+        (delta) => nudgeAsset("right", delta),
+        {
+          label: `${assetIndex + 1}번 이미지 에셋 끝 시각`,
+          valueMs: range.endMs,
+          minMs: range.startMs + 100,
+          maxMs: assetClip.timelineStartMs + clipDurationMs(assetClip)
+        }
+      )
+    );
+    elements.asset_track.append(block);
   });
 
   project.audioRegions.forEach((region, regionIndex) => {
@@ -1089,6 +1516,55 @@ function videoContentRect() {
   };
 }
 
+async function renderImageAssetOverlays() {
+  const sequence = ++imageAssetRenderSequence;
+  elements.image_asset_overlays.replaceChildren();
+  const assets = mediaFile ? imageAssetsAtTimeline(project, project.playheadMs) : [];
+  if (assets.length === 0) {
+    return;
+  }
+  const resolved = await Promise.all(assets.map(async (asset) => ({
+    asset,
+    url: await resolveImageAssetUrl(asset)
+  })));
+  if (sequence !== imageAssetRenderSequence) {
+    return;
+  }
+  const contentRect = videoContentRect();
+  resolved.forEach(({ asset, url }) => {
+    if (!url) {
+      return;
+    }
+    const naturalWidth = Math.max(1, asset.naturalWidth || 512);
+    const naturalHeight = Math.max(1, asset.naturalHeight || 512);
+    const baseFit = Math.min(
+      1,
+      contentRect.width * 0.35 / naturalWidth,
+      contentRect.height * 0.35 / naturalHeight
+    );
+    const overlay = document.createElement("button");
+    overlay.type = "button";
+    overlay.className = "image-asset-overlay";
+    overlay.classList.toggle("selected", asset.id === project.selectedImageAssetId);
+    overlay.dataset.assetId = asset.id;
+    overlay.setAttribute("aria-label", `이미지 에셋: ${asset.name}`);
+    overlay.style.left = `${contentRect.left + contentRect.width * asset.x}px`;
+    overlay.style.top = `${contentRect.top + contentRect.height * asset.y}px`;
+    overlay.style.width = `${Math.max(1, naturalWidth * baseFit * asset.scale)}px`;
+    overlay.style.height = `${Math.max(1, naturalHeight * baseFit * asset.scale)}px`;
+    overlay.style.opacity = String(asset.opacity);
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = "";
+    image.draggable = false;
+    const indicator = document.createElement("i");
+    indicator.className = "asset-drag-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    overlay.append(image, indicator);
+    elements.image_asset_overlays.append(overlay);
+  });
+}
+
 function renderSubtitleOverlay() {
   elements.subtitle_overlays.replaceChildren();
   const cues = mediaFile ? cuesAtTimeline(project, project.playheadMs) : [];
@@ -1181,6 +1657,9 @@ function updatePlayhead() {
   elements.playhead.setAttribute("aria-valuetext", formatTime(project.playheadMs));
   elements.current_time.textContent = formatTime(project.playheadMs);
   elements.duration_time.textContent = `/ ${formatTime(duration)}`;
+  void renderImageAssetOverlays().catch((error) => {
+    console.warn("이미지 에셋 오버레이를 그리지 못했습니다.", error);
+  });
   renderSubtitleOverlay();
   applyPreviewAudioSettings();
 }
@@ -1444,6 +1923,175 @@ function selectAudioRegion(regionId, { seek = false } = {}) {
   scheduleSave();
 }
 
+function selectImageAsset(assetId, { seek = false } = {}) {
+  const asset = (project.imageAssets || []).find((candidate) => candidate.id === assetId);
+  if (!asset) {
+    return;
+  }
+  project = {
+    ...project,
+    selectedImageAssetId: asset.id,
+    selectedClipId: asset.clipId
+  };
+  propertyInspectorMode = "asset";
+  const range = imageAssetTimelineRange(project, asset);
+  if (seek && range) {
+    void seekTimeline(range.startMs);
+  }
+  renderAll({ keepScroll: true });
+  scheduleSave();
+}
+
+async function inspectImageAssetBlob(blob) {
+  if (!(blob instanceof Blob) || blob.size === 0) {
+    throw new Error("클립보드나 파일에 이미지 데이터가 없습니다.");
+  }
+  if (!ALLOWED_IMAGE_ASSET_TYPES.has(blob.type)) {
+    throw new Error("PNG, JPEG, WebP 또는 GIF 이미지만 사용할 수 있습니다. SVG는 안전을 위해 제외합니다.");
+  }
+  if (blob.size > MAX_IMAGE_ASSET_BYTES) {
+    throw new Error(`이미지 한 장은 ${formatFileSize(MAX_IMAGE_ASSET_BYTES)} 이하여야 합니다.`);
+  }
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(blob);
+    const width = bitmap.width;
+    const height = bitmap.height;
+    if (
+      width <= 0 ||
+      height <= 0 ||
+      width > MAX_IMAGE_ASSET_DIMENSION ||
+      height > MAX_IMAGE_ASSET_DIMENSION ||
+      width * height > MAX_IMAGE_ASSET_PIXELS
+    ) {
+      throw new Error(
+        `이미지가 너무 큽니다. 최대 ${MAX_IMAGE_ASSET_DIMENSION}px, ${Math.round(MAX_IMAGE_ASSET_PIXELS / 1_000_000)}메가픽셀까지 사용할 수 있습니다.`
+      );
+    }
+    return { width, height };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("이미지가 너무 큽니다")) {
+      throw error;
+    }
+    throw new Error("손상되었거나 브라우저가 읽을 수 없는 이미지입니다.");
+  } finally {
+    bitmap?.close();
+  }
+}
+
+function pastedImageName(mimeType) {
+  const extension = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif"
+  }[mimeType] || "image";
+  return `붙여넣은 이미지.${extension}`;
+}
+
+async function addImageAssetFromBlob(blob, {
+  timelineMs = project.playheadMs,
+  name = pastedImageName(blob?.type)
+} = {}) {
+  if (projectMutationLockCount > 0) {
+    showToast("다른 미디어 작업이 끝난 뒤 이미지를 추가해 주세요.", "error");
+    return null;
+  }
+  const mapping = mapTimelineToSource(project, timelineMs);
+  if (!mapping) {
+    showToast("이미지를 추가할 영상 구간이 없습니다.", "error");
+    return null;
+  }
+  let dimensions;
+  try {
+    dimensions = await inspectImageAssetBlob(blob);
+  } catch (error) {
+    showToast(error.message, "error", 0);
+    return null;
+  }
+  const clip = project.clips.find((candidate) => candidate.id === mapping.clipId);
+  const startOffsetMs = mapping.clipOffsetMs;
+  const endOffsetMs = Math.min(clipDurationMs(clip), startOffsetMs + 2_000);
+  if (endOffsetMs - startOffsetMs < 100) {
+    showToast("컷 끝에서 최소 0.1초 앞쪽에 이미지를 추가해 주세요.", "error");
+    return null;
+  }
+  const id = `asset-${crypto.randomUUID()}`;
+  const asset = createImageAsset(project, {
+    id,
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    name: String(name || pastedImageName(blob.type)).slice(0, 160),
+    mimeType: blob.type,
+    source: { kind: "blob-key", value: id },
+    naturalWidth: dimensions.width,
+    naturalHeight: dimensions.height
+  });
+  const nextProject = {
+    ...project,
+    imageAssets: [...(project.imageAssets || []), asset],
+    selectedImageAssetId: asset.id,
+    selectedClipId: clip.id
+  };
+  try {
+    await saveProjectWithImageAssetBlob(nextProject, asset.id, blob);
+  } catch (error) {
+    showToast(`이미지 에셋을 저장하지 못했습니다: ${error.message}`, "error", 0);
+    return null;
+  }
+  propertyInspectorMode = "asset";
+  applyProject(nextProject, { save: false });
+  await seekTimeline(mapping.timelineMs);
+  showToast(
+    `${asset.name}을 에셋 트랙에 추가했습니다.${blob.type === "image/png" || blob.type === "image/webp" ? " 투명 배경도 유지됩니다." : ""}`,
+    "success"
+  );
+  return asset;
+}
+
+function imageBlobFromPasteEvent(event) {
+  const items = [...(event.clipboardData?.items || [])];
+  const imageItem = items.find((item) => (
+    item.kind === "file" && ALLOWED_IMAGE_ASSET_TYPES.has(item.type)
+  ));
+  return imageItem?.getAsFile() || null;
+}
+
+async function pasteImageFromSystemClipboard(timelineMs = project.playheadMs) {
+  if (!navigator.clipboard?.read) {
+    elements.stage.focus({ preventScroll: true });
+    showToast("편집기에서 Ctrl/Cmd+V를 눌러 이미지를 붙여넣어 주세요.");
+    return false;
+  }
+  try {
+    const clipboardItems = await navigator.clipboard.read();
+    for (const item of clipboardItems) {
+      const type = item.types.find((candidate) => ALLOWED_IMAGE_ASSET_TYPES.has(candidate));
+      if (type) {
+        const blob = await item.getType(type);
+        return Boolean(await addImageAssetFromBlob(blob, { timelineMs }));
+      }
+    }
+    showToast("클립보드에 PNG, JPEG, WebP 또는 GIF 이미지가 없습니다.", "error");
+    return false;
+  } catch (error) {
+    elements.stage.focus({ preventScroll: true });
+    showToast(
+      error.name === "NotAllowedError"
+        ? "클립보드 읽기가 차단됐습니다. 웹에서 ‘이미지 복사’ 후 편집기에서 Ctrl/Cmd+V를 눌러 주세요."
+        : `클립보드 이미지를 읽지 못했습니다: ${error.message}`,
+      error.name === "NotAllowedError" ? "info" : "error"
+    );
+    return false;
+  }
+}
+
+function openImageAssetFilePicker(timelineMs = project.playheadMs) {
+  pendingAssetTimelineMs = timelineMs;
+  elements.asset_input.click();
+}
+
 function addCueAtPlayhead({ timelineMs = project.playheadMs, lane: requestedLane = null } = {}) {
   const mapping = mapTimelineToSource(project, timelineMs);
   if (!mapping) {
@@ -1574,6 +2222,33 @@ function updateSelectedAudioRegion(patch) {
   applyProject(next);
   applyPreviewAudioSettings();
   return true;
+}
+
+function updateSelectedImageAsset(patch, { fieldKey = null } = {}) {
+  const asset = selectedImageAsset();
+  if (!asset) {
+    return false;
+  }
+  const next = updateImageAsset(project, asset.id, patch);
+  if (fieldKey) {
+    applyFieldProject(next, fieldKey);
+  } else {
+    applyProject(next);
+  }
+  return true;
+}
+
+function deleteSelectedImageAsset(assetId = selectedImageAsset()?.id) {
+  if (!assetId) {
+    return;
+  }
+  const asset = project.imageAssets.find((candidate) => candidate.id === assetId);
+  if (!asset) {
+    return;
+  }
+  applyProject(deleteImageAsset(project, asset.id));
+  releaseImageAssetObjectUrl(asset.id);
+  showToast("이미지 에셋을 삭제했습니다. 실행 취소로 되돌릴 수 있습니다.");
 }
 
 async function chooseMediaFile() {
@@ -2149,6 +2824,7 @@ async function exportVideo() {
       const result = await renderProjectVideo(mediaFile, exportProject, {
         fileHandle: handle,
         signal: controller.signal,
+        resolveImageAsset: (source) => loadImageAssetBlob(exportProject.id, source.value),
         onProgress: (progress, stage) => {
           const label = stage === "finalize"
             ? "파일을 마무리하는 중 · 이 단계는 취소할 수 없습니다"
@@ -2310,6 +2986,64 @@ function bindOverlayDrag() {
   });
 }
 
+function bindImageAssetOverlayDrag() {
+  elements.image_asset_overlays.addEventListener("pointerdown", (event) => {
+    const overlay = event.target.closest(".image-asset-overlay");
+    const assetId = overlay?.dataset.assetId;
+    const asset = project.imageAssets.find((candidate) => candidate.id === assetId);
+    if (!overlay || !asset) {
+      return;
+    }
+    event.preventDefault();
+    project = {
+      ...project,
+      selectedImageAssetId: asset.id,
+      selectedClipId: asset.clipId
+    };
+    propertyInspectorMode = "asset";
+    elements.image_asset_overlays.querySelectorAll(".image-asset-overlay").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate === overlay);
+    });
+    elements.asset_track.querySelectorAll(".asset-block").forEach((candidate) => {
+      candidate.classList.toggle("selected", candidate.dataset.id === asset.id);
+    });
+    renderPropertyInspector();
+    beginPointerHistory();
+    const pointerId = event.pointerId;
+    overlay.setPointerCapture(pointerId);
+    elements.stage.classList.add("dragging-asset");
+    const move = (moveEvent) => {
+      if (moveEvent.pointerId !== pointerId) {
+        return;
+      }
+      const rect = elements.stage.getBoundingClientRect();
+      const content = videoContentRect();
+      const x = Math.max(0, Math.min(1, (moveEvent.clientX - rect.left - content.left) / content.width));
+      const y = Math.max(0, Math.min(1, (moveEvent.clientY - rect.top - content.top) / content.height));
+      project = updateImageAsset(project, asset.id, { x, y });
+      renderImageAssetInspector();
+      overlay.style.left = `${content.left + content.width * x}px`;
+      overlay.style.top = `${content.top + content.height * y}px`;
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
+        return;
+      }
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (overlay.hasPointerCapture(pointerId)) {
+        overlay.releasePointerCapture(pointerId);
+      }
+      elements.stage.classList.remove("dragging-asset");
+      endPointerHistory();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
+}
+
 function closeTimelineContextMenu() {
   elements.timeline_context_menu.hidden = true;
   timelineContext = null;
@@ -2317,10 +3051,12 @@ function closeTimelineContextMenu() {
 
 function openTimelineContextMenu(event) {
   const cueBlock = event.target.closest(".cue-block");
+  const assetBlock = event.target.closest(".asset-block");
   const audioBlock = event.target.closest(".audio-block");
   const captionRow = event.target.closest(".caption-track-row");
+  const inAssetTrack = Boolean(event.target.closest("#asset-track"));
   const inAudioTrack = Boolean(event.target.closest("#audio-track"));
-  if (!cueBlock && !audioBlock && !captionRow && !inAudioTrack) {
+  if (!cueBlock && !assetBlock && !audioBlock && !captionRow && !inAssetTrack && !inAudioTrack) {
     return;
   }
   event.preventDefault();
@@ -2332,14 +3068,23 @@ function openTimelineContextMenu(event) {
     timelineMs,
     lane: laneValue === undefined ? null : Number(laneValue),
     cueId: cueBlock?.dataset.id || null,
+    imageAssetId: assetBlock?.dataset.id || null,
     audioRegionId: audioBlock?.dataset.id || null,
-    kind: cueBlock || captionRow ? "caption" : "audio"
+    kind: cueBlock || captionRow
+      ? "caption"
+      : assetBlock || inAssetTrack
+        ? "asset"
+        : "audio"
   };
   const captionContext = timelineContext.kind === "caption";
+  const assetContext = timelineContext.kind === "asset";
   elements.context_add_cue.hidden = !captionContext;
   elements.context_delete_cue.hidden = !timelineContext.cueId;
   elements.context_add_lane.hidden = !captionContext || project.subtitleLaneCount >= MAX_SUBTITLE_LANES;
-  elements.context_add_audio.hidden = captionContext;
+  elements.context_paste_asset.hidden = !assetContext;
+  elements.context_pick_asset.hidden = !assetContext;
+  elements.context_delete_asset.hidden = !timelineContext.imageAssetId;
+  elements.context_add_audio.hidden = timelineContext.kind !== "audio";
   elements.context_delete_audio.hidden = !timelineContext.audioRegionId;
   elements.timeline_context_menu.hidden = false;
   elements.timeline_context_menu.style.left = `${event.clientX}px`;
@@ -2418,6 +3163,33 @@ function bindActions() {
     }
     elements.media_input.value = "";
   });
+  elements.asset_input.addEventListener("change", () => {
+    const [file] = elements.asset_input.files;
+    const timelineMs = pendingAssetTimelineMs ?? project.playheadMs;
+    pendingAssetTimelineMs = null;
+    elements.asset_input.value = "";
+    if (file) {
+      void addImageAssetFromBlob(file, {
+        timelineMs,
+        name: file.name || pastedImageName(file.type)
+      });
+    }
+  });
+  const pasteAtPlayhead = () => void pasteImageFromSystemClipboard(project.playheadMs);
+  elements.asset_paste.addEventListener("click", pasteAtPlayhead);
+  elements.paste_image_asset.addEventListener("click", pasteAtPlayhead);
+  elements.asset_pick_file.addEventListener("click", () => openImageAssetFilePicker(project.playheadMs));
+  document.addEventListener("paste", (event) => {
+    const blob = imageBlobFromPasteEvent(event);
+    if (!blob) {
+      return;
+    }
+    event.preventDefault();
+    void addImageAssetFromBlob(blob, {
+      timelineMs: project.playheadMs,
+      name: pastedImageName(blob.type)
+    });
+  });
   elements.export_video.addEventListener("click", () => void exportVideoWithLock());
   elements.apply_source_offset.addEventListener("click", () => {
     const seconds = Number(elements.source_offset.value);
@@ -2481,7 +3253,10 @@ function bindActions() {
   elements.preview_video.addEventListener("timeupdate", handleVideoTimeUpdate);
   elements.preview_video.addEventListener("play", () => elements.play_toggle.classList.add("playing"));
   elements.preview_video.addEventListener("pause", () => elements.play_toggle.classList.remove("playing"));
-  elements.preview_video.addEventListener("loadedmetadata", renderSubtitleOverlay);
+  elements.preview_video.addEventListener("loadedmetadata", () => {
+    void renderImageAssetOverlays();
+    renderSubtitleOverlay();
+  });
   elements.toggle_mute.addEventListener("click", () => {
     previewMuted = !previewMuted;
     applyPreviewAudioSettings();
@@ -2496,19 +3271,31 @@ function bindActions() {
     propertyInspectorMode = "caption";
     renderPropertyInspector();
   });
+  elements.asset_mode_tab.addEventListener("click", () => {
+    propertyInspectorMode = "asset";
+    renderPropertyInspector();
+  });
   elements.audio_mode_tab.addEventListener("click", () => {
     propertyInspectorMode = "audio";
     renderPropertyInspector();
   });
-  for (const tab of [elements.caption_mode_tab, elements.audio_mode_tab]) {
+  const propertyTabs = [
+    elements.caption_mode_tab,
+    elements.asset_mode_tab,
+    elements.audio_mode_tab
+  ];
+  for (const [tabIndex, tab] of propertyTabs.entries()) {
     tab.addEventListener("keydown", (event) => {
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
         return;
       }
       event.preventDefault();
-      const next = event.key === "ArrowLeft" || event.key === "Home"
-        ? elements.caption_mode_tab
-        : elements.audio_mode_tab;
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? propertyTabs.length - 1
+          : (tabIndex + (event.key === "ArrowLeft" ? -1 : 1) + propertyTabs.length) % propertyTabs.length;
+      const next = propertyTabs[nextIndex];
       next.click();
       next.focus();
     });
@@ -2655,6 +3442,70 @@ function bindActions() {
     });
   }
 
+  const restoreAssetTimeFields = () => {
+    const asset = selectedImageAsset();
+    const range = asset ? imageAssetTimelineRange(project, asset) : null;
+    if (!range) {
+      renderImageAssetInspector();
+      return;
+    }
+    elements.asset_start.value = formatTime(range.startMs, { compact: true });
+    elements.asset_end.value = formatTime(range.endMs, { compact: true });
+  };
+  elements.asset_start.addEventListener("change", () => {
+    const asset = selectedImageAsset();
+    const clip = project.clips.find((candidate) => candidate.id === asset?.clipId);
+    const timelineMs = parseTime(elements.asset_start.value);
+    if (!asset || !clip || timelineMs === null) {
+      restoreAssetTimeFields();
+      showToast("에셋 시작 시각 형식을 확인해 주세요.", "error");
+      return;
+    }
+    updateSelectedImageAsset({ startOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAssetTimeFields();
+  });
+  elements.asset_end.addEventListener("change", () => {
+    const asset = selectedImageAsset();
+    const clip = project.clips.find((candidate) => candidate.id === asset?.clipId);
+    const timelineMs = parseTime(elements.asset_end.value);
+    if (!asset || !clip || timelineMs === null) {
+      restoreAssetTimeFields();
+      showToast("에셋 종료 시각 형식을 확인해 주세요.", "error");
+      return;
+    }
+    updateSelectedImageAsset({ endOffsetMs: timelineMs - clip.timelineStartMs });
+    restoreAssetTimeFields();
+  });
+  elements.asset_x.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { x: Number(elements.asset_x.value) / 100 },
+      { fieldKey: "asset-x" }
+    );
+  });
+  elements.asset_y.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { y: Number(elements.asset_y.value) / 100 },
+      { fieldKey: "asset-y" }
+    );
+  });
+  elements.asset_scale.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { scale: Number(elements.asset_scale.value) / 100 },
+      { fieldKey: "asset-scale" }
+    );
+  });
+  elements.asset_opacity.addEventListener("input", () => {
+    updateSelectedImageAsset(
+      { opacity: Number(elements.asset_opacity.value) / 100 },
+      { fieldKey: "asset-opacity" }
+    );
+  });
+  elements.asset_x.addEventListener("change", () => endFieldEdit("asset-x"));
+  elements.asset_y.addEventListener("change", () => endFieldEdit("asset-y"));
+  elements.asset_scale.addEventListener("change", () => endFieldEdit("asset-scale"));
+  elements.asset_opacity.addEventListener("change", () => endFieldEdit("asset-opacity"));
+  elements.delete_asset.addEventListener("click", () => deleteSelectedImageAsset());
+
   const restoreAudioTimeFields = () => {
     const region = selectedAudioRegion();
     const range = region ? audioRegionTimelineRange(project, region) : null;
@@ -2780,12 +3631,27 @@ function bindActions() {
   });
 
   elements.caption_tracks.addEventListener("contextmenu", openTimelineContextMenu);
+  elements.asset_track.addEventListener("contextmenu", openTimelineContextMenu);
   elements.audio_track.addEventListener("contextmenu", openTimelineContextMenu);
   elements.context_add_cue.addEventListener("click", () => {
     const context = timelineContext;
     closeTimelineContextMenu();
     if (context) {
       addCueAtPlayhead({ timelineMs: context.timelineMs, lane: context.lane });
+    }
+  });
+  elements.context_paste_asset.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      void pasteImageFromSystemClipboard(context.timelineMs);
+    }
+  });
+  elements.context_pick_asset.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context) {
+      openImageAssetFilePicker(context.timelineMs);
     }
   });
   elements.context_add_audio.addEventListener("click", () => {
@@ -2800,6 +3666,13 @@ function bindActions() {
     closeTimelineContextMenu();
     if (context?.cueId) {
       applyProject(deleteSubtitleCue(project, context.cueId));
+    }
+  });
+  elements.context_delete_asset.addEventListener("click", () => {
+    const context = timelineContext;
+    closeTimelineContextMenu();
+    if (context?.imageAssetId) {
+      deleteSelectedImageAsset(context.imageAssetId);
     }
   });
   elements.context_delete_audio.addEventListener("click", () => {
@@ -2825,9 +3698,11 @@ function bindActions() {
   window.addEventListener("blur", closeTimelineContextMenu);
 
   bindOverlayDrag();
+  bindImageAssetOverlayDrag();
   bindTimelineSeeking();
   window.addEventListener("resize", () => {
     renderTimeline({ keepScroll: true });
+    void renderImageAssetOverlays();
     renderSubtitleOverlay();
   });
   window.addEventListener("keydown", (event) => {
@@ -2934,6 +3809,7 @@ async function initialize() {
     project.selectedClipId = project.clips[0].id;
   }
   await saveProject(project);
+  scheduleImageAssetBlobPrune();
   await initializeSourceBinding();
   renderAll();
   if (document.fonts?.load) {
@@ -3014,6 +3890,7 @@ window.addEventListener("beforeunload", () => {
   if (mediaUrl) {
     URL.revokeObjectURL(mediaUrl);
   }
+  releaseAllImageAssetObjectUrls();
   cancelActiveJob();
 });
 

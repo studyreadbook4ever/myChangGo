@@ -23,7 +23,9 @@ import {
   clamp,
   cueTimelineRange,
   findAudioRegionOverlaps,
-  findSubtitleOverlaps
+  findSubtitleOverlaps,
+  imageAssetTimelineRange,
+  imageAssetsAtTimeline
 } from "../../extension/lib/editor-core.js";
 
 const PCM_SAMPLE_RATE = 16_000;
@@ -31,6 +33,7 @@ const OUTPUT_AUDIO_CHANNELS = 2;
 const OUTPUT_AUDIO_SAMPLE_RATE = 48_000;
 const OUTPUT_AUDIO_BITRATE = 160_000;
 const FRAME_INDEX_EPSILON = 1e-7;
+export const MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES = 256 * 1024 * 1024;
 
 function throwIfAborted(signal) {
   if (signal?.aborted) {
@@ -349,6 +352,231 @@ export function activeCuesAt(project, outputSeconds) {
       || String(a.cue.id).localeCompare(String(b.cue.id))
     ))
     .map(({ cue }) => cue);
+}
+
+export function activeImageAssetsAt(project, outputSeconds) {
+  return imageAssetsAtTimeline(project, Number(outputSeconds) * 1000);
+}
+
+export function imageAssetDrawRect(canvas, asset, image) {
+  const canvasWidth = Math.max(1, Number(canvas?.width) || 1);
+  const canvasHeight = Math.max(1, Number(canvas?.height) || 1);
+  const naturalWidth = Math.max(
+    1,
+    Number(asset?.naturalWidth) || Number(image?.width) || 1
+  );
+  const naturalHeight = Math.max(
+    1,
+    Number(asset?.naturalHeight) || Number(image?.height) || 1
+  );
+  const baseFit = Math.min(
+    1,
+    canvasWidth * 0.35 / naturalWidth,
+    canvasHeight * 0.35 / naturalHeight
+  );
+  const requestedScale = Number(asset?.scale);
+  const scale = clamp(Number.isFinite(requestedScale) ? requestedScale : 1, 0.05, 5);
+  const width = naturalWidth * baseFit * scale;
+  const height = naturalHeight * baseFit * scale;
+  const requestedX = Number(asset?.x);
+  const requestedY = Number(asset?.y);
+  const centerX = canvasWidth * clamp(Number.isFinite(requestedX) ? requestedX : 0.5, 0, 1);
+  const centerY = canvasHeight * clamp(Number.isFinite(requestedY) ? requestedY : 0.5, 0, 1);
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width,
+    height
+  };
+}
+
+export function drawImageAsset(context, canvas, asset, image) {
+  if (!context || !asset || !image) {
+    return;
+  }
+  const rect = imageAssetDrawRect(canvas, asset, image);
+  context.save();
+  context.globalAlpha = clamp(
+    Number.isFinite(Number(asset.opacity)) ? Number(asset.opacity) : 1,
+    0,
+    1
+  );
+  context.globalCompositeOperation = "source-over";
+  context.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+  context.restore();
+}
+
+async function imageAssetBlob(asset, resolveImageAsset, fetchImageAsset) {
+  if (asset.source?.kind === "data-url") {
+    if (typeof fetchImageAsset !== "function") {
+      throw new Error(`‘${asset.name}’ 이미지 데이터를 읽을 수 있는 fetch 구현이 없습니다.`);
+    }
+    const response = await fetchImageAsset(asset.source.value);
+    if (!response.ok) {
+      throw new Error(`‘${asset.name}’ 이미지 데이터를 읽지 못했습니다.`);
+    }
+    return response.blob();
+  }
+  if (asset.source?.kind === "blob-key") {
+    if (typeof resolveImageAsset !== "function") {
+      throw new Error(`‘${asset.name}’ 로컬 이미지 저장소를 연결하지 못했습니다.`);
+    }
+    const resolved = await resolveImageAsset(asset.source, asset);
+    if (!(resolved instanceof Blob)) {
+      throw new Error(`‘${asset.name}’ 로컬 이미지 데이터를 읽지 못했습니다.`);
+    }
+    return resolved;
+  }
+  throw new Error(`‘${asset.name}’ 이미지 참조가 올바르지 않습니다.`);
+}
+
+function decodedImageRgbaBytes(image) {
+  const width = Number(image?.width);
+  const height = Number(image?.height);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    throw new Error("디코딩한 이미지 에셋의 크기가 올바르지 않습니다.");
+  }
+  return Math.ceil(width) * Math.ceil(height) * 4;
+}
+
+function imageAssetMetadataRgbaBytes(asset) {
+  const width = Number(asset?.naturalWidth);
+  const height = Number(asset?.naturalHeight);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    return null;
+  }
+  return Math.ceil(width) * Math.ceil(height) * 4;
+}
+
+function decodedMemoryLimitLabel(bytes) {
+  if (bytes >= 1024 * 1024) {
+    return `${Math.round(bytes / (1024 * 1024))} MiB`;
+  }
+  return `${bytes} B`;
+}
+
+function decodedMemoryLimitError(memoryLimit) {
+  return new Error(
+    `동시에 표시되는 이미지 에셋의 디코드 메모리가 `
+    + `${decodedMemoryLimitLabel(memoryLimit)}를 넘습니다. `
+    + "이미지 크기나 겹치는 에셋 수를 줄여 주세요."
+  );
+}
+
+export function createImageAssetRenderCache(project, {
+  resolveImageAsset = null,
+  fetchImageAsset = globalThis.fetch?.bind(globalThis),
+  decodeImageAsset = globalThis.createImageBitmap?.bind(globalThis),
+  maxDecodedBytes = MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES,
+  signal
+} = {}) {
+  const memoryLimit = Number(maxDecodedBytes);
+  if (!Number.isFinite(memoryLimit) || memoryLimit <= 0) {
+    throw new TypeError("이미지 에셋 디코드 메모리 상한은 0보다 커야 합니다.");
+  }
+
+  const decoded = new Map();
+  let decodedBytes = 0;
+
+  const closeEntry = (assetId) => {
+    const entry = decoded.get(assetId);
+    if (!entry) {
+      return;
+    }
+    decoded.delete(assetId);
+    decodedBytes = Math.max(0, decodedBytes - entry.bytes);
+    entry.image.close?.();
+  };
+
+  const closeAll = () => {
+    for (const assetId of [...decoded.keys()]) {
+      closeEntry(assetId);
+    }
+  };
+
+  const releaseThrough = (outputSeconds) => {
+    const outputMs = Math.round(Number(outputSeconds) * 1000);
+    if (!Number.isFinite(outputMs)) {
+      return;
+    }
+    for (const [assetId, entry] of decoded) {
+      if (entry.endMs <= outputMs) {
+        closeEntry(assetId);
+      }
+    }
+  };
+
+  const prepareAt = async (outputSeconds) => {
+    throwIfAborted(signal);
+    releaseThrough(outputSeconds);
+    const activeAssets = activeImageAssetsAt(project, outputSeconds);
+
+    try {
+      for (const asset of activeAssets) {
+        if (decoded.has(asset.id)) {
+          continue;
+        }
+        if (typeof decodeImageAsset !== "function") {
+          throw new Error("이미지 에셋을 디코딩할 수 있는 브라우저 기능이 없습니다.");
+        }
+
+        const metadataBytes = imageAssetMetadataRgbaBytes(asset);
+        if (metadataBytes !== null && decodedBytes + metadataBytes > memoryLimit) {
+          throw decodedMemoryLimitError(memoryLimit);
+        }
+        const blob = await imageAssetBlob(asset, resolveImageAsset, fetchImageAsset);
+        throwIfAborted(signal);
+        if (blob.type && asset.mimeType && blob.type !== asset.mimeType) {
+          throw new Error(`‘${asset.name}’ 이미지 형식이 저장 정보와 다릅니다.`);
+        }
+
+        const image = await decodeImageAsset(blob);
+        try {
+          throwIfAborted(signal);
+          const bytes = decodedImageRgbaBytes(image);
+          if (decodedBytes + bytes > memoryLimit) {
+            throw decodedMemoryLimitError(memoryLimit);
+          }
+          const range = imageAssetTimelineRange(project, asset);
+          if (!range) {
+            image?.close?.();
+            continue;
+          }
+          decoded.set(asset.id, {
+            image,
+            bytes,
+            endMs: range.endMs
+          });
+          decodedBytes += bytes;
+        } catch (error) {
+          image?.close?.();
+          throw error;
+        }
+      }
+    } catch (error) {
+      closeAll();
+      throw error;
+    }
+
+    return activeAssets
+      .map((asset) => ({
+        asset,
+        image: decoded.get(asset.id)?.image
+      }))
+      .filter(({ image }) => Boolean(image));
+  };
+
+  return {
+    prepareAt,
+    releaseThrough,
+    closeAll,
+    get decodedBytes() {
+      return decodedBytes;
+    },
+    get decodedCount() {
+      return decoded.size;
+    }
+  };
 }
 
 export function wrapCaption(context, text, maxWidth) {
@@ -775,12 +1003,14 @@ export function applyAudioAutomationToSample(sample, automation) {
 export async function renderProjectVideo(file, project, {
   fileHandle = null,
   onProgress = () => {},
+  resolveImageAsset = null,
   signal
 } = {}) {
   throwIfAborted(signal);
   const input = createInput(file);
   let output = null;
   let fileTransaction = null;
+  let imageAssetCache = null;
   let completed = false;
   try {
     const source = await prepareRenderSource(input, project);
@@ -797,6 +1027,10 @@ export async function renderProjectVideo(file, project, {
       frameRate,
       videoBitrate
     } = settings;
+    imageAssetCache = createImageAssetRenderCache(project, {
+      resolveImageAsset,
+      signal
+    });
     const outputCodecs = await chooseOutputCodecs(settings);
     let target;
     if (fileHandle) {
@@ -879,6 +1113,11 @@ export async function renderProjectVideo(file, project, {
             context.fillStyle = "#000";
             context.fillRect(0, 0, width, height);
             sourceSample?.drawWithFit(context, { fit: "contain" });
+            const activeImageAssets = await imageAssetCache.prepareAt(timing.outputTimestamp);
+            for (const { asset, image } of activeImageAssets) {
+              drawImageAsset(context, canvas, asset, image);
+            }
+            imageAssetCache.releaseThrough(timing.outputTimestamp + timing.duration);
             for (const cue of activeCuesAt(project, timing.outputTimestamp)) {
               drawCaption(context, canvas, project, cue);
             }
@@ -1004,6 +1243,7 @@ export async function renderProjectVideo(file, project, {
     throw error;
   } finally {
     input.dispose();
+    imageAssetCache?.closeAll();
     if (!completed && fileTransaction && !fileTransaction.settled) {
       await fileTransaction.abort().catch(() => {});
     }

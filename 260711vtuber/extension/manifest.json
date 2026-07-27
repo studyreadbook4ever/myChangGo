@@ -2,10 +2,11 @@
   "manifest_version": 3,
   "name": "치지직 키리누키 스튜디오",
   "version": "2.0.0",
-  "description": "치지직 생방송·다시보기의 선택 구간을 컷 편집하고 구간별 음성·다중 로컬 AI 한글 자막을 검수·렌더합니다.",
+  "description": "치지직 생방송·다시보기의 선택 구간을 컷 편집하고 투명 이미지 에셋·구간별 음성·다중 로컬 AI 한글 자막을 검수·렌더합니다.",
   "minimum_chrome_version": "120",
   "permissions": [
     "activeTab",
+    "clipboardRead",
     "scripting",
     "sidePanel",
     "storage",
