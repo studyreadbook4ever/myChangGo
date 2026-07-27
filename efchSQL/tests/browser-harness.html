@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>efchSQL browser harness</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: #eaf3ee;
+        background: #16231f;
+      }
+
+      .harness-bar {
+        position: sticky;
+        z-index: 5;
+        top: 0;
+        display: flex;
+        min-height: 54px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 10px 18px;
+        border-bottom: 1px solid #344940;
+        background: rgba(22, 35, 31, 0.97);
+      }
+
+      .harness-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 13px;
+        font-weight: 750;
+      }
+
+      .status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #e2a84d;
+        box-shadow: 0 0 0 4px rgba(226, 168, 77, 0.13);
+      }
+
+      [data-test-status="pass"] .status-dot {
+        background: #83c98f;
+        box-shadow: 0 0 0 4px rgba(131, 201, 143, 0.13);
+      }
+
+      [data-test-status="fail"] .status-dot {
+        background: #ee7477;
+        box-shadow: 0 0 0 4px rgba(238, 116, 119, 0.13);
+      }
+
+      #status {
+        color: #b8c7c0;
+        font: 11px/1.4 ui-monospace, "SFMono-Regular", Consolas, monospace;
+      }
+
+      #demo-frame {
+        display: block;
+        width: 100%;
+        height: calc(100vh - 54px);
+        min-height: 720px;
+        border: 0;
+        background: #f4f1ea;
+      }
+    </style>
+  </head>
+  <body data-test-status="pending">
+    <header class="harness-bar">
+      <div class="harness-title">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>efchSQL interaction harness</span>
+      </div>
+      <output id="status" aria-live="polite">Launching local demo…</output>
+    </header>
+    <iframe
+      id="demo-frame"
+      title="efchSQL demo under browser test"
+      src="../index.html?test=1"
+    ></iframe>
+
+    <script>
+      (() => {
+        const frame = document.querySelector("#demo-frame");
+        const status = document.querySelector("#status");
+        const log = [];
+        const mobileRun = new URLSearchParams(window.location.search).has("mobile");
+
+        function report(message) {
+          log.push(message);
+          status.textContent = message;
+        }
+
+        function assert(condition, message) {
+          if (!condition) throw new Error(message);
+          report(`✓ ${message}`);
+        }
+
+        function sameArray(left, right) {
+          return left.length === right.length && left.every((value, index) => value === right[index]);
+        }
+
+        function weightSignature(weights) {
+          return JSON.stringify(
+            Object.entries(weights)
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([symbol, value]) => [symbol, Number(value)]),
+          );
+        }
+
+        async function waitFor(predicate, label, timeout = 8000) {
+          const started = performance.now();
+          while (performance.now() - started < timeout) {
+            const value = predicate();
+            if (value) return value;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          throw new Error(`Timed out waiting for ${label}`);
+        }
+
+        async function waitForRun(app, previousRun, label) {
+          return waitFor(
+            () => {
+              const snapshot = app.getSnapshot();
+              if (!snapshot.running && snapshot.lastError) {
+                throw new Error(`${label} failed: ${snapshot.lastError}`);
+              }
+              return !snapshot.running && snapshot.runCount > previousRun ? snapshot : null;
+            },
+            label,
+          );
+        }
+
+        async function clickAndWait(app, element, label) {
+          const previousRun = app.getSnapshot().runCount;
+          element.click();
+          return waitForRun(app, previousRun, label);
+        }
+
+        async function run() {
+          report("Waiting for ESM app…");
+          const app = await waitFor(
+            () => frame.contentWindow && frame.contentWindow.__efchApp,
+            "window.__efchApp",
+          );
+          await app.ready;
+
+          const page = frame.contentDocument;
+          let snapshot = app.getSnapshot();
+
+          if (mobileRun) {
+            const drawer = page.querySelector("#right-rail");
+            assert(snapshot.ready, "mobile demo reports ready");
+            assert(snapshot.lastError === null, "mobile initial query has no error");
+            assert(
+              page.defaultView.matchMedia("(max-width: 930px)").matches,
+              "mobile Chromium viewport activates the drawer layout",
+            );
+            assert(drawer.inert, "closed mobile preference drawer is not tabbable");
+            page.querySelector("#mobile-tune").click();
+            assert(drawer.getAttribute("role") === "dialog", "open mobile drawer exposes dialog semantics");
+            assert(!drawer.inert, "open mobile drawer becomes interactive");
+            assert(page.querySelector(".feed-column").inert, "open mobile drawer makes the background inert");
+            assert(page.activeElement === page.querySelector("#close-tune"), "open mobile drawer receives focus");
+            page.querySelector("#close-tune").click();
+            assert(drawer.inert, "closed mobile drawer becomes inert again");
+            assert(!page.querySelector(".feed-column").inert, "closing the drawer restores the background");
+
+            document.body.dataset.testStatus = "pass";
+            status.textContent = `PASS · ${log.length} mobile browser assertions`;
+            window.__efchHarness = { status: "pass", assertions: [...log], snapshot };
+            return;
+          }
+
+          const [{ formatPreferenceClause }, { parseQuery }] = await Promise.all([
+            import("../src/demo-data.js"),
+            import("../src/query-parser.js"),
+          ]);
+          const unusualWeights = {
+            "local news": 1.25,
+            'quote"mark': -0.5,
+            LIMIT: 0.75,
+          };
+          const roundTrip = parseQuery(
+            `SELECT * FROM feed PREFER ${formatPreferenceClause(unusualWeights)} LIMIT 1 MODE EXACT`,
+          );
+          assert(
+            weightSignature(roundTrip.prefer) === weightSignature(unusualWeights),
+            "preference symbols with spaces, quotes, and keywords round-trip safely",
+          );
+
+          assert(snapshot.ready, "demo reports ready");
+          assert(snapshot.lastError === null, "initial query has no error");
+          assert(snapshot.mode === "exact", "initial execution is exact");
+          assert(snapshot.exhaustiveMatch === true, "optimized result matches exhaustive oracle");
+          assert(snapshot.resultIds.length === 12, "initial top-K contains 12 posts");
+          assert(page.querySelectorAll(".feed-card[data-row-id]").length === 12, "12 feed cards rendered");
+          assert(Number(snapshot.metrics.blocksVisited) < Number(snapshot.metrics.blocksTotal), "exact engine prunes whole blocks");
+          assert(Number(snapshot.metrics.refinedRows) < Number(snapshot.metrics.totalRows), "refinement is non-uniform");
+
+          const baseline = page.querySelector("#tab-baseline");
+          snapshot = await clickAndWait(app, baseline, "baseline query");
+          assert(snapshot.activeTab === "baseline", "neutral baseline tab activates");
+          assert(snapshot.lastError === null, "neutral baseline remains syntactically valid");
+          assert(snapshot.exhaustiveMatch === true, "neutral baseline still matches exhaustive oracle");
+
+          const baselineSlider = page.querySelector('input[data-symbol="systems"]');
+          baselineSlider.value = "1.1";
+          baselineSlider.dispatchEvent(new Event("input", { bubbles: true }));
+          const baselineSliderRun = app.getSnapshot().runCount;
+          baselineSlider.dispatchEvent(new Event("change", { bubbles: true }));
+          snapshot = await waitForRun(app, baselineSliderRun, "baseline slider transition");
+          assert(snapshot.activeTab === "personal", "moving a baseline slider switches to Personal");
+          assert(snapshot.weights.systems === 1.1, "baseline slider applies its selected weight");
+          assert(snapshot.weights.science === 1.7, "baseline slider preserves the saved personal profile");
+
+          snapshot = await clickAndWait(app, baseline, "second baseline query");
+          const personal = page.querySelector("#tab-personal");
+          snapshot = await clickAndWait(app, personal, "personal query restore");
+          assert(snapshot.activeTab === "personal", "personal profile restores");
+          assert(snapshot.weights.systems === 1.1, "Personal restores the slider-adjusted profile");
+
+          const budgetButton = page.querySelector("#mode-budget");
+          snapshot = await clickAndWait(app, budgetButton, "budget mode query");
+          assert(snapshot.mode === "budget", "budget mode toggle changes execution");
+          assert(/\bMODE\s+BUDGET\b/i.test(page.querySelector("#query-editor").value), "query text reflects budget mode");
+          assert(page.querySelector("#exact-badge").textContent.trim() === "Budget", "telemetry labels budgeted result");
+
+          const exactButton = page.querySelector("#mode-exact");
+          snapshot = await clickAndWait(app, exactButton, "exact mode query");
+          assert(snapshot.mode === "exact", "exact mode toggle restores execution");
+          assert(snapshot.exhaustiveMatch === true, "restored exact result passes oracle");
+
+          const slider = page.querySelector('input[data-symbol="systems"]');
+          const beforeSlider = snapshot;
+          slider.value = "-2.4";
+          slider.dispatchEvent(new Event("input", { bubbles: true }));
+          const previousSliderRun = app.getSnapshot().runCount;
+          slider.dispatchEvent(new Event("change", { bubbles: true }));
+          snapshot = await waitForRun(app, previousSliderRun, "slider rerank");
+          assert(snapshot.weights.systems === -2.4, "topic slider changes the preference snapshot");
+          assert(
+            !sameArray(beforeSlider.resultIds, snapshot.resultIds),
+            "topic slider changes the engine ranking",
+          );
+          assert(snapshot.indexRebuilds === 0, "slider rerank does not rebuild the index");
+
+          snapshot = await clickAndWait(app, page.querySelector("#reset-button"), "reset query");
+          assert(snapshot.weights.systems === INITIAL_SYSTEMS_WEIGHT, "reset restores the initial profile");
+
+          const beforeFeedback = snapshot;
+          const firstCard = page.querySelector(".feed-card[data-row-id]");
+          const dislikedId = firstCard.dataset.rowId;
+          const dislikeButton = firstCard.querySelector('[data-action="dislike"]');
+          snapshot = await clickAndWait(app, dislikeButton, "negative feedback rerank");
+          assert(
+            weightSignature(snapshot.weights) !== weightSignature(beforeFeedback.weights),
+            "negative feedback changes sparse preference weights",
+          );
+          assert(
+            !sameArray(beforeFeedback.resultIds, snapshot.resultIds),
+            "negative feedback changes the subsequent engine ranking",
+          );
+          assert(snapshot.resultIds[0] !== dislikedId, "down-weighted top post leaves first place");
+          assert(snapshot.indexRebuilds === 0, "feedback rerank reuses the same index");
+          assert(
+            page.querySelector("#metric-profile").textContent === `v${snapshot.profileVersion}`,
+            "profile telemetry advances after feedback",
+          );
+
+          const editor = page.querySelector("#query-editor");
+          const tabAllowed = editor.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Tab",
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          assert(tabAllowed, "query editor leaves Tab available for keyboard navigation");
+
+          editor.value = editor.value.replace(/\bLIMIT\s+\d+/i, "LIMIT 7");
+          snapshot = await clickAndWait(app, page.querySelector("#run-button"), "edited LIMIT query");
+          assert(snapshot.resultIds.length === 7, "editable SQL-like LIMIT controls result count");
+
+          editor.value = editor.value.replace(/\bsystems\s*:/i, "Systems:");
+          const versionBeforeCaseOnlyEdit = snapshot.profileVersion;
+          snapshot = await clickAndWait(app, page.querySelector("#run-button"), "case-normalized query");
+          assert(
+            snapshot.profileVersion === versionBeforeCaseOnlyEdit,
+            "symbol casing does not create a false profile version",
+          );
+
+          const beforeFailedQuery = snapshot;
+          editor.value = [
+            "SELECT * FROM nope",
+            "PREFER systems: -3",
+            "LIMIT 7 MODE BUDGET 40",
+          ].join("\n");
+          page.querySelector("#run-button").click();
+          await waitFor(() => !page.querySelector("#query-error").hidden, "query error banner");
+          snapshot = app.getSnapshot();
+          assert(
+            snapshot.runCount === beforeFailedQuery.runCount,
+            "failed query does not replace the last successful run",
+          );
+          assert(snapshot.lastError !== null, "invalid query exposes a useful error state");
+          assert(
+            weightSignature(snapshot.weights) === weightSignature(beforeFailedQuery.weights),
+            "failed query cannot mutate the preference snapshot",
+          );
+          assert(
+            snapshot.profileVersion === beforeFailedQuery.profileVersion,
+            "failed query cannot advance the profile version",
+          );
+          assert(snapshot.mode === beforeFailedQuery.mode, "failed query cannot change the active mode");
+
+          snapshot = await clickAndWait(app, page.querySelector("#reset-button"), "final clean reset");
+          assert(snapshot.lastError === null, "reset recovers from query error");
+          assert(snapshot.exhaustiveMatch === true, "final exact result remains oracle-verified");
+
+          const savedCandidate = page.querySelector(".feed-card[data-row-id]");
+          snapshot = await clickAndWait(
+            app,
+            savedCandidate.querySelector('[data-action="like"]'),
+            "save-by-like query",
+          );
+          const savedId = savedCandidate.dataset.rowId;
+          snapshot = await clickAndWait(
+            app,
+            page.querySelector('.nav-item[data-view="saved"]'),
+            "saved view query",
+          );
+          assert(snapshot.activeView === "saved", "Saved view activates");
+          assert(snapshot.resultIds.includes(savedId), "liked post appears in Saved");
+          const savedCard = page.querySelector(`.feed-card[data-row-id="${savedId}"]`);
+          snapshot = await clickAndWait(
+            app,
+            savedCard.querySelector('[data-action="dislike"]'),
+            "remove saved post query",
+          );
+          assert(snapshot.resultIds.length === 0, "Less removes the post from the active Saved query");
+          assert(page.querySelector(".empty-state"), "Saved view renders its empty state after removal");
+
+          const drawer = page.querySelector("#right-rail");
+          assert(
+            !page.defaultView.matchMedia("(max-width: 930px)").matches,
+            "desktop Chromium viewport keeps the three-column layout",
+          );
+          assert(!drawer.inert, "desktop preference rail remains keyboard accessible");
+
+          snapshot = await clickAndWait(
+            app,
+            page.querySelector("#reset-button"),
+            "post-test presentation reset",
+          );
+          assert(snapshot.activeView === "foryou", "final reset restores the recommendation feed");
+          assert(snapshot.resultIds.length === 12, "final presentation state contains 12 recommendations");
+
+          document.body.dataset.testStatus = "pass";
+          status.textContent = `PASS · ${log.length} browser assertions`;
+          window.__efchHarness = { status: "pass", assertions: [...log], snapshot };
+        }
+
+        const INITIAL_SYSTEMS_WEIGHT = 2.4;
+
+        run().catch((error) => {
+          document.body.dataset.testStatus = "fail";
+          status.textContent = `FAIL · ${error.message}`;
+          window.__efchHarness = {
+            status: "fail",
+            error: error.stack || String(error),
+            assertions: [...log],
+          };
+        });
+      })();
+    </script>
+  </body>
+</html>

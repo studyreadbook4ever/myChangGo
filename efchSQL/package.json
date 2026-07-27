@@ -1,0 +1,21 @@
+{
+  "name": "efchsql",
+  "version": "0.1.0",
+  "description": "A dependency-free, SQL-inspired exact top-K engine for live preference ranking.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "bench": "node scripts/benchmark.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "verify": "node scripts/verify.mjs",
+    "dev": "node scripts/serve.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

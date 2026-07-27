@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="efchSQL is a dependency-free, local demo of exact non-uniform top-K recommendation."
+    />
+    <meta name="theme-color" content="#f4f1ea" />
+    <title>efchSQL — local recommendation lab</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#feed">Skip to recommendations</a>
+
+    <div class="app-shell">
+      <aside class="left-rail" aria-label="Primary navigation">
+        <div class="brand-lockup" aria-label="efchSQL home">
+          <span class="brand-mark" aria-hidden="true">e</span>
+          <div>
+            <strong>efchSQL</strong>
+            <span>local ranking lab</span>
+          </div>
+        </div>
+
+        <nav class="primary-nav" aria-label="Demo views">
+          <button class="nav-item is-active" type="button" data-view="foryou" aria-current="page">
+            <span class="nav-icon" aria-hidden="true">⌂</span>
+            <span>For you</span>
+          </button>
+          <button class="nav-item" type="button" data-view="fresh">
+            <span class="nav-icon" aria-hidden="true">◷</span>
+            <span>Fresh</span>
+          </button>
+          <button class="nav-item" type="button" data-view="saved">
+            <span class="nav-icon" aria-hidden="true">◇</span>
+            <span>Saved</span>
+          </button>
+        </nav>
+
+        <div class="rail-note">
+          <div class="status-line">
+            <span class="status-dot" aria-hidden="true"></span>
+            <strong>Local only</strong>
+          </div>
+          <p>No account, outbound request, GPU, tracking, or remote model.</p>
+        </div>
+
+        <div class="rail-footer">
+          <span>MIT licensed</span>
+          <span aria-hidden="true">·</span>
+          <a href="./docs/ARCHITECTURE.md">How it works</a>
+        </div>
+      </aside>
+
+      <main class="feed-column" id="feed">
+        <header class="feed-header">
+          <div class="feed-title-row">
+            <div>
+              <p class="eyebrow">Recommendation workspace</p>
+              <h1>Your small, inspectable feed</h1>
+            </div>
+            <button class="icon-button mobile-tune-button" id="mobile-tune" type="button" aria-label="Open preference controls" aria-expanded="false" aria-controls="right-rail">
+              <span aria-hidden="true">≛</span>
+            </button>
+          </div>
+
+          <div class="feed-tabs" role="tablist" aria-label="Feed mode">
+            <button class="feed-tab is-active" id="tab-personal" type="button" role="tab" aria-selected="true" aria-controls="feed-list" data-tab="personal">
+              Personal
+            </button>
+            <button class="feed-tab" id="tab-baseline" type="button" role="tab" aria-selected="false" aria-controls="feed-list" data-tab="baseline">
+              Neutral baseline
+            </button>
+          </div>
+        </header>
+
+        <section class="query-studio" aria-labelledby="query-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Live query</p>
+              <h2 id="query-title">Ask for a top-K</h2>
+            </div>
+            <div class="mode-switch" aria-label="Query accuracy mode">
+              <button class="mode-option is-active" id="mode-exact" type="button" aria-pressed="true" data-mode="exact">
+                Exact
+              </button>
+              <button class="mode-option" id="mode-budget" type="button" aria-pressed="false" data-mode="budget">
+                Budget
+              </button>
+            </div>
+          </div>
+
+          <label class="query-editor-label" for="query-editor">
+            <span>efchSQL statement</span>
+            <span class="keyboard-hint"><kbd>Ctrl</kbd><span>+</span><kbd>Enter</kbd> to run</span>
+          </label>
+          <div class="query-editor-wrap">
+            <span class="line-number" aria-hidden="true">1<br />2<br />3<br />4</span>
+            <textarea
+              id="query-editor"
+              rows="4"
+              spellcheck="false"
+              autocomplete="off"
+              autocapitalize="off"
+              aria-describedby="query-help query-error"
+            ></textarea>
+          </div>
+          <div class="query-actions">
+            <p id="query-help">Edit the weights, filter, limit, or execution mode. Nothing leaves this page.</p>
+            <div class="button-cluster">
+              <button class="secondary-button" id="reset-button" type="button">Reset</button>
+              <button class="primary-button" id="run-button" type="button">
+                <span>Run query</span>
+                <span aria-hidden="true">↵</span>
+              </button>
+            </div>
+          </div>
+          <div class="error-banner" id="query-error" role="alert" hidden>
+            <span aria-hidden="true">!</span>
+            <p></p>
+          </div>
+        </section>
+
+        <section class="feed-toolbar" aria-live="polite">
+          <div>
+            <p class="eyebrow">Ranked locally</p>
+            <h2 id="result-heading">Recommended now</h2>
+          </div>
+          <div class="run-summary" id="run-summary">
+            <span class="run-pulse" aria-hidden="true"></span>
+            <span>Preparing index…</span>
+          </div>
+        </section>
+
+        <div class="feedback-toast" id="feedback-toast" role="status" aria-live="polite" hidden></div>
+
+        <section class="feed-list" id="feed-list" aria-labelledby="result-heading" aria-busy="true">
+          <article class="feed-card skeleton-card" aria-hidden="true">
+            <span class="skeleton avatar-skeleton"></span>
+            <div>
+              <span class="skeleton line-skeleton short"></span>
+              <span class="skeleton line-skeleton"></span>
+              <span class="skeleton line-skeleton"></span>
+            </div>
+          </article>
+          <article class="feed-card skeleton-card" aria-hidden="true">
+            <span class="skeleton avatar-skeleton"></span>
+            <div>
+              <span class="skeleton line-skeleton short"></span>
+              <span class="skeleton line-skeleton"></span>
+              <span class="skeleton line-skeleton medium"></span>
+            </div>
+          </article>
+        </section>
+
+        <footer class="feed-footer">
+          <p>Fictional, deterministic demo records. No scraped posts or proprietary ranking code.</p>
+        </footer>
+      </main>
+
+      <aside class="right-rail" id="right-rail" aria-label="Preference and performance controls">
+        <div class="mobile-panel-header">
+          <div>
+            <p class="eyebrow">Control room</p>
+            <strong>Tune this feed</strong>
+          </div>
+          <button class="icon-button" id="close-tune" type="button" aria-label="Close preference controls">×</button>
+        </div>
+
+        <section class="side-card profile-card" aria-labelledby="profile-title">
+          <div class="side-card-heading">
+            <div>
+              <p class="eyebrow">Preference vector</p>
+              <h2 id="profile-title">Tune what matters</h2>
+            </div>
+            <span class="profile-version" id="profile-version">v1</span>
+          </div>
+          <p class="side-copy">Move a control or react to a post. The same block index is reused.</p>
+
+          <div class="slider-list" id="slider-list"></div>
+
+          <div class="weight-legend" aria-hidden="true">
+            <span>Avoid</span>
+            <span>Neutral</span>
+            <span>Prefer</span>
+          </div>
+        </section>
+
+        <section class="side-card telemetry-card" aria-labelledby="telemetry-title">
+          <div class="side-card-heading">
+            <div>
+              <p class="eyebrow">Last execution</p>
+              <h2 id="telemetry-title">Work receipt</h2>
+            </div>
+            <span class="exact-badge" id="exact-badge">Exact</span>
+          </div>
+
+          <div class="telemetry-hero">
+            <div>
+              <strong id="metric-prune">—</strong>
+              <span>score work avoided</span>
+            </div>
+            <div class="donut" id="prune-donut" aria-hidden="true"><span></span></div>
+          </div>
+
+          <dl class="metric-grid">
+            <div>
+              <dt>Rows scored</dt>
+              <dd id="metric-rows">—</dd>
+            </div>
+            <div>
+              <dt>Refiners</dt>
+              <dd id="metric-refiners">—</dd>
+            </div>
+            <div>
+              <dt>Blocks visited</dt>
+              <dd id="metric-blocks">—</dd>
+            </div>
+            <div>
+              <dt>Latency</dt>
+              <dd id="metric-latency">—</dd>
+            </div>
+            <div>
+              <dt>Profile</dt>
+              <dd id="metric-profile">v1</dd>
+            </div>
+            <div>
+              <dt>Index rebuilds</dt>
+              <dd id="metric-rebuilds">0</dd>
+            </div>
+          </dl>
+
+          <div class="telemetry-foot">
+            <span id="metric-exhaustive">Exact by safe bounds · oracle off</span>
+            <div class="telemetry-buttons">
+              <button class="text-button" id="verify-button" type="button">Verify</button>
+              <button class="text-button" id="rerun-button" type="button">Rerun</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="side-card explainer-card" aria-labelledby="explainer-title">
+          <p class="eyebrow">Why it is fast</p>
+          <h2 id="explainer-title">Spend work where it can win</h2>
+          <div class="mini-flow" aria-label="Query processing flow">
+            <div><span>1</span><strong>Bound blocks</strong></div>
+            <i aria-hidden="true">→</i>
+            <div><span>2</span><strong>Prune losers</strong></div>
+            <i aria-hidden="true">→</i>
+            <div><span>3</span><strong>Score top-K</strong></div>
+          </div>
+          <p class="side-copy">Exact mode skips a block only when its safe upper bound cannot beat the current Kth result.</p>
+        </section>
+      </aside>
+    </div>
+
+    <div class="scrim" id="scrim" hidden></div>
+    <noscript>
+      <div class="noscript-message">efchSQL needs JavaScript enabled to run its local engine demo.</div>
+    </noscript>
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>
