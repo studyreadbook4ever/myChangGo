@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import {
   buildCodexJobManifest,
@@ -10,8 +11,9 @@ import {
   generateEditPrompt,
   resolveCreatorPolicies
 } from "../extension/lib/core.js";
+import { EXTENSION_PACKAGE_FILES } from "./extension-package-files.mjs";
 
-const root = path.resolve(import.meta.dirname, "..");
+const root = fileURLToPath(new URL("..", import.meta.url));
 const extensionRoot = path.join(root, "extension");
 
 const errors = [];
@@ -26,9 +28,14 @@ const read = (relativePath) => readFile(path.join(extensionRoot, relativePath), 
 const manifest = JSON.parse(await read("manifest.json"));
 assert(manifest.manifest_version === 3, "manifest_version은 3이어야 합니다.");
 assert(manifest.side_panel?.default_path === "sidepanel.html", "사이드패널 진입점이 없습니다.");
+assert(manifest.version === "2.0.0", "통합 편집기 manifest 버전이 2.0.0이 아닙니다.");
 assert(manifest.host_permissions?.includes("https://chzzk.naver.com/*"), "치지직 host permission이 없습니다.");
 assert(manifest.host_permissions?.includes("https://api.chzzk.naver.com/*"), "치지직 라이브 상태 메타데이터 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://huggingface.co/*"), "로컬 AI 모델 데이터 host permission이 없습니다.");
 assert(manifest.content_scripts?.some((entry) => entry.matches?.includes("https://chzzk.naver.com/*")), "치지직 content script가 없습니다.");
+assert(manifest.content_security_policy?.extension_pages?.includes("'wasm-unsafe-eval'"), "Extension WASM CSP가 없습니다.");
+assert(manifest.cross_origin_embedder_policy?.value === "require-corp", "WASM thread용 COEP가 없습니다.");
+assert(manifest.cross_origin_opener_policy?.value === "same-origin", "WASM thread용 COOP가 없습니다.");
 
 const referencedFiles = [
   manifest.background?.service_worker,
@@ -36,15 +43,28 @@ const referencedFiles = [
   ...manifest.content_scripts.flatMap((entry) => entry.js ?? []),
   "sidepanel.css",
   "sidepanel.js",
+  "editor.html",
+  "editor/editor.css",
+  "editor/editor.js",
+  "editor/asr-worker.js",
+  "editor/vendor/ort-wasm-simd-threaded.jsep.mjs",
+  "editor/vendor/ort-wasm-simd-threaded.jsep.wasm",
   "lib/core.js",
+  "lib/editor-core.js",
   "knowledge/base-editing-guidelines.md",
   "knowledge/default-creator-policy.md",
   "knowledge/codex-job-agents.md",
   "knowledge/creator-policy-index.json",
-  "knowledge/creator-policies/charon-universe-w.md"
+  "knowledge/creator-policies/charon-universe-w.md",
+  "THIRD_PARTY_NOTICES.md",
+  "licenses/MEDIABUNNY-MPL-2.0.txt",
+  "licenses/TRANSFORMERS-APACHE-2.0.txt",
+  "licenses/ONNXRUNTIME-MIT.txt",
+  ...EXTENSION_PACKAGE_FILES
 ].filter(Boolean);
 
-for (const relativePath of referencedFiles) {
+const uniqueReferencedFiles = [...new Set(referencedFiles)];
+for (const relativePath of uniqueReferencedFiles) {
   try {
     await access(path.join(extensionRoot, relativePath));
   } catch {
@@ -52,10 +72,14 @@ for (const relativePath of referencedFiles) {
   }
 }
 
-const [html, panelScript, contentScript, editingGuide, policyGuide, codexAgentGuide, policyIndexText, charonSnapshot] = await Promise.all([
+const [html, panelScript, contentScript, editorHtml, editorScript, asrWorker, serviceWorker, editingGuide, policyGuide, codexAgentGuide, policyIndexText, charonSnapshot] = await Promise.all([
   read("sidepanel.html"),
   read("sidepanel.js"),
   read("content-script.js"),
+  read("editor.html"),
+  read("editor/editor.js"),
+  read("editor/asr-worker.js"),
+  read("service-worker.js"),
   read("knowledge/base-editing-guidelines.md"),
   read("knowledge/default-creator-policy.md"),
   read("knowledge/codex-job-agents.md"),
@@ -73,6 +97,7 @@ for (const id of [
   "save-segment",
   "policy-match-badge",
   "create-codex-job",
+  "open-editor",
   "generate-prompt",
   "copy-prompt",
   "download-prompt"
@@ -88,11 +113,91 @@ assert(panelScript.includes("compileCreatorPolicyMarkdown"), "매칭된 공식 �
 assert(panelScript.includes("creator-policy-index.json"), "Codex 작업폴더에 정책 관계 인덱스를 쓰지 않습니다.");
 assert(panelScript.includes("writePolicyCacheFiles"), "선택 정책 캐시를 별도 파일로 쓰는 로직이 없습니다.");
 assert(panelScript.includes("showDirectoryPicker"), "Codex 작업 폴더 선택 로직이 없습니다.");
+assert(panelScript.includes("KIRINUKI_OPEN_EDITOR"), "사이드패널에서 통합 편집기를 열지 않습니다.");
+assert(panelScript.includes("captureStateSourceConflict"), "서로 다른 방송의 캡처 구간 혼합 방지가 없습니다.");
+const saveSegmentSource = panelScript.slice(
+  panelScript.indexOf("async function saveSegment()"),
+  panelScript.indexOf("async function saveSegment()") + 800
+);
+assert(
+  saveSegmentSource.includes("if (sourceConflict)"),
+  "다른 방송 감지 중 수동 시각 구간 저장이 차단되지 않습니다."
+);
+assert(panelScript.includes("precision: 3"), "사용자 확정 컷의 밀리초 정밀도 보존이 없습니다.");
+assert(panelScript.includes("KIRINUKI_RESET_BINDINGS"), "초기화 시 치지직 탭 연결을 지우지 않습니다.");
+assert(panelScript.includes("KIRINUKI_PERSIST_STATE"), "사이드패널 저장이 공용 직렬화 경로를 사용하지 않습니다.");
+assert(panelScript.includes("WORKSPACE_META_KEY"), "다중 창 프로젝트 revision 추적이 없습니다.");
+assert(panelScript.includes("chrome.storage.onChanged"), "다른 창의 프로젝트 변경을 반영하지 않습니다.");
+assert(panelScript.includes("mergeDirtyFields"), "다른 창 변경 중 현재 입력을 보존하지 않습니다.");
+assert(panelScript.includes("samePersistedSource"), "주기적 문맥 갱신이 의미 없는 저장 revision을 만들 수 있습니다.");
+assert(panelScript.includes("lastPersistedStateSignature"), "변경 없는 숨김·새로고침 저장을 건너뛰지 않습니다.");
+assert(
+  panelScript.includes("expectedResetEpoch") && panelScript.includes("expectedRevision"),
+  "오래된 창의 저장·편집기 열기 요청을 판별하지 않습니다."
+);
 for (const fileName of ["AGENTS.md", "START_HERE.md", "edit-brief.md", "creator-policy.md", "creator-policy-index.json", "job-manifest.json"]) {
   assert(panelScript.includes(`"${fileName}"`), `Codex 작업 폴더 출력이 없습니다: ${fileName}`);
 }
 assert(contentScript.includes("HTMLVideoElement") || contentScript.includes("querySelectorAll(\"video\")"), "플레이어 시각 읽기 로직이 없습니다.");
-assert(editingGuide.includes("의미적으로 함께 있어야"), "대화 세션 지침이 누락되었습니다.");
+assert(contentScript.includes("KIRINUKI_PLAYER_COMMAND"), "편집기에서 치지직 플레이어를 제어하는 프로토콜이 없습니다.");
+assert(contentScript.includes("/service/v3/videos/"), "치지직 다시보기 회차 메타데이터 연결 로직이 없습니다.");
+assert(contentScript.includes("liveOpenDate"), "다시보기를 생방송 회차에 연결할 시작 시각 로직이 없습니다.");
+assert(serviceWorker.includes("KIRINUKI_EDITOR_SOURCE_ACTION"), "서비스 워커에 치지직 source binding 중계가 없습니다.");
+assert(serviceWorker.includes("sourceSessionIdentity"), "서비스 워커가 방송 회차 ID를 검증하지 않습니다.");
+assert(serviceWorker.includes("KIRINUKI_GET_CONTEXT"), "서비스 워커가 현재 치지직 탭 문맥을 재검증하지 않습니다.");
+assert(serviceWorker.includes("KIRINUKI_RESET_BINDINGS"), "서비스 워커에 source binding 초기화가 없습니다.");
+assert(serviceWorker.includes("KIRINUKI_PERSIST_STATE"), "서비스 워커에 프로젝트 저장 직렬화가 없습니다.");
+assert(serviceWorker.includes("queueWorkspaceOperation"), "저장·열기·초기화 공용 직렬화 큐가 없습니다.");
+assert(serviceWorker.includes("indexedDB.deleteDatabase"), "편집 프로젝트 초기화 경로가 없습니다.");
+assert(
+  serviceWorker.includes("expectedResetEpoch") && serviceWorker.includes("expectedRevision"),
+  "서비스 워커가 오래된 창의 프로젝트 요청을 거부하지 않습니다."
+);
+for (const id of [
+  "preview-video",
+  "subtitle-overlay",
+  "video-track",
+  "caption-track",
+  "cue-text",
+  "cue-start",
+  "cue-end",
+  "cue-x",
+  "cue-y",
+  "generate-captions",
+  "export-video",
+  "source-offset",
+  "apply-source-offset"
+]) {
+  assert(editorHtml.includes(`id="${id}"`), `통합 편집기 UI 요소가 없습니다: #${id}`);
+}
+assert(editorScript.includes("renderProjectVideo"), "편집기 번들에 영상 렌더 경로가 없습니다.");
+assert(editorScript.includes("extractClipPcm16k"), "편집기 번들에 선택 구간 음성 추출 경로가 없습니다.");
+assert(editorScript.includes("showDirectoryPicker"), "영상·JSON·SRT 동일 폴더 저장 경로가 없습니다.");
+assert(editorScript.includes("chooseUniqueExportBaseName"), "내보내기 파일명 충돌 방지가 없습니다.");
+assert(editorScript.includes("navigator.locks"), "여러 편집기 탭의 동시 내보내기 직렬화가 없습니다.");
+assert(editorScript.includes("fileHandleStored"), "원본 파일 핸들 복구 상태를 검증하지 않습니다.");
+assert(editorScript.includes("findSubtitleOverlaps"), "겹치는 자막 내보내기 방지가 없습니다.");
+assert(
+  editorScript.includes("pendingPreviewSeek") &&
+    editorScript.includes("retryWhenAvailable"),
+  "비영점 PTS 원본의 첫 미리보기 seek 재시도 경로가 없습니다."
+);
+assert(
+  editorScript.includes("updateClipTrim(originalProject"),
+  "컷 손잡이를 되돌릴 때 중간 이동에서 잘린 사람 자막을 복구하지 못합니다."
+);
+assert(
+  editorScript.includes("activeJobCancelable") &&
+    editorScript.includes('onProgress(0.995, "finalize")'),
+  "파일 commit 단계의 취소 불가 전환이 없습니다."
+);
+assert(editorHtml.includes('value="Xenova/whisper-tiny" selected'), "Whisper Tiny가 안전한 기본값으로 선택되지 않았습니다.");
+assert(asrWorker.includes("Xenova/whisper-tiny"), "ASR worker에 Whisper Tiny 모델 경로가 없습니다.");
+assert(asrWorker.includes("Xenova/whisper-small"), "ASR worker에 Whisper Small 선택 경로가 없습니다.");
+assert(asrWorker.includes("revision"), "ASR worker가 모델 revision을 고정하지 않습니다.");
+assert(!asrWorker.includes("cdn.jsdelivr.net"), "ASR worker에 원격 WASM 실행 코드 fallback이 남아 있습니다.");
+assert(editingGuide.includes("authority: USER"), "사용자 확정 컷 권한 지침이 누락되었습니다.");
+assert(editingGuide.includes("자동으로 확장·축소·병합·삭제하지 않는다"), "AI의 컷 경계 보존 지침이 누락되었습니다.");
 assert(policyGuide.includes("특정 방송인의 허락을 대신하지 않는다"), "기본 정책의 비허가 고지가 없습니다.");
 assert(policyGuide.includes("HUMAN_REVENUE_REVIEW: PENDING"), "수익 사람 검수 게이트가 없습니다.");
 assert(policyGuide.includes("HUMAN_MUSIC_REVIEW: PENDING"), "음원 사람 검수 게이트가 없습니다.");
@@ -106,7 +211,7 @@ for (const policyLink of [
 ]) {
   assert(policyGuide.includes(policyLink), `아티스트 정책 링크가 없습니다: ${policyLink}`);
 }
-assert(codexAgentGuide.includes("의미가 완결되는 말의 세션"), "Codex 작업 규칙에 발화 세션 목표가 없습니다.");
+assert(codexAgentGuide.includes("authority: USER"), "Codex 작업 규칙에 사용자 확정 컷 권한이 없습니다.");
 assert(codexAgentGuide.includes("외부 서비스에 업로드하지 않는다"), "Codex 작업 규칙에 미디어 외부 업로드 금지가 없습니다.");
 assert(Array.isArray(policyIndex.policies) && policyIndex.policies.length === 5, "방송인 정책 인덱스가 5개 그룹을 포함하지 않습니다.");
 const arisaPolicies = resolveCreatorPolicies({ streamerName: "아리사" }, policyIndex);
@@ -164,5 +269,5 @@ if (errors.length > 0) {
   console.error(errors.map((error) => `- ${error}`).join("\n"));
   process.exitCode = 1;
 } else {
-  console.log(`Extension 검증 통과: ${referencedFiles.length}개 필수 파일, 핵심 UI, MD 지침, 프롬프트 smoke test`);
+  console.log(`Extension 검증 통과: ${uniqueReferencedFiles.length}개 필수 파일, 핵심 UI, MD 지침, 프롬프트 smoke test`);
 }

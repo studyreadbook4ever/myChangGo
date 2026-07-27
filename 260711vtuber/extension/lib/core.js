@@ -1,12 +1,26 @@
-export const SCHEMA_VERSION = "chzzk-kirinuki-edit-brief/v1";
-export const CODEX_JOB_SCHEMA_VERSION = "chzzk-kirinuki-codex-job/v1";
+export const SCHEMA_VERSION = "chzzk-kirinuki-edit-brief/v2";
+export const CODEX_JOB_SCHEMA_VERSION = "chzzk-kirinuki-codex-job/v2";
 export const STORAGE_KEY = "chzzkKirinukiProjectV1";
+export const WORKSPACE_META_KEY = "chzzkKirinukiWorkspaceMetaV1";
+
+export function normalizeWorkspaceMeta(raw) {
+  return {
+    resetEpoch: typeof raw?.resetEpoch === "string" && raw.resetEpoch
+      ? raw.resetEpoch
+      : "initial",
+    revision: Number.isSafeInteger(raw?.revision) && raw.revision >= 0
+      ? raw.revision
+      : 0,
+    writerId: typeof raw?.writerId === "string" ? raw.writerId : ""
+  };
+}
 
 const nowIso = () => new Date().toISOString();
 
 export function createInitialState() {
   return {
     schemaVersion: 1,
+    editorProjectId: "",
     projectName: "",
     source: {
       platform: "CHZZK",
@@ -127,10 +141,6 @@ export function validateSegmentInput({ startText, endText, description }) {
   if (endSeconds <= startSeconds) {
     return { ok: false, message: "끝 시각은 시작 시각보다 뒤여야 합니다." };
   }
-  if (!note) {
-    return { ok: false, message: "이 구간을 선택한 이유나 원하는 편집 방향을 자연어로 적어 주세요." };
-  }
-
   return { ok: true, startSeconds, endSeconds, description: note };
 }
 
@@ -341,9 +351,10 @@ const buildMachineMetadata = ({ projectName, source, globalInstruction, segments
   segments: segments.map((segment, index) => ({
     order: index + 1,
     id: segment.id,
-    anchorStartSeconds: segment.startSeconds,
-    anchorEndSeconds: segment.endSeconds,
-    userDescription: segment.description,
+    selectionStartSeconds: segment.startSeconds,
+    selectionEndSeconds: segment.endSeconds,
+    authority: "USER",
+    userNote: segment.description,
     startCapture: segment.startCapture ?? null,
     endCapture: segment.endCapture ?? null
   }))
@@ -377,12 +388,13 @@ export function generateEditPrompt({
     return [
       `### 구간 ${index + 1}`,
       "",
-      `- 관심 시작 앵커: \`${formatTimestamp(segment.startSeconds)}\``,
-      `- 관심 종료 앵커: \`${formatTimestamp(segment.endSeconds)}\``,
-      `- 앵커 범위 길이: 약 ${Math.round(duration)}초`,
+      `- 확정 시작 시각: \`${formatTimestamp(segment.startSeconds, { precision: 3 })}\``,
+      `- 확정 종료 시각: \`${formatTimestamp(segment.endSeconds, { precision: 3 })}\``,
+      `- 선택 범위 길이: 약 ${duration.toFixed(3)}초`,
+      "- 경계 권한: `USER` — 자동으로 확장·축소·병합하지 않음",
       `- 시작값 출처: ${captureDetails(segment.startCapture)}`,
       `- 끝값 출처: ${captureDetails(segment.endCapture)}`,
-      "- 사용자의 편집 의도:",
+      "- 사용자 메모:",
       "",
       markdownQuote(segment.description)
     ].join("\n");
@@ -399,9 +411,9 @@ export function generateEditPrompt({
 
 ## 1. 실행 목표
 
-함께 제공된 치지직 풀영상 파일을 실제로 분석하고 편집하여, 아래 사용자가 표시한 관심 구간들을 **의미가 완결되는 말의 세션 단위**로 다듬은 한국어 자막 포함 검수용 영상을 생성하세요. 설명만 답하지 말고, 가능한 로컬 미디어 도구를 사용해 결과 파일을 만드세요.
+함께 제공된 치지직 풀영상 파일을 실제로 분석하고 편집하여, 아래 사용자가 확정한 구간들을 그대로 연결한 한국어 자막 포함 검수용 영상을 생성하세요. 설명만 답하지 말고, 가능한 로컬 미디어 도구를 사용해 결과 파일을 만드세요.
 
-타임스탬프는 최종 컷 경계가 아니라 관심 사건을 찾기 위한 앵커입니다. 각 앵커 주변을 전사한 뒤 질문과 답변, 설정과 결론, 농담과 반응처럼 하나의 의미가 닫히는 최소 대화 세션을 선택하세요.
+각 시작·종료 타임스탬프는 사용자가 선택한 **권위 있는 최종 컷 경계**입니다. AI나 후속 에이전트는 이를 자동으로 확장·축소·병합·재정렬하지 마세요. 음성 인식에 문맥이 필요하면 경계 밖 데이터를 임시 분석할 수 있지만 결과 영상과 자막 cue는 반드시 선택 범위 안으로 제한하세요. 경계가 어색해 보여도 조용히 고치지 말고 검수 메모에 제안만 남기세요.
 
 **편집을 시작하기 전에 정책 프리플라이트를 먼저 수행하세요.** 방송인별 최신 공식 정책은 Extension 기본 규정보다 우선합니다. 다만 수익 관련 조항과 음원은 정책이 허용하는 것처럼 보여도 사람이 반드시 다시 확인해야 하며, 제3자가 등장하면 그 제3자의 정책을 모두 교차확인해야 합니다. 링크 본문을 읽지 못한 경우 조항을 추정하지 말고 **SOURCE_UNREADABLE**로 기록하세요.
 
@@ -424,7 +436,7 @@ export function generateEditPrompt({
 
 ${markdownQuote(globalInstruction || "별도 지시 없음. 아래 구간별 편집 의도와 내장 지침을 우선 적용할 것.")}
 
-## 4. 사용자가 표시한 관심 구간
+## 4. 사용자가 확정한 컷 구간
 
 ${segmentSections}
 
@@ -434,20 +446,20 @@ ${segmentSections}
 2. 영상에 등장하는 방송인, 게스트, 합방 참여자, 음성 통화 참여자와 식별 가능한 제3자를 목록화하고 각자의 정책을 교차확인하세요.
 3. 수익 관련 상태와 음원 상태는 반드시 PENDING으로 시작하고, 사람의 명시적 확인 없이는 승인하지 마세요.
 4. 입력 영상의 실제 재생시간, 프레임레이트, 오디오 트랙을 확인하세요.
-5. 각 관심 앵커의 앞뒤를 전사하고 발화자와 발화 경계를 식별하세요.
-6. 사용자 설명과 가장 일치하는 최소 완결 대화 세션을 선택하세요. 문장 중간, 질문만 남은 지점, 반응이 끝나기 전에는 자르지 마세요.
-7. 서로 겹치거나 같은 사건에 속한 구간은 중복 없이 병합하고 그 사실을 기록하세요.
-8. 별도 지시가 없으면 선택된 세션을 원방송 시간순으로 연결하세요.
-9. 원문의 의미와 말투를 보존한 한국어 자막을 만들고, 읽기 좋은 호흡으로 나누세요. 들리지 않는 내용을 추측하지 마세요.
+5. 각 사용자 선택 범위의 음성을 전사하세요. 인식용 문맥을 추가로 읽더라도 선택 범위 밖의 음성과 영상은 결과에 포함하지 마세요.
+6. 시작·종료 시각을 입력값 그대로 보존하세요. 경계 변경이 더 좋아 보여도 자동 반영하지 말고 \`review-notes.md\`에 선택적 제안으로만 남기세요.
+7. 겹치거나 같은 사건에 속한 선택도 자동 병합하거나 삭제하지 마세요. 각 사용자 선택을 정확히 한 번씩 유지하세요.
+8. 별도 지시가 없으면 사용자가 저장한 순서대로 연결하세요.
+9. 원문의 의미와 말투를 보존한 한국어 자막 초안을 만들고, 읽기 좋은 호흡으로 나누되 모든 cue를 해당 선택 범위 안으로 제한하세요. 들리지 않는 내용을 추측하지 마세요.
 10. 정책상 비공개 검수본 제작이 가능한 범위에서 영상을 렌더링하고 아래 필수 산출물을 함께 남기세요.
 
 ## 6. 필수 산출물
 
 - **policy-check.md**: 출연자·제3자·음원·수익·플랫폼별 정책 근거와 사람 검수 게이트
 - \`edited-preview.mp4\`: 선택 구간을 연결하고 한국어 자막을 입힌 검수용 영상
-- \`edit-plan.json\`: 원본 기준 컷 시작/끝, 선택 이유, 신뢰도, 병합 여부
+- \`edit-plan.json\`: 사용자가 확정한 원본 기준 컷 시작/끝, 순서, 권한과 처리 상태
 - \`subtitles.ko.srt\`: 최종 영상 기준 한국어 자막
-- \`review-notes.md\`: 불확실한 발화, 경계 선택 이유, 사람이 확인할 항목
+- \`review-notes.md\`: 불확실한 발화, 선택적 경계 개선 제안, 사람이 확인할 항목
 
 자동으로 업로드하거나 게시하지 마세요. 결과는 반드시 사람이 검수할 수 있는 상태로 끝내세요.
 
@@ -461,7 +473,7 @@ ${creatorPolicy}
 
 ## 9. 기계 판독용 원본 메타데이터
 
-아래 JSON은 사용자 입력과 앵커의 원본값입니다. 자연어 섹션과 충돌할 경우 이 값을 보존하고 \`review-notes.md\`에 충돌을 기록하세요.
+아래 JSON은 사용자 입력과 확정 컷의 원본값입니다. 자연어 섹션과 충돌할 경우 \`authority: "USER"\`인 수치 값을 보존하고 \`review-notes.md\`에 충돌을 기록하세요.
 
 \`\`\`json
 ${JSON.stringify(metadata, null, 2)}
@@ -469,7 +481,7 @@ ${JSON.stringify(metadata, null, 2)}
 
 ## 10. 완료 조건
 
-필수 산출물 다섯 개가 실제로 생성되고, 각 사용자 관심 구간이 누락되지 않았으며, 자막과 영상 싱크를 확인한 뒤 작업을 완료로 보고하세요. 수익·음원 사람 검수가 PENDING이거나 제3자 정책이 미확인이라면 비공개 검수본까지만 완료하고 공개 가능하다고 표현하지 마세요.
+필수 산출물 다섯 개가 실제로 생성되고, 각 사용자 확정 구간이 원래 경계와 순서대로 정확히 한 번 포함되었으며, 자막과 영상 싱크를 확인한 뒤 작업을 완료로 보고하세요. 수익·음원 사람 검수가 PENDING이거나 제3자 정책이 미확인이라면 비공개 검수본까지만 완료하고 공개 가능하다고 표현하지 마세요.
 `;
 }
 
@@ -520,7 +532,7 @@ export function buildCodexJobManifest({
     },
     userIntent: {
       globalInstruction: globalInstruction || null,
-      anchors: metadata.segments
+      selections: metadata.segments
     },
     creatorPolicyResolution: metadata.creatorPolicyResolution,
     policyGates: metadata.policyGates,

@@ -1,0 +1,2345 @@
+import {
+  EDITOR_SEED_PREFIX,
+  applyMediaAlignmentOffset,
+  captureProjectId,
+  clipDurationMs,
+  createEditorProjectFromCapture,
+  createSubtitleCue,
+  cueAtTimeline,
+  cueTimelineRange,
+  deleteSubtitleCue,
+  findSubtitleOverlaps,
+  mapTimelineToSource,
+  mergeCaptureIntoEditorProject,
+  normalizeEditorProject,
+  projectDurationMs,
+  reorderClip,
+  replaceAiSubtitleDraft,
+  serializeSrt,
+  transcriptChunksToCueDrafts,
+  updateClipTrim,
+  updateSubtitleCue
+} from "../../extension/lib/editor-core.js";
+import { STORAGE_KEY } from "../../extension/lib/core.js";
+import {
+  extractClipPcm16k,
+  getPreferredOutputProfile,
+  inspectMediaFile,
+  renderProjectVideo
+} from "./media-engine.js";
+import {
+  deleteMediaHandle,
+  getFileFromStoredHandle,
+  loadProject,
+  saveMediaHandle,
+  saveProject
+} from "./project-store.js";
+
+const elements = Object.fromEntries([
+  "project-name",
+  "source-kind",
+  "source-title",
+  "source-link-state",
+  "undo",
+  "redo",
+  "pick-media",
+  "export-video",
+  "clip-count",
+  "media-card",
+  "media-name",
+  "media-meta",
+  "source-offset",
+  "apply-source-offset",
+  "clip-list",
+  "clip-template",
+  "focus-source",
+  "preview-source-tab",
+  "stage",
+  "preview-video",
+  "stage-empty",
+  "pick-media-empty",
+  "subtitle-overlay",
+  "previous-clip",
+  "play-toggle",
+  "next-clip",
+  "current-time",
+  "duration-time",
+  "toggle-mute",
+  "volume",
+  "add-cue-top",
+  "asr-model",
+  "generate-captions",
+  "ai-progress",
+  "ai-progress-label",
+  "ai-progress-value",
+  "cue-list-tab",
+  "cue-selected-tab",
+  "cue-selected-panel",
+  "cue-count",
+  "cue-empty",
+  "cue-editor",
+  "cue-text",
+  "cue-start",
+  "cue-end",
+  "cue-x",
+  "cue-y",
+  "cue-x-value",
+  "cue-y-value",
+  "font-size",
+  "font-color",
+  "delete-cue",
+  "cue-list",
+  "add-cue",
+  "fit-timeline",
+  "timeline-zoom",
+  "timeline-scroll",
+  "timeline-content",
+  "timeline-ruler",
+  "video-track",
+  "caption-track",
+  "playhead",
+  "media-input",
+  "job-dialog",
+  "job-title",
+  "job-message",
+  "job-progress",
+  "job-percent",
+  "cancel-job",
+  "toast"
+].map((id) => [id.replaceAll("-", "_"), document.querySelector(`#${id}`)]));
+
+const captionInspectorTab = elements.cue_selected_tab;
+const positionButtons = [...document.querySelectorAll("[data-position]")];
+
+let project = null;
+let mediaFile = null;
+let mediaHandle = null;
+let mediaUrl = null;
+let sourceBindingConnected = false;
+let pixelsPerSecond = 70;
+let saveTimer = null;
+let toastTimer = null;
+let activeClipId = null;
+let undoStack = [];
+let redoStack = [];
+let asrWorker = null;
+let currentAsrJob = null;
+let activeJobController = null;
+let pointerEditActive = false;
+let inspectorMode = "selected";
+let fieldEditSession = null;
+let focusBeforeJob = null;
+let projectMutationLockCount = 0;
+let pendingCaptureSeed = null;
+let exportRequestPending = false;
+let activeJobCancelable = false;
+let previewSeekSequence = 0;
+let pendingPreviewSeek = null;
+
+const EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
+const cloneProject = (value) => structuredClone(value);
+
+function formatTime(milliseconds, { compact = false } = {}) {
+  const value = Math.max(0, Math.round(Number(milliseconds) || 0));
+  const hours = Math.floor(value / 3_600_000);
+  const minutes = Math.floor((value % 3_600_000) / 60_000);
+  const seconds = Math.floor((value % 60_000) / 1000);
+  const millis = value % 1000;
+  if (compact && hours === 0) {
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+  }
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function parseTime(value) {
+  const input = String(value || "").trim();
+  if (!input) {
+    return null;
+  }
+  if (/^\d+(?:\.\d+)?$/.test(input)) {
+    return Math.round(Number(input) * 1000);
+  }
+  const parts = input.split(":");
+  if (parts.length < 2 || parts.length > 3) {
+    return null;
+  }
+  const seconds = Number(parts.at(-1));
+  const minutes = Number(parts.at(-2));
+  const hours = parts.length === 3 ? Number(parts[0]) : 0;
+  if (![seconds, minutes, hours].every(Number.isFinite) || minutes < 0 || minutes >= 60 || seconds < 0 || seconds >= 60) {
+    return null;
+  }
+  return Math.round((hours * 3600 + minutes * 60 + seconds) * 1000);
+}
+
+function formatDuration(milliseconds) {
+  const seconds = Math.max(0, milliseconds / 1000);
+  if (seconds < 60) {
+    return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}초`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainder = Math.round(seconds % 60);
+  return `${minutes}분 ${remainder}초`;
+}
+
+function clipOutsideMedia(candidateProject = project) {
+  const durationMs = Number(candidateProject?.mediaAsset?.durationMs);
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return null;
+  }
+  return candidateProject.clips.find((clip) => (
+    clip.enabled !== false &&
+    (clip.sourceStartMs < 0 || clip.sourceEndMs > durationMs)
+  )) || null;
+}
+
+function sanitizeFileName(value) {
+  return String(value || "kirinuki")
+    .normalize("NFKC")
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "kirinuki";
+}
+
+function showToast(message, type = "info", timeout = 3600) {
+  clearTimeout(toastTimer);
+  toastTimer = null;
+  elements.toast.textContent = message;
+  elements.toast.className = `toast ${type}`;
+  elements.toast.setAttribute("role", type === "error" ? "alert" : "status");
+  elements.toast.setAttribute("aria-live", type === "error" ? "assertive" : "polite");
+  elements.toast.hidden = false;
+  if (timeout > 0) {
+    toastTimer = setTimeout(() => {
+      elements.toast.hidden = true;
+      toastTimer = null;
+    }, timeout);
+  }
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    void saveProject(project).catch((error) => {
+      showToast(`프로젝트 저장 실패: ${error.message}`, "error", 0);
+    });
+  }, 180);
+}
+
+function flushSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  return project ? saveProject(project) : Promise.resolve();
+}
+
+function pushUndo(snapshot) {
+  undoStack.push(snapshot);
+  if (undoStack.length > 60) {
+    undoStack.shift();
+  }
+  redoStack = [];
+}
+
+function applyProject(next, {
+  record = true,
+  render = true,
+  save = true
+} = {}) {
+  if (!next || next === project) {
+    return;
+  }
+  if (record) {
+    pushUndo(cloneProject(project));
+  }
+  project = next;
+  if (render) {
+    renderAll();
+  }
+  if (save) {
+    scheduleSave();
+  }
+}
+
+function lockProjectMutations() {
+  projectMutationLockCount += 1;
+}
+
+function unlockProjectMutations() {
+  projectMutationLockCount = Math.max(0, projectMutationLockCount - 1);
+  if (projectMutationLockCount === 0) {
+    flushPendingCaptureSeed();
+  }
+}
+
+function applyFieldProject(next, key) {
+  if (!next || next === project) {
+    return;
+  }
+  if (!fieldEditSession || fieldEditSession.key !== key) {
+    fieldEditSession = {
+      key,
+      snapshot: cloneProject(project),
+      recorded: false
+    };
+  }
+  if (!fieldEditSession.recorded) {
+    pushUndo(fieldEditSession.snapshot);
+    fieldEditSession.recorded = true;
+  }
+  project = next;
+  renderAll({ keepScroll: true });
+  scheduleSave();
+}
+
+function endFieldEdit(key) {
+  if (!fieldEditSession || (key && fieldEditSession.key !== key)) {
+    return;
+  }
+  fieldEditSession = null;
+  renderHeader();
+  void flushSave().catch((error) => {
+    showToast(`프로젝트 저장 실패: ${error.message}`, "error", 0);
+  });
+}
+
+function undo() {
+  fieldEditSession = null;
+  const previous = undoStack.pop();
+  if (!previous) {
+    return;
+  }
+  redoStack.push(cloneProject(project));
+  project = previous;
+  renderAll();
+  scheduleSave();
+  void syncPreviewToPlayhead();
+}
+
+function redo() {
+  fieldEditSession = null;
+  const next = redoStack.pop();
+  if (!next) {
+    return;
+  }
+  undoStack.push(cloneProject(project));
+  project = next;
+  renderAll();
+  scheduleSave();
+  void syncPreviewToPlayhead();
+}
+
+function selectedCue() {
+  return project.subtitles.find((cue) => cue.id === project.selectedCueId) || null;
+}
+
+function selectedClip() {
+  return project.clips.find((clip) => clip.id === project.selectedClipId) || project.clips[0] || null;
+}
+
+function renderHeader() {
+  if (elements.project_name.value !== project.name && document.activeElement !== elements.project_name) {
+    elements.project_name.value = project.name;
+  }
+  const sourceType = String(project.source?.contentType || "CHZZK").toUpperCase();
+  elements.source_kind.textContent = sourceType === "UNKNOWN" ? "CHZZK" : sourceType;
+  elements.source_title.textContent = [
+    project.source?.streamerName,
+    project.source?.broadcastTitle
+  ].filter(Boolean).join(" · ") || "치지직 프로젝트";
+  elements.source_link_state.classList.toggle("connected", sourceBindingConnected);
+  elements.source_link_state.title = sourceBindingConnected
+    ? "원래 치지직 탭과 연결됨"
+    : "원래 치지직 탭을 찾지 못함";
+  elements.undo.disabled = undoStack.length === 0;
+  elements.redo.disabled = redoStack.length === 0;
+  elements.export_video.disabled = !mediaFile || !project.clips.some((clip) => clip.enabled !== false);
+  if (
+    !activeJobController &&
+    document.activeElement !== elements.asr_model &&
+    [...elements.asr_model.options].some((option) => option.value === project.ai?.model)
+  ) {
+    elements.asr_model.value = project.ai.model;
+  }
+}
+
+function renderMediaCard() {
+  const asset = project.mediaAsset;
+  elements.media_card.classList.toggle("empty", !mediaFile);
+  elements.stage_empty.hidden = Boolean(mediaFile);
+  if (document.activeElement !== elements.source_offset) {
+    elements.source_offset.value = String((project.broadcastSession?.alignmentOffsetMs || 0) / 1000);
+  }
+  elements.source_offset.disabled = !mediaFile;
+  elements.apply_source_offset.disabled = !mediaFile;
+  if (!asset) {
+    elements.media_name.textContent = "원본 영상 미연결";
+    elements.media_meta.textContent = "본인 소유·사용 허가 파일을 연결하세요";
+    return;
+  }
+  elements.media_name.textContent = asset.name;
+  const dimensions = asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : "";
+  elements.media_meta.textContent = `${asset.sizeLabel || ""}${dimensions} · ${formatTime(asset.durationMs, { compact: true })}`;
+}
+
+function renderClipList() {
+  elements.clip_count.textContent = String(project.clips.length);
+  elements.clip_list.replaceChildren();
+  project.clips.forEach((clip, index) => {
+    const fragment = elements.clip_template.content.cloneNode(true);
+    const item = fragment.querySelector(".clip-item");
+    item.dataset.id = clip.id;
+    item.classList.toggle("selected", project.selectedClipId === clip.id);
+    fragment.querySelector(".clip-index").textContent = String(index + 1);
+    fragment.querySelector(".clip-title").textContent = clip.note || `선택 구간 ${index + 1}`;
+    fragment.querySelector(".clip-time").textContent = `${formatTime(clip.sourceStartMs)} → ${formatTime(clip.sourceEndMs)}`;
+    fragment.querySelector(".clip-duration").textContent = formatDuration(clipDurationMs(clip));
+    const up = fragment.querySelector("[data-action='up']");
+    const down = fragment.querySelector("[data-action='down']");
+    up.disabled = index === 0;
+    down.disabled = index === project.clips.length - 1;
+    elements.clip_list.append(fragment);
+  });
+}
+
+function renderCueInspector() {
+  const cue = selectedCue();
+  const showingList = inspectorMode === "list";
+  elements.cue_count.textContent = String(project.subtitles.length);
+  captionInspectorTab.classList.toggle("active", !showingList);
+  captionInspectorTab.setAttribute("aria-selected", String(!showingList));
+  captionInspectorTab.tabIndex = showingList ? -1 : 0;
+  elements.cue_list_tab.classList.toggle("active", showingList);
+  elements.cue_list_tab.setAttribute("aria-selected", String(showingList));
+  elements.cue_list_tab.tabIndex = showingList ? 0 : -1;
+  elements.cue_selected_panel.hidden = showingList;
+  elements.cue_list.hidden = !showingList;
+  elements.cue_empty.hidden = Boolean(cue);
+  elements.cue_editor.hidden = !cue;
+  if (!cue || showingList) {
+    return;
+  }
+  const range = cueTimelineRange(project, cue);
+  if (document.activeElement !== elements.cue_text) {
+    elements.cue_text.value = cue.text;
+  }
+  if (document.activeElement !== elements.cue_start) {
+    elements.cue_start.value = formatTime(range.startMs, { compact: true });
+  }
+  if (document.activeElement !== elements.cue_end) {
+    elements.cue_end.value = formatTime(range.endMs, { compact: true });
+  }
+  elements.cue_x.value = String(Math.round(cue.x * 100));
+  elements.cue_y.value = String(Math.round(cue.y * 100));
+  elements.cue_x_value.textContent = `${Math.round(cue.x * 100)}%`;
+  elements.cue_y_value.textContent = `${Math.round(cue.y * 100)}%`;
+  elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.052) * 100);
+  elements.font_color.value = project.subtitleDefaults.color || "#ffffff";
+  const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
+  positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
+}
+
+function renderCueList() {
+  elements.cue_list.replaceChildren();
+  const sorted = [...project.subtitles].sort((a, b) => {
+    const rangeA = cueTimelineRange(project, a);
+    const rangeB = cueTimelineRange(project, b);
+    return (rangeA?.startMs || 0) - (rangeB?.startMs || 0);
+  });
+  sorted.forEach((cue) => {
+    const range = cueTimelineRange(project, cue);
+    if (!range) {
+      return;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "cue-list-item";
+    button.classList.toggle("selected", cue.id === project.selectedCueId);
+    button.dataset.id = cue.id;
+    const time = document.createElement("time");
+    time.textContent = formatTime(range.startMs, { compact: true }).slice(0, -4);
+    const text = document.createElement("span");
+    text.textContent = cue.text || "(빈 자막)";
+    button.append(time, text);
+    elements.cue_list.append(button);
+  });
+}
+
+function timelineWidth() {
+  const durationSeconds = Math.max(1, projectDurationMs(project) / 1000);
+  const viewport = elements.timeline_scroll.clientWidth || 700;
+  return Math.max(viewport - 2, Math.ceil(durationSeconds * pixelsPerSecond));
+}
+
+function timelineX(milliseconds) {
+  return milliseconds / 1000 * pixelsPerSecond;
+}
+
+function renderRuler(width) {
+  elements.timeline_ruler.replaceChildren();
+  const durationSeconds = Math.max(1, projectDurationMs(project) / 1000);
+  const majorStep = pixelsPerSecond >= 160 ? 1 : pixelsPerSecond >= 90 ? 2 : pixelsPerSecond >= 45 ? 5 : 10;
+  const minorStep = majorStep >= 5 ? majorStep / 5 : 1;
+  for (let second = 0; second <= durationSeconds + minorStep; second += minorStep) {
+    const tick = document.createElement("span");
+    const major = Math.abs(second / majorStep - Math.round(second / majorStep)) < 0.001;
+    tick.className = `ruler-tick${major ? " major" : ""}`;
+    tick.style.left = `${second * pixelsPerSecond}px`;
+    if (major) {
+      const label = document.createElement("span");
+      label.textContent = formatTime(second * 1000, { compact: true }).slice(0, -4);
+      tick.append(label);
+    }
+    elements.timeline_ruler.append(tick);
+  }
+  elements.timeline_ruler.style.width = `${width}px`;
+}
+
+function makeHandle(side, onStart, onNudge, {
+  label,
+  valueMs,
+  minMs,
+  maxMs
+} = {}) {
+  const handle = document.createElement("button");
+  handle.type = "button";
+  handle.className = `trim-handle ${side}`;
+  handle.setAttribute("role", "slider");
+  handle.setAttribute("aria-orientation", "horizontal");
+  handle.setAttribute("aria-label", label || (side === "left" ? "시작 시각 조정" : "끝 시각 조정"));
+  handle.setAttribute("aria-valuemin", String(Math.max(0, Number(minMs) || 0) / 1000));
+  handle.setAttribute("aria-valuemax", String(Math.max(Number(minMs) || 0, Number(maxMs) || 0) / 1000));
+  handle.setAttribute("aria-valuenow", String(Math.max(0, Number(valueMs) || 0) / 1000));
+  handle.setAttribute("aria-valuetext", formatTime(valueMs || 0));
+  handle.title = "←/→ 0.1초 · Shift+←/→ 1초";
+  handle.addEventListener("pointerdown", onStart);
+  handle.addEventListener("keydown", (event) => {
+    if (!onNudge || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const owner = handle.closest(".clip-block, .cue-block");
+    const ownerId = owner?.dataset.id;
+    const ownerClass = owner?.classList.contains("clip-block") ? "clip-block" : "cue-block";
+    const amount = event.shiftKey ? 1_000 : 100;
+    onNudge(event.key === "ArrowLeft" ? -amount : amount);
+    queueMicrotask(() => {
+      const nextOwner = [...document.querySelectorAll(`.${ownerClass}`)]
+        .find((candidate) => candidate.dataset.id === ownerId);
+      nextOwner?.querySelector(`.trim-handle.${side}`)?.focus({ preventScroll: true });
+    });
+  });
+  return handle;
+}
+
+function beginPointerHistory() {
+  if (!pointerEditActive) {
+    pushUndo(cloneProject(project));
+    pointerEditActive = true;
+  }
+}
+
+function endPointerHistory() {
+  pointerEditActive = false;
+  renderAll({ keepScroll: true });
+  scheduleSave();
+  void syncPreviewToPlayhead();
+}
+
+function bindClipTrim(handle, clip, side, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const originalProject = project;
+  beginPointerHistory();
+  const startX = event.clientX;
+  const originalStart = clip.sourceStartMs;
+  const originalEnd = clip.sourceEndMs;
+  const maxDuration = project.mediaAsset?.durationMs || Infinity;
+  const pointerId = event.pointerId;
+  const block = handle.closest(".clip-block");
+  handle.setPointerCapture(event.pointerId);
+
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1000);
+    const start = side === "left"
+      ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta))
+      : originalStart;
+    const end = side === "right"
+      ? Math.min(maxDuration, Math.max(originalStart + 100, originalEnd + delta))
+      : originalEnd;
+    project = updateClipTrim(originalProject, clip.id, { sourceStartMs: start, sourceEndMs: end });
+    const nextClip = project.clips.find((candidate) => candidate.id === clip.id);
+    if (block && nextClip) {
+      block.style.left = `${timelineX(nextClip.timelineStartMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(clipDurationMs(nextClip)))}px`;
+    }
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    endPointerHistory();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+function bindCueTrim(handle, cue, side, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  beginPointerHistory();
+  const startX = event.clientX;
+  const originalStart = cue.startOffsetMs;
+  const originalEnd = cue.endOffsetMs;
+  const clip = project.clips.find((candidate) => candidate.id === cue.clipId);
+  const duration = clipDurationMs(clip);
+  const pointerId = event.pointerId;
+  const block = handle.closest(".cue-block");
+  let overlapBlocked = false;
+  handle.setPointerCapture(event.pointerId);
+
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1000);
+    const startOffsetMs = side === "left"
+      ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta))
+      : originalStart;
+    const endOffsetMs = side === "right"
+      ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta))
+      : originalEnd;
+    const nextProject = updateSubtitleCue(project, cue.id, { startOffsetMs, endOffsetMs });
+    if (cueHasOverlap(nextProject, cue.id)) {
+      overlapBlocked = true;
+      return;
+    }
+    overlapBlocked = false;
+    project = nextProject;
+    const nextCue = project.subtitles.find((candidate) => candidate.id === cue.id);
+    const range = cueTimelineRange(project, nextCue);
+    if (block && range) {
+      block.style.left = `${timelineX(range.startMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    }
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (handle.hasPointerCapture(pointerId)) {
+      handle.releasePointerCapture(pointerId);
+    }
+    endPointerHistory();
+    if (overlapBlocked) {
+      showToast("자막끼리는 겹칠 수 없습니다.", "error");
+    }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+function renderTimeline({ keepScroll = false } = {}) {
+  const scrollLeft = elements.timeline_scroll.scrollLeft;
+  const width = timelineWidth();
+  elements.timeline_content.style.width = `${width}px`;
+  elements.video_track.style.width = `${width}px`;
+  elements.caption_track.style.width = `${width}px`;
+  elements.video_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+  elements.caption_track.style.backgroundSize = `${pixelsPerSecond}px 100%`;
+  renderRuler(width);
+  elements.video_track.replaceChildren();
+  elements.caption_track.replaceChildren();
+
+  project.clips.filter((clip) => clip.enabled !== false).forEach((clip, index) => {
+    const block = document.createElement("div");
+    block.className = "clip-block";
+    block.classList.toggle("selected", clip.id === project.selectedClipId);
+    block.dataset.id = clip.id;
+    block.style.left = `${timelineX(clip.timelineStartMs)}px`;
+    block.style.width = `${Math.max(8, timelineX(clipDurationMs(clip)))}px`;
+    const body = document.createElement("button");
+    body.type = "button";
+    body.className = "clip-block-body";
+    body.textContent = `${index + 1} · ${clip.note || "사용자 선택"}`;
+    body.addEventListener("click", () => {
+      project = { ...project, selectedClipId: clip.id };
+      void seekTimeline(clip.timelineStartMs);
+      renderAll({ keepScroll: true });
+      const nextBlock = [...elements.video_track.querySelectorAll(".clip-block")]
+        .find((candidate) => candidate.dataset.id === clip.id);
+      nextBlock?.querySelector(".clip-block-body")?.focus({ preventScroll: true });
+      scheduleSave();
+    });
+    const nudgeClip = (side, delta) => {
+      const current = project.clips.find((candidate) => candidate.id === clip.id);
+      const maxDuration = project.mediaAsset?.durationMs || Infinity;
+      const sourceStartMs = side === "left"
+        ? Math.max(0, Math.min(current.sourceEndMs - 100, current.sourceStartMs + delta))
+        : current.sourceStartMs;
+      const sourceEndMs = side === "right"
+        ? Math.min(maxDuration, Math.max(current.sourceStartMs + 100, current.sourceEndMs + delta))
+        : current.sourceEndMs;
+      applyProject(
+        updateClipTrim(project, clip.id, { sourceStartMs, sourceEndMs }),
+        { render: false }
+      );
+      renderAll({ keepScroll: true });
+      void syncPreviewToPlayhead();
+    };
+    const clipMaximumMs = Number.isFinite(project.mediaAsset?.durationMs)
+      ? Math.max(project.mediaAsset.durationMs, clip.sourceEndMs)
+      : Math.max(clip.sourceEndMs, clip.selectionEndMs || 0) + 3_600_000;
+    block.append(
+      makeHandle(
+        "left",
+        (event) => bindClipTrim(event.currentTarget, clip, "left", event),
+        (delta) => nudgeClip("left", delta),
+        {
+          label: `${index + 1}번 컷 시작 시각`,
+          valueMs: clip.sourceStartMs,
+          minMs: 0,
+          maxMs: clip.sourceEndMs - 100
+        }
+      ),
+      body,
+      makeHandle(
+        "right",
+        (event) => bindClipTrim(event.currentTarget, clip, "right", event),
+        (delta) => nudgeClip("right", delta),
+        {
+          label: `${index + 1}번 컷 끝 시각`,
+          valueMs: clip.sourceEndMs,
+          minMs: clip.sourceStartMs + 100,
+          maxMs: clipMaximumMs
+        }
+      )
+    );
+    elements.video_track.append(block);
+  });
+
+  project.subtitles.forEach((cue, cueIndex) => {
+    const range = cueTimelineRange(project, cue);
+    if (!range) {
+      return;
+    }
+    const block = document.createElement("div");
+    block.className = `cue-block ${cue.origin === "ai" ? "ai" : "human"}${cue.humanEdited ? " human-edited" : ""}`;
+    block.classList.toggle("selected", cue.id === project.selectedCueId);
+    block.dataset.id = cue.id;
+    block.style.left = `${timelineX(range.startMs)}px`;
+    block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    const body = document.createElement("button");
+    body.type = "button";
+    body.className = "cue-block-body";
+    body.textContent = cue.text || "(빈 자막)";
+    body.addEventListener("click", () => {
+      selectCue(cue.id, { seek: true });
+      elements.cue_text.focus({ preventScroll: true });
+    });
+    const cueClip = project.clips.find((candidate) => candidate.id === cue.clipId);
+    const nudgeCue = (side, delta) => {
+      const current = project.subtitles.find((candidate) => candidate.id === cue.id);
+      const currentClip = project.clips.find((candidate) => candidate.id === current.clipId);
+      const duration = clipDurationMs(currentClip);
+      const startOffsetMs = side === "left"
+        ? Math.max(0, Math.min(current.endOffsetMs - 100, current.startOffsetMs + delta))
+        : current.startOffsetMs;
+      const endOffsetMs = side === "right"
+        ? Math.min(duration, Math.max(current.startOffsetMs + 100, current.endOffsetMs + delta))
+        : current.endOffsetMs;
+      const nextProject = updateSubtitleCue(project, cue.id, { startOffsetMs, endOffsetMs });
+      if (cueHasOverlap(nextProject, cue.id)) {
+        showToast("자막끼리는 겹칠 수 없습니다.", "error");
+        return;
+      }
+      applyProject(nextProject, { render: false });
+      renderAll({ keepScroll: true });
+    };
+    block.append(
+      makeHandle(
+        "left",
+        (event) => bindCueTrim(event.currentTarget, cue, "left", event),
+        (delta) => nudgeCue("left", delta),
+        {
+          label: `${cueIndex + 1}번 자막 시작 시각`,
+          valueMs: range.startMs,
+          minMs: cueClip.timelineStartMs,
+          maxMs: range.endMs - 100
+        }
+      ),
+      body,
+      makeHandle(
+        "right",
+        (event) => bindCueTrim(event.currentTarget, cue, "right", event),
+        (delta) => nudgeCue("right", delta),
+        {
+          label: `${cueIndex + 1}번 자막 끝 시각`,
+          valueMs: range.endMs,
+          minMs: range.startMs + 100,
+          maxMs: cueClip.timelineStartMs + clipDurationMs(cueClip)
+        }
+      )
+    );
+    elements.caption_track.append(block);
+  });
+
+  updatePlayhead();
+  if (keepScroll) {
+    elements.timeline_scroll.scrollLeft = scrollLeft;
+  }
+}
+
+function videoContentRect() {
+  const stageRect = elements.stage.getBoundingClientRect();
+  const video = elements.preview_video;
+  if (!video.videoWidth || !video.videoHeight) {
+    return { left: 0, top: 0, width: stageRect.width, height: stageRect.height };
+  }
+  const scale = Math.min(stageRect.width / video.videoWidth, stageRect.height / video.videoHeight);
+  const width = video.videoWidth * scale;
+  const height = video.videoHeight * scale;
+  return {
+    left: (stageRect.width - width) / 2,
+    top: (stageRect.height - height) / 2,
+    width,
+    height
+  };
+}
+
+function renderSubtitleOverlay() {
+  const cue = cueAtTimeline(project, project.playheadMs);
+  if (!cue || !mediaFile) {
+    elements.subtitle_overlay.hidden = true;
+    return;
+  }
+  const contentRect = videoContentRect();
+  elements.subtitle_overlay.hidden = false;
+  elements.subtitle_overlay.querySelector("span").textContent = cue.text || " ";
+  elements.subtitle_overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
+  elements.subtitle_overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
+  elements.subtitle_overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
+  elements.subtitle_overlay.style.fontSize = `${Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.052))}px`;
+  elements.subtitle_overlay.style.color = project.subtitleDefaults.color || "#ffffff";
+  elements.subtitle_overlay.style.background = project.subtitleDefaults.backgroundColor || "rgba(0, 0, 0, 0.58)";
+  const overlayRect = elements.subtitle_overlay.getBoundingClientRect();
+  const halfWidth = Math.min(overlayRect.width / 2, contentRect.width / 2);
+  const halfHeight = Math.min(overlayRect.height / 2, contentRect.height / 2);
+  const desiredLeft = contentRect.left + contentRect.width * cue.x;
+  const desiredTop = contentRect.top + contentRect.height * cue.y;
+  elements.subtitle_overlay.style.left = `${Math.min(
+    contentRect.left + contentRect.width - halfWidth,
+    Math.max(contentRect.left + halfWidth, desiredLeft)
+  )}px`;
+  elements.subtitle_overlay.style.top = `${Math.min(
+    contentRect.top + contentRect.height - halfHeight,
+    Math.max(contentRect.top + halfHeight, desiredTop)
+  )}px`;
+  elements.subtitle_overlay.classList.toggle("selected", cue.id === project.selectedCueId);
+  elements.subtitle_overlay.dataset.cueId = cue.id;
+}
+
+function updatePlayhead() {
+  const duration = projectDurationMs(project);
+  project.playheadMs = Math.max(0, Math.min(duration, project.playheadMs || 0));
+  elements.playhead.style.left = `${timelineX(project.playheadMs)}px`;
+  elements.playhead.setAttribute("aria-valuemax", String(duration / 1000));
+  elements.playhead.setAttribute("aria-valuenow", String(project.playheadMs / 1000));
+  elements.playhead.setAttribute("aria-valuetext", formatTime(project.playheadMs));
+  elements.current_time.textContent = formatTime(project.playheadMs);
+  elements.duration_time.textContent = `/ ${formatTime(duration)}`;
+  renderSubtitleOverlay();
+}
+
+function renderTransport() {
+  const clip = mapTimelineToSource(project, project.playheadMs);
+  activeClipId = clip?.clipId || project.clips[0]?.id || null;
+  elements.previous_clip.disabled = project.clips.length === 0;
+  elements.next_clip.disabled = project.clips.length === 0;
+  elements.play_toggle.disabled = !mediaFile || project.clips.length === 0;
+  updatePlayhead();
+}
+
+function renderAll(options = {}) {
+  if (!project) {
+    return;
+  }
+  renderHeader();
+  renderMediaCard();
+  renderClipList();
+  renderCueInspector();
+  renderCueList();
+  renderTimeline(options);
+  renderTransport();
+}
+
+function sourceMsToPreviewSeconds(sourceMs) {
+  const mediaOriginMs = Number(project.mediaAsset?.mediaOriginMs) || 0;
+  return (mediaOriginMs + sourceMs) / 1000;
+}
+
+function previewSecondsToSourceMs(previewSeconds) {
+  const mediaOriginMs = Number(project.mediaAsset?.mediaOriginMs) || 0;
+  return previewSeconds * 1000 - mediaOriginMs;
+}
+
+async function seekPreviewToSourceMs(sourceMs) {
+  const video = elements.preview_video;
+  const targetSeconds = sourceMsToPreviewSeconds(sourceMs);
+  const sequence = ++previewSeekSequence;
+  if (Math.abs(video.currentTime - targetSeconds) <= 0.02) {
+    pendingPreviewSeek = null;
+    return true;
+  }
+
+  pendingPreviewSeek = { sequence, sourceMs, targetSeconds };
+  return new Promise((resolve) => {
+    let retries = 0;
+    let retryTimer = null;
+    let settleTimer = null;
+
+    const cleanup = (matched) => {
+      video.removeEventListener("seeked", handleSeeked);
+      video.removeEventListener("durationchange", retryWhenAvailable);
+      clearTimeout(retryTimer);
+      clearTimeout(settleTimer);
+      if (pendingPreviewSeek?.sequence === sequence) {
+        pendingPreviewSeek = null;
+      }
+      resolve(matched);
+    };
+
+    const assignTarget = () => {
+      if (sequence !== previewSeekSequence) {
+        cleanup(false);
+        return;
+      }
+      video.currentTime = targetSeconds;
+    };
+
+    const retryWhenAvailable = () => {
+      if (sequence !== previewSeekSequence) {
+        cleanup(false);
+        return;
+      }
+      if (Number.isFinite(video.duration) && video.duration + 0.02 < targetSeconds) {
+        return;
+      }
+      video.removeEventListener("durationchange", retryWhenAvailable);
+      clearTimeout(retryTimer);
+      requestAnimationFrame(assignTarget);
+    };
+
+    const scheduleRetry = () => {
+      retries += 1;
+      video.addEventListener("durationchange", retryWhenAvailable);
+      retryTimer = setTimeout(() => {
+        video.removeEventListener("durationchange", retryWhenAvailable);
+        assignTarget();
+      }, 350);
+      retryWhenAvailable();
+    };
+
+    const handleSeeked = () => {
+      if (sequence !== previewSeekSequence) {
+        cleanup(false);
+        return;
+      }
+      if (Math.abs(video.currentTime - targetSeconds) <= 0.03) {
+        cleanup(true);
+        return;
+      }
+      if (retries < 1) {
+        scheduleRetry();
+        return;
+      }
+      cleanup(false);
+    };
+
+    video.addEventListener("seeked", handleSeeked);
+    settleTimer = setTimeout(() => {
+      if (retries < 1) {
+        scheduleRetry();
+        settleTimer = setTimeout(() => cleanup(
+          Math.abs(video.currentTime - targetSeconds) <= 0.03
+        ), 1500);
+        return;
+      }
+      cleanup(Math.abs(video.currentTime - targetSeconds) <= 0.03);
+    }, 1500);
+    assignTarget();
+  });
+}
+
+async function seekTimeline(timelineMs, { play = false } = {}) {
+  const mapping = mapTimelineToSource(project, timelineMs);
+  if (!mapping) {
+    return;
+  }
+  project.playheadMs = mapping.timelineMs;
+  activeClipId = mapping.clipId;
+  project.selectedClipId = mapping.clipId;
+  updatePlayhead();
+  if (mediaFile) {
+    const matched = await seekPreviewToSourceMs(mapping.sourceMs);
+    if (!matched) {
+      console.warn("미리보기 플레이어가 요청 시각과 정확히 맞지 않았습니다.");
+    }
+    if (play) {
+      await elements.preview_video.play();
+    }
+  }
+  updatePlayhead();
+}
+
+async function syncPreviewToPlayhead() {
+  if (!mediaFile) {
+    return;
+  }
+  const wasPlaying = !elements.preview_video.paused;
+  try {
+    await seekTimeline(project.playheadMs, { play: wasPlaying });
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      console.warn("미리보기 시각을 다시 맞추지 못했습니다.", error);
+    }
+  }
+}
+
+async function togglePlayback() {
+  if (!mediaFile) {
+    showToast("먼저 원본 영상을 연결해 주세요.", "error");
+    return;
+  }
+  if (elements.preview_video.paused) {
+    await seekTimeline(project.playheadMs, { play: true });
+  } else {
+    elements.preview_video.pause();
+  }
+}
+
+function adjacentClip(direction) {
+  const enabled = project.clips.filter((clip) => clip.enabled !== false);
+  const index = enabled.findIndex((clip) => clip.id === activeClipId);
+  const target = enabled[Math.max(0, Math.min(enabled.length - 1, index + direction))];
+  if (target) {
+    project.selectedClipId = target.id;
+    void seekTimeline(target.timelineStartMs);
+    renderAll({ keepScroll: true });
+  }
+}
+
+function handleVideoTimeUpdate() {
+  if (pendingPreviewSeek) {
+    return;
+  }
+  const clip = project.clips.find((candidate) => candidate.id === activeClipId);
+  if (!clip) {
+    return;
+  }
+  const sourceMs = previewSecondsToSourceMs(elements.preview_video.currentTime);
+  if (sourceMs >= clip.sourceEndMs - 35) {
+    const enabled = project.clips.filter((candidate) => candidate.enabled !== false);
+    const index = enabled.findIndex((candidate) => candidate.id === clip.id);
+    const next = enabled[index + 1];
+    if (next && !elements.preview_video.paused) {
+      activeClipId = next.id;
+      project.selectedClipId = next.id;
+      project.playheadMs = next.timelineStartMs;
+      updatePlayhead();
+      void seekPreviewToSourceMs(next.sourceStartMs)
+        .then(() => elements.preview_video.play())
+        .catch((error) => console.warn("다음 컷 미리보기를 시작하지 못했습니다.", error));
+      return;
+    }
+    project.playheadMs = clip.timelineStartMs + clipDurationMs(clip);
+    elements.preview_video.pause();
+    updatePlayhead();
+    return;
+  }
+  project.playheadMs = Math.max(
+    clip.timelineStartMs,
+    Math.min(clip.timelineStartMs + clipDurationMs(clip), clip.timelineStartMs + sourceMs - clip.sourceStartMs)
+  );
+  updatePlayhead();
+}
+
+function selectCue(cueId, { seek = false } = {}) {
+  const cue = project.subtitles.find((candidate) => candidate.id === cueId);
+  if (!cue) {
+    return;
+  }
+  project = {
+    ...project,
+    selectedCueId: cue.id,
+    selectedClipId: cue.clipId
+  };
+  inspectorMode = "selected";
+  const range = cueTimelineRange(project, cue);
+  if (seek && range) {
+    void seekTimeline(range.startMs);
+  }
+  renderAll({ keepScroll: true });
+  scheduleSave();
+}
+
+function cueHasOverlap(candidateProject, cueId) {
+  return findSubtitleOverlaps(candidateProject).some((overlap) => (
+    overlap.firstCueId === cueId || overlap.secondCueId === cueId
+  ));
+}
+
+function addCueAtPlayhead() {
+  const mapping = mapTimelineToSource(project, project.playheadMs);
+  if (!mapping) {
+    showToast("자막을 추가할 영상 구간이 없습니다.", "error");
+    return;
+  }
+  const activeCue = cueAtTimeline(project, project.playheadMs);
+  if (activeCue) {
+    selectCue(activeCue.id);
+    elements.cue_text.focus();
+    showToast("현재 시각에는 이미 자막이 있습니다. 기존 자막의 끝을 먼저 조정해 주세요.", "error");
+    return;
+  }
+  const clip = project.clips.find((candidate) => candidate.id === mapping.clipId);
+  const startOffsetMs = mapping.clipOffsetMs;
+  const nextCueStartMs = project.subtitles
+    .filter((cue) => cue.clipId === clip.id && cue.startOffsetMs > startOffsetMs)
+    .map((cue) => cue.startOffsetMs)
+    .sort((a, b) => a - b)[0] ?? clipDurationMs(clip);
+  const endOffsetMs = Math.min(
+    clipDurationMs(clip),
+    startOffsetMs + 2_000,
+    nextCueStartMs
+  );
+  if (endOffsetMs - startOffsetMs < 100) {
+    showToast("다음 자막과의 간격이 너무 짧습니다. 기존 자막 시각을 먼저 조정해 주세요.", "error");
+    return;
+  }
+  const cue = createSubtitleCue(project, {
+    clipId: clip.id,
+    startOffsetMs,
+    endOffsetMs,
+    text: "새 자막",
+    origin: "human"
+  });
+  applyProject({
+    ...project,
+    subtitles: [...project.subtitles, cue],
+    selectedCueId: cue.id,
+    selectedClipId: clip.id
+  });
+  elements.cue_text.focus();
+  elements.cue_text.select();
+}
+
+function updateSelectedCue(patch, options) {
+  const cue = selectedCue();
+  if (!cue) {
+    return;
+  }
+  const next = updateSubtitleCue(project, cue.id, patch, options);
+  if (cueHasOverlap(next, cue.id)) {
+    showToast("자막끼리는 겹칠 수 없습니다. 시작·끝 시각을 다시 조정해 주세요.", "error");
+    renderCueInspector();
+    return;
+  }
+  applyProject(next);
+}
+
+async function chooseMediaFile() {
+  if (projectMutationLockCount > 0) {
+    showToast("다른 미디어 작업이 끝난 뒤 다시 시도해 주세요.", "error");
+    return;
+  }
+  if (typeof window.showOpenFilePicker === "function") {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        id: "chzzk-kirinuki-source",
+        multiple: false,
+        types: [{
+          description: "영상 파일",
+          accept: {
+            "video/*": [".mp4", ".mkv", ".webm", ".mov", ".m4v", ".ts"],
+            "audio/*": [".m4a", ".mp3", ".wav", ".flac", ".ogg"]
+          }
+        }]
+      });
+      const file = await handle.getFile();
+      const attached = await attachMediaFile(file);
+      if (attached) {
+        const handleSaved = await saveMediaHandle(project.id, handle);
+        if (handleSaved) {
+          const persistedProject = {
+            ...project,
+            mediaAsset: {
+              ...project.mediaAsset,
+              fileHandleStored: true
+            },
+            updatedAt: new Date().toISOString()
+          };
+          try {
+            await saveProject(persistedProject);
+            project = persistedProject;
+            mediaHandle = handle;
+          } catch (error) {
+            mediaHandle = null;
+            await deleteMediaHandle(project.id);
+            showToast(
+              `원본은 현재 탭에 연결했지만 재시작용 파일 권한을 저장하지 못했습니다: ${error.message}`,
+              "error",
+              0
+            );
+          }
+        } else {
+          mediaHandle = null;
+          await deleteMediaHandle(project.id);
+          showToast(
+            "원본은 현재 탭에 연결했지만 파일 권한을 저장하지 못했습니다. 편집기를 다시 열면 원본을 다시 선택해 주세요.",
+            "error",
+            0
+          );
+        }
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        showToast(`원본 파일을 열지 못했습니다: ${error.message}`, "error", 0);
+      }
+    }
+    return;
+  }
+  elements.media_input.click();
+}
+
+async function attachMediaFile(file, { fileHandleStored = false } = {}) {
+  lockProjectMutations();
+  showJob("원본을 살펴보고 있어요", "메타데이터와 영상 트랙을 확인합니다.", 0.08, { cancelable: false });
+  const previousMediaUrl = mediaUrl;
+  let nextMediaUrl = null;
+  try {
+    const asset = await inspectMediaFile(file);
+    if (!asset.hasVideo) {
+      throw new Error("영상 트랙이 없는 파일입니다.");
+    }
+    nextMediaUrl = URL.createObjectURL(file);
+    await new Promise((resolve, reject) => {
+      const cleanup = () => {
+        elements.preview_video.removeEventListener("loadedmetadata", onLoaded);
+        elements.preview_video.removeEventListener("error", onError);
+      };
+      const onLoaded = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error("Chrome 영상 플레이어가 파일을 열지 못했습니다."));
+      };
+      elements.preview_video.addEventListener("loadedmetadata", onLoaded);
+      elements.preview_video.addEventListener("error", onError);
+      elements.preview_video.src = nextMediaUrl;
+    });
+    const nextProject = {
+      ...project,
+      mediaAsset: {
+        ...asset,
+        fileHandleStored
+      },
+      updatedAt: new Date().toISOString()
+    };
+    await saveProject(nextProject);
+    mediaFile = file;
+    mediaUrl = nextMediaUrl;
+    project = nextProject;
+    if (previousMediaUrl && previousMediaUrl !== nextMediaUrl) {
+      URL.revokeObjectURL(previousMediaUrl);
+    }
+    hideJob();
+    renderAll();
+    await seekTimeline(project.playheadMs || 0);
+    const overrun = clipOutsideMedia(project);
+    if (overrun) {
+      showToast("선택 구간 일부가 연결한 원본 길이 밖에 있습니다. 라이브↔VOD 정렬값을 확인해 주세요.", "error", 7000);
+    } else {
+      showToast("원본 영상을 연결했습니다.", "success");
+    }
+    return true;
+  } catch (error) {
+    if (nextMediaUrl && nextMediaUrl !== mediaUrl) {
+      URL.revokeObjectURL(nextMediaUrl);
+    }
+    if (previousMediaUrl && elements.preview_video.src !== previousMediaUrl) {
+      elements.preview_video.src = previousMediaUrl;
+    } else if (!previousMediaUrl && !mediaUrl) {
+      elements.preview_video.removeAttribute("src");
+      elements.preview_video.load();
+    }
+    hideJob();
+    showToast(error.message, "error", 0);
+    return false;
+  } finally {
+    unlockProjectMutations();
+  }
+}
+
+function ensureAsrWorker() {
+  if (asrWorker) {
+    return asrWorker;
+  }
+  asrWorker = new Worker(chrome.runtime.getURL("editor/asr-worker.js"), { type: "module" });
+  const worker = asrWorker;
+  worker.addEventListener("message", (event) => {
+    const message = event.data || {};
+    if (!currentAsrJob || message.jobId !== currentAsrJob.id) {
+      return;
+    }
+    if (message.type === "progress") {
+      currentAsrJob.onProgress(message);
+    } else if (message.type === "result") {
+      currentAsrJob.resolve(message);
+      currentAsrJob = null;
+    } else if (message.type === "error") {
+      currentAsrJob.reject(new Error(message.error));
+      currentAsrJob = null;
+    }
+  });
+  const discardWorker = () => {
+    if (asrWorker === worker) {
+      asrWorker = null;
+    }
+    worker.terminate();
+  };
+  worker.addEventListener("error", (event) => {
+    if (currentAsrJob) {
+      currentAsrJob.reject(new Error(event.message || "AI 자막 worker가 중단되었습니다."));
+      currentAsrJob = null;
+    }
+    discardWorker();
+  });
+  worker.addEventListener("messageerror", () => {
+    if (currentAsrJob) {
+      currentAsrJob.reject(new Error("AI 자막 worker 응답을 읽지 못했습니다."));
+      currentAsrJob = null;
+    }
+    discardWorker();
+  });
+  return worker;
+}
+
+function transcribePcm(audio, model, onProgress) {
+  if (currentAsrJob) {
+    throw new Error("이미 음성인식 작업이 실행 중입니다.");
+  }
+  const worker = ensureAsrWorker();
+  const id = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    currentAsrJob = { id, resolve, reject, onProgress };
+    try {
+      worker.postMessage({ type: "transcribe", jobId: id, model, audio }, [audio.buffer]);
+    } catch (error) {
+      currentAsrJob = null;
+      if (asrWorker === worker) {
+        asrWorker = null;
+      }
+      worker.terminate();
+      reject(error);
+    }
+  });
+}
+
+function setAiProgress(progress, label) {
+  const value = Math.max(0, Math.min(1, Number(progress) || 0));
+  elements.ai_progress.hidden = false;
+  elements.ai_progress.querySelector(".progress-track span").style.width = `${Math.round(value * 100)}%`;
+  elements.ai_progress_value.textContent = `${Math.round(value * 100)}%`;
+  elements.ai_progress_label.textContent = label;
+  if (!elements.job_dialog.hidden) {
+    updateJob(value, label);
+  }
+}
+
+async function generateCaptions() {
+  if (!mediaFile) {
+    showToast("AI 자막을 만들려면 먼저 원본 영상을 연결해 주세요.", "error");
+    return;
+  }
+  if (!project.clips.some((clip) => clip.enabled !== false)) {
+    showToast("선택한 구간이 없습니다.", "error");
+    return;
+  }
+  if (activeJobController || projectMutationLockCount > 0) {
+    return;
+  }
+  const controller = new AbortController();
+  activeJobController = controller;
+  const model = elements.asr_model.value;
+  const undoSnapshot = cloneProject(project);
+  let undoRecorded = false;
+  showJob(
+    "AI 자막 초안을 만드는 중",
+    "첫 실행은 선택한 Whisper 모델 데이터를 받은 뒤 브라우저에 캐시합니다.",
+    0,
+    { cancelable: true }
+  );
+  elements.generate_captions.disabled = true;
+  project = {
+    ...project,
+    ai: {
+      ...project.ai,
+      model,
+      status: "running",
+      progress: 0,
+      error: null
+    }
+  };
+  renderHeader();
+
+  lockProjectMutations();
+  try {
+    const clips = project.clips.filter((clip) => clip.enabled !== false);
+    for (let index = 0; index < clips.length; index += 1) {
+      const clip = clips[index];
+      const base = index / clips.length;
+      const span = 1 / clips.length;
+      setAiProgress(base, `${index + 1}/${clips.length} · 선택 구간의 음성을 준비하는 중`);
+      const pcm = await extractClipPcm16k(mediaFile, clip, {
+        signal: controller.signal,
+        onProgress: (value) => {
+          setAiProgress(base + span * value * 0.18, `${index + 1}/${clips.length} · 음성 추출 중`);
+        }
+      });
+      const result = await transcribePcm(pcm, model, (message) => {
+        const local = 0.18 + (message.progress || 0) * 0.8;
+        setAiProgress(base + span * local, `${index + 1}/${clips.length} · ${message.label}`);
+      });
+      const drafts = transcriptChunksToCueDrafts(
+        result.chunks,
+        clipDurationMs(clip)
+      );
+      if (drafts.length === 0 && result.text) {
+        drafts.push({
+          startOffsetMs: 0,
+          endOffsetMs: Math.min(clipDurationMs(clip), 4_500),
+          text: result.text
+        });
+      }
+      if (!undoRecorded) {
+        pushUndo(undoSnapshot);
+        undoRecorded = true;
+      }
+      project = replaceAiSubtitleDraft(project, clip.id, drafts);
+      await saveProject(project);
+      renderAll({ keepScroll: true });
+      setAiProgress(base + span, `${index + 1}/${clips.length} · 자막 초안 저장 완료`);
+    }
+    project = {
+      ...project,
+      ai: {
+        ...project.ai,
+        status: "done",
+        progress: 1,
+        lastRunAt: new Date().toISOString(),
+        error: null
+      }
+    };
+    await saveProject(project);
+    setAiProgress(1, "선택 구간 자막 초안 완료");
+    showToast("AI 자막 초안을 만들었습니다. 텍스트·시간·위치를 검수해 주세요.", "success", 6500);
+  } catch (error) {
+    const canceled = error.name === "AbortError";
+    project = {
+      ...project,
+      ai: {
+        ...project.ai,
+        status: canceled ? "canceled" : "error",
+        error: canceled ? null : error.message
+      }
+    };
+    await saveProject(project);
+    elements.ai_progress.hidden = true;
+    showToast(canceled ? "AI 자막 작업을 취소했습니다." : `AI 자막 실패: ${error.message}`, canceled ? "info" : "error", 0);
+  } finally {
+    activeJobController = null;
+    elements.generate_captions.disabled = false;
+    hideJob();
+    renderAll({ keepScroll: true });
+    unlockProjectMutations();
+  }
+}
+
+function cancelActiveJob() {
+  if (!activeJobCancelable) {
+    return;
+  }
+  activeJobController?.abort();
+  if (currentAsrJob) {
+    currentAsrJob.reject(new DOMException("작업이 취소되었습니다.", "AbortError"));
+    currentAsrJob = null;
+  }
+  if (asrWorker) {
+    asrWorker.terminate();
+    asrWorker = null;
+  }
+}
+
+function setJobCancelable(cancelable) {
+  activeJobCancelable = Boolean(cancelable);
+  elements.cancel_job.hidden = !activeJobCancelable;
+  elements.cancel_job.disabled = !activeJobCancelable;
+  if (!activeJobCancelable && document.activeElement === elements.cancel_job) {
+    elements.job_dialog.querySelector(".job-card")?.focus();
+  }
+}
+
+function showJob(title, message, progress = 0, { cancelable = true } = {}) {
+  focusBeforeJob = document.activeElement;
+  elements.job_title.textContent = title;
+  elements.job_message.textContent = message;
+  setJobCancelable(cancelable);
+  updateJob(progress);
+  elements.job_dialog.hidden = false;
+  if (!elements.job_dialog.open) {
+    elements.job_dialog.showModal();
+  }
+  const focusTarget = cancelable
+    ? elements.cancel_job
+    : elements.job_dialog.querySelector(".job-card");
+  focusTarget.focus();
+}
+
+function updateJob(progress, message) {
+  const value = Math.max(0, Math.min(1, Number(progress) || 0));
+  elements.job_progress.style.width = `${Math.round(value * 100)}%`;
+  elements.job_percent.textContent = `${Math.round(value * 100)}%`;
+  if (message) {
+    elements.job_message.textContent = message;
+  }
+}
+
+function hideJob() {
+  if (elements.job_dialog.open) {
+    elements.job_dialog.close();
+  }
+  elements.job_dialog.hidden = true;
+  activeJobCancelable = false;
+  if (focusBeforeJob?.isConnected) {
+    focusBeforeJob.focus();
+  }
+  focusBeforeJob = null;
+}
+
+function triggerDownload(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2_000);
+}
+
+function createSidecars(baseName, projectSnapshot) {
+  const sidecars = [{
+    name: `${baseName}.kirinuki.json`,
+    blob: new Blob([`${JSON.stringify(projectSnapshot, null, 2)}\n`], { type: "application/json" })
+  }];
+  const srt = serializeSrt(projectSnapshot);
+  if (srt) {
+    sidecars.push({
+      name: `${baseName}.ko.srt`,
+      blob: new Blob([srt], { type: "application/x-subrip;charset=utf-8" })
+    });
+  }
+  return sidecars;
+}
+
+function downloadSidecars(sidecars) {
+  sidecars.forEach(({ blob, name }) => triggerDownload(blob, name));
+}
+
+async function writeBlobToFileHandle(fileHandle, blob) {
+  const writable = await fileHandle.createWritable();
+  let closed = false;
+  try {
+    await writable.write(blob);
+    await writable.close();
+    closed = true;
+  } catch (error) {
+    if (!closed && typeof writable.abort === "function") {
+      try {
+        await writable.abort(error);
+      } catch {
+        // Preserve the original write failure.
+      }
+    }
+    throw error;
+  }
+}
+
+async function saveSidecarsToDirectory(directoryHandle, sidecars) {
+  for (const { blob, name } of sidecars) {
+    try {
+      const fileHandle = await directoryHandle.getFileHandle(name, { create: true });
+      await writeBlobToFileHandle(fileHandle, blob);
+    } catch (error) {
+      await directoryHandle.removeEntry(name).catch(() => {});
+      throw error;
+    }
+  }
+}
+
+async function directoryFileExists(directoryHandle, name) {
+  try {
+    await directoryHandle.getFileHandle(name);
+    return true;
+  } catch (error) {
+    if (error.name === "NotFoundError") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function chooseUniqueExportBaseName(directoryHandle, requestedBaseName, extension) {
+  for (let index = 1; index <= 999; index += 1) {
+    const candidate = index === 1
+      ? requestedBaseName
+      : `${requestedBaseName} (${index})`;
+    const names = [
+      `${candidate}.${extension}`,
+      `${candidate}.kirinuki.json`,
+      `${candidate}.ko.srt`
+    ];
+    const conflicts = await Promise.all(
+      names.map((name) => directoryFileExists(directoryHandle, name))
+    );
+    if (conflicts.every((exists) => !exists)) {
+      return candidate;
+    }
+  }
+  throw new Error("같은 이름의 내보내기가 너무 많습니다. 프로젝트명을 바꿔 주세요.");
+}
+
+async function exportVideo() {
+  if (!mediaFile) {
+    showToast("먼저 원본 영상을 연결해 주세요.", "error");
+    return;
+  }
+  if (!project.clips.some((clip) => clip.enabled !== false)) {
+    showToast("내보낼 사용자 선택 구간이 없습니다.", "error");
+    return;
+  }
+  if (findSubtitleOverlaps(project).length > 0) {
+    showToast("서로 겹치는 자막이 있습니다. 자막 시작·끝 시각을 먼저 조정해 주세요.", "error", 0);
+    return;
+  }
+  if (activeJobController || projectMutationLockCount > 0) {
+    showToast("다른 미디어 작업이 끝난 뒤 다시 시도해 주세요.", "error");
+    return;
+  }
+
+  lockProjectMutations();
+  try {
+    const exportProject = cloneProject(project);
+    let profile;
+    try {
+      profile = await getPreferredOutputProfile(mediaFile, exportProject);
+    } catch (error) {
+      showToast(`이 브라우저에서 영상 인코더를 준비하지 못했습니다: ${error.message}`, "error", 0);
+      return;
+    }
+
+    let baseName = sanitizeFileName(exportProject.name);
+    let videoName = `${baseName}.${profile.extension}`;
+    let directoryHandle = null;
+    let handle = null;
+    let directoryVideoCreated = false;
+    if (typeof window.showDirectoryPicker === "function") {
+      try {
+        directoryHandle = await window.showDirectoryPicker({
+          id: "chzzk-kirinuki-export",
+          mode: "readwrite"
+        });
+        baseName = await chooseUniqueExportBaseName(
+          directoryHandle,
+          baseName,
+          profile.extension
+        );
+        videoName = `${baseName}.${profile.extension}`;
+        handle = await directoryHandle.getFileHandle(videoName, { create: true });
+        directoryVideoCreated = true;
+      } catch (error) {
+        if (error.name === "AbortError") {
+          return;
+        }
+        showToast(`저장 폴더를 열지 못했습니다: ${error.message}`, "error", 0);
+        return;
+      }
+    } else if (typeof window.showSaveFilePicker === "function") {
+      try {
+        handle = await window.showSaveFilePicker({
+          id: "chzzk-kirinuki-export",
+          suggestedName: videoName,
+          types: [{
+            description: profile.extension === "mp4" ? "MP4 영상" : "WebM 영상",
+            accept: { [profile.mimeType]: [`.${profile.extension}`] }
+          }]
+        });
+      } catch (error) {
+        if (error.name === "AbortError") {
+          return;
+        }
+        showToast(`저장 위치를 열지 못했습니다: ${error.message}`, "error", 0);
+        return;
+      }
+    }
+
+    const sidecars = createSidecars(baseName, exportProject);
+    const controller = new AbortController();
+    activeJobController = controller;
+    elements.export_video.disabled = true;
+    let renderCompleted = false;
+    try {
+      showJob(
+        "컷과 자막을 영상으로 만드는 중",
+        "선택한 구간만 원본에서 읽고 있습니다.",
+        0,
+        { cancelable: true }
+      );
+      const result = await renderProjectVideo(mediaFile, exportProject, {
+        fileHandle: handle,
+        signal: controller.signal,
+        onProgress: (progress, stage) => {
+          const label = stage === "finalize"
+            ? "파일을 마무리하는 중 · 이 단계는 취소할 수 없습니다"
+            : "컷 연결과 자막 합성 중";
+          if (stage === "finalize") {
+            setJobCancelable(false);
+          }
+          updateJob(progress, label);
+        }
+      });
+      renderCompleted = true;
+      if (result.blob) {
+        triggerDownload(result.blob, `${baseName}.${result.extension}`);
+      }
+      if (directoryHandle) {
+        await saveSidecarsToDirectory(directoryHandle, sidecars);
+      } else {
+        downloadSidecars(sidecars);
+      }
+      hideJob();
+      showToast(
+        `영상과 편집 프로젝트${sidecars.length > 1 ? "·SRT" : ""}를 ${directoryHandle ? "선택한 폴더에 " : ""}저장했습니다.`,
+        "success",
+        6000
+      );
+    } catch (error) {
+      let cleanupFailed = false;
+      if (directoryHandle && directoryVideoCreated && !renderCompleted) {
+        try {
+          await directoryHandle.removeEntry(videoName);
+          directoryVideoCreated = false;
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      hideJob();
+      const canceled = error.name === "AbortError";
+      const cleanupMessage = cleanupFailed
+        ? " 생성된 빈 영상 파일은 지우지 못했습니다."
+        : "";
+      showToast(
+        canceled
+          ? `영상 내보내기를 취소했습니다.${cleanupMessage}`
+          : renderCompleted
+            ? `영상은 저장했지만 프로젝트·SRT 저장에 실패했습니다: ${error.message}`
+            : `영상 내보내기 실패: ${error.message}${cleanupMessage}`,
+        canceled && !cleanupFailed ? "info" : "error",
+        0
+      );
+    } finally {
+      activeJobController = null;
+      elements.export_video.disabled = false;
+      renderHeader();
+    }
+  } finally {
+    unlockProjectMutations();
+  }
+}
+
+async function exportVideoWithLock() {
+  if (exportRequestPending) {
+    showToast("영상 내보내기 요청이 이미 진행 중입니다.", "error");
+    return;
+  }
+  exportRequestPending = true;
+  try {
+    if (!navigator.locks?.request) {
+      return await exportVideo();
+    }
+    return await navigator.locks.request(
+      EXPORT_LOCK_NAME,
+      { mode: "exclusive" },
+      () => exportVideo()
+    );
+  } finally {
+    exportRequestPending = false;
+  }
+}
+
+async function focusSourceTab({ seek = false } = {}) {
+  try {
+    const mapping = mapTimelineToSource(project, project.playheadMs);
+    const response = await chrome.runtime.sendMessage({
+      type: "KIRINUKI_EDITOR_SOURCE_ACTION",
+      projectId: project.id,
+      action: seek ? "seek-and-focus" : "focus",
+      sourceSeconds: mapping
+        ? (mapping.sourceMs - (project.broadcastSession?.alignmentOffsetMs || 0)) / 1000
+        : null
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "원래 치지직 탭을 찾지 못했습니다.");
+    }
+    sourceBindingConnected = true;
+    renderHeader();
+  } catch (error) {
+    sourceBindingConnected = false;
+    renderHeader();
+    showToast(error.message, "error");
+  }
+}
+
+function bindOverlayDrag() {
+  elements.subtitle_overlay.addEventListener("pointerdown", (event) => {
+    const cueId = elements.subtitle_overlay.dataset.cueId;
+    if (!cueId) {
+      return;
+    }
+    event.preventDefault();
+    selectCue(cueId);
+    beginPointerHistory();
+    elements.subtitle_overlay.setPointerCapture(event.pointerId);
+    elements.stage.classList.add("dragging-subtitle");
+    const move = (moveEvent) => {
+      const rect = elements.stage.getBoundingClientRect();
+      const content = videoContentRect();
+      const x = Math.max(0.05, Math.min(0.95, (moveEvent.clientX - rect.left - content.left) / content.width));
+      const y = Math.max(0.05, Math.min(0.95, (moveEvent.clientY - rect.top - content.top) / content.height));
+      project = updateSubtitleCue(project, cueId, { x, y });
+      renderCueInspector();
+      renderSubtitleOverlay();
+    };
+    const finish = () => {
+      elements.subtitle_overlay.removeEventListener("pointermove", move);
+      elements.subtitle_overlay.removeEventListener("pointerup", finish);
+      elements.subtitle_overlay.removeEventListener("pointercancel", finish);
+      elements.stage.classList.remove("dragging-subtitle");
+      endPointerHistory();
+    };
+    elements.subtitle_overlay.addEventListener("pointermove", move);
+    elements.subtitle_overlay.addEventListener("pointerup", finish);
+    elements.subtitle_overlay.addEventListener("pointercancel", finish);
+  });
+}
+
+function bindTimelineSeeking() {
+  const seekFromEvent = (event) => {
+    const rect = elements.timeline_content.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+    void seekTimeline(x / pixelsPerSecond * 1000);
+  };
+  elements.timeline_ruler.addEventListener("pointerdown", (event) => {
+    seekFromEvent(event);
+    elements.timeline_ruler.setPointerCapture(event.pointerId);
+    const move = (moveEvent) => seekFromEvent(moveEvent);
+    const finish = () => {
+      elements.timeline_ruler.removeEventListener("pointermove", move);
+      elements.timeline_ruler.removeEventListener("pointerup", finish);
+      scheduleSave();
+    };
+    elements.timeline_ruler.addEventListener("pointermove", move);
+    elements.timeline_ruler.addEventListener("pointerup", finish);
+  });
+  elements.playhead.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    elements.playhead.setPointerCapture(event.pointerId);
+    const move = (moveEvent) => seekFromEvent(moveEvent);
+    const finish = () => {
+      elements.playhead.removeEventListener("pointermove", move);
+      elements.playhead.removeEventListener("pointerup", finish);
+      scheduleSave();
+    };
+    elements.playhead.addEventListener("pointermove", move);
+    elements.playhead.addEventListener("pointerup", finish);
+  });
+  elements.playhead.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const delta = event.shiftKey ? 1_000 : 100;
+    void seekTimeline(project.playheadMs + (event.key === "ArrowLeft" ? -delta : delta));
+  });
+}
+
+function bindActions() {
+  elements.project_name.addEventListener("input", () => {
+    applyFieldProject({ ...project, name: elements.project_name.value }, "project-name");
+  });
+  elements.project_name.addEventListener("blur", () => endFieldEdit("project-name"));
+  elements.undo.addEventListener("click", undo);
+  elements.redo.addEventListener("click", redo);
+  elements.pick_media.addEventListener("click", () => void chooseMediaFile());
+  elements.pick_media_empty.addEventListener("click", () => void chooseMediaFile());
+  elements.media_input.addEventListener("change", () => {
+    const [file] = elements.media_input.files;
+    if (file) {
+      mediaHandle = null;
+      void attachMediaFile(file).then(async (attached) => {
+        if (attached) {
+          await deleteMediaHandle(project.id);
+        }
+      });
+    }
+    elements.media_input.value = "";
+  });
+  elements.export_video.addEventListener("click", () => void exportVideoWithLock());
+  elements.apply_source_offset.addEventListener("click", () => {
+    const seconds = Number(elements.source_offset.value);
+    if (!Number.isFinite(seconds)) {
+      showToast("정렬 오프셋을 초 단위 숫자로 입력해 주세요.", "error");
+      return;
+    }
+    try {
+      const next = applyMediaAlignmentOffset(project, Math.round(seconds * 1000));
+      applyProject(next);
+      void syncPreviewToPlayhead();
+      const overrun = mediaFile && clipOutsideMedia(next);
+      showToast(
+        overrun
+          ? "오프셋을 적용했지만 일부 컷이 원본 길이 밖입니다."
+          : "라이브와 로컬 VOD 정렬 오프셋을 적용했습니다.",
+        overrun ? "error" : "success",
+        overrun ? 7000 : 3600
+      );
+    } catch (error) {
+      showToast(error.message, "error", 0);
+      renderMediaCard();
+    }
+  });
+  elements.focus_source.addEventListener("click", () => void focusSourceTab());
+  elements.preview_source_tab.addEventListener("click", () => void focusSourceTab({ seek: true }));
+
+  elements.clip_list.addEventListener("click", (event) => {
+    const item = event.target.closest(".clip-item");
+    if (!item) {
+      return;
+    }
+    const clip = project.clips.find((candidate) => candidate.id === item.dataset.id);
+    if (!clip) {
+      return;
+    }
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    if (action) {
+      const index = project.clips.findIndex((candidate) => candidate.id === clip.id);
+      applyProject(reorderClip(project, clip.id, action === "up" ? index - 1 : index + 1));
+      const nextItem = [...elements.clip_list.querySelectorAll(".clip-item")]
+        .find((candidate) => candidate.dataset.id === clip.id);
+      const nextAction = nextItem?.querySelector(`[data-action="${action}"]`);
+      (nextAction && !nextAction.disabled ? nextAction : nextItem?.querySelector(".clip-select"))
+        ?.focus({ preventScroll: true });
+      void syncPreviewToPlayhead();
+      return;
+    }
+    project.selectedClipId = clip.id;
+    void seekTimeline(clip.timelineStartMs);
+    renderAll({ keepScroll: true });
+    const nextItem = [...elements.clip_list.querySelectorAll(".clip-item")]
+      .find((candidate) => candidate.dataset.id === clip.id);
+    nextItem?.querySelector(".clip-select")?.focus({ preventScroll: true });
+    scheduleSave();
+  });
+
+  elements.play_toggle.addEventListener("click", () => void togglePlayback());
+  elements.previous_clip.addEventListener("click", () => adjacentClip(-1));
+  elements.next_clip.addEventListener("click", () => adjacentClip(1));
+  elements.preview_video.addEventListener("timeupdate", handleVideoTimeUpdate);
+  elements.preview_video.addEventListener("play", () => elements.play_toggle.classList.add("playing"));
+  elements.preview_video.addEventListener("pause", () => elements.play_toggle.classList.remove("playing"));
+  elements.preview_video.addEventListener("loadedmetadata", renderSubtitleOverlay);
+  elements.toggle_mute.addEventListener("click", () => {
+    elements.preview_video.muted = !elements.preview_video.muted;
+    showToast(elements.preview_video.muted ? "미리보기 음소거" : "미리보기 음소거 해제");
+  });
+  elements.volume.addEventListener("input", () => {
+    elements.preview_video.volume = Number(elements.volume.value);
+  });
+
+  elements.add_cue.addEventListener("click", addCueAtPlayhead);
+  elements.add_cue_top.addEventListener("click", addCueAtPlayhead);
+  elements.cue_text.addEventListener("input", () => {
+    const cue = selectedCue();
+    if (cue) {
+      applyFieldProject(
+        updateSubtitleCue(project, cue.id, { text: elements.cue_text.value }),
+        "cue-text"
+      );
+    }
+  });
+  elements.cue_text.addEventListener("blur", () => endFieldEdit("cue-text"));
+  elements.cue_start.addEventListener("change", () => {
+    const cue = selectedCue();
+    const clip = project.clips.find((candidate) => candidate.id === cue?.clipId);
+    const timelineMs = parseTime(elements.cue_start.value);
+    if (!cue || !clip || timelineMs === null) {
+      if (cue) {
+        const range = cueTimelineRange(project, cue);
+        elements.cue_start.value = formatTime(range.startMs, { compact: true });
+      }
+      showToast("자막 시작 시각 형식을 확인해 주세요.", "error");
+      return;
+    }
+    updateSelectedCue({ startOffsetMs: timelineMs - clip.timelineStartMs });
+    const updated = selectedCue();
+    elements.cue_start.value = formatTime(cueTimelineRange(project, updated).startMs, { compact: true });
+  });
+  elements.cue_end.addEventListener("change", () => {
+    const cue = selectedCue();
+    const clip = project.clips.find((candidate) => candidate.id === cue?.clipId);
+    const timelineMs = parseTime(elements.cue_end.value);
+    if (!cue || !clip || timelineMs === null) {
+      if (cue) {
+        const range = cueTimelineRange(project, cue);
+        elements.cue_end.value = formatTime(range.endMs, { compact: true });
+      }
+      showToast("자막 종료 시각 형식을 확인해 주세요.", "error");
+      return;
+    }
+    updateSelectedCue({ endOffsetMs: timelineMs - clip.timelineStartMs });
+    const updated = selectedCue();
+    elements.cue_end.value = formatTime(cueTimelineRange(project, updated).endMs, { compact: true });
+  });
+  elements.cue_x.addEventListener("input", () => {
+    const cue = selectedCue();
+    if (cue) {
+      applyFieldProject(
+        updateSubtitleCue(project, cue.id, { x: Number(elements.cue_x.value) / 100 }),
+        "cue-x"
+      );
+    }
+  });
+  elements.cue_y.addEventListener("input", () => {
+    const cue = selectedCue();
+    if (cue) {
+      applyFieldProject(
+        updateSubtitleCue(project, cue.id, { y: Number(elements.cue_y.value) / 100 }),
+        "cue-y"
+      );
+    }
+  });
+  elements.cue_x.addEventListener("change", () => endFieldEdit("cue-x"));
+  elements.cue_y.addEventListener("change", () => endFieldEdit("cue-y"));
+  positionButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const y = button.dataset.position === "top" ? 0.18 : button.dataset.position === "center" ? 0.5 : 0.84;
+      updateSelectedCue({ y });
+    });
+  });
+  elements.font_size.addEventListener("input", () => {
+    applyFieldProject({
+      ...project,
+      subtitleDefaults: {
+        ...project.subtitleDefaults,
+        fontScale: Number(elements.font_size.value) / 100
+      }
+    }, "font-size");
+  });
+  elements.font_color.addEventListener("input", () => {
+    applyFieldProject({
+      ...project,
+      subtitleDefaults: {
+        ...project.subtitleDefaults,
+        color: elements.font_color.value
+      }
+    }, "font-color");
+  });
+  elements.font_size.addEventListener("change", () => endFieldEdit("font-size"));
+  elements.font_color.addEventListener("change", () => endFieldEdit("font-color"));
+  elements.delete_cue.addEventListener("click", () => {
+    const cue = selectedCue();
+    if (cue) {
+      applyProject(deleteSubtitleCue(project, cue.id));
+    }
+  });
+  elements.cue_list.addEventListener("click", (event) => {
+    const item = event.target.closest(".cue-list-item");
+    if (item) {
+      selectCue(item.dataset.id, { seek: true });
+      elements.cue_text.focus({ preventScroll: true });
+    }
+  });
+  captionInspectorTab.addEventListener("click", () => {
+    inspectorMode = "selected";
+    renderCueInspector();
+  });
+  elements.cue_list_tab.addEventListener("click", () => {
+    inspectorMode = "list";
+    renderCueInspector();
+  });
+  for (const tab of [captionInspectorTab, elements.cue_list_tab]) {
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      const next = event.key === "ArrowLeft" || event.key === "Home"
+        ? captionInspectorTab
+        : elements.cue_list_tab;
+      next.click();
+      next.focus();
+    });
+  }
+
+  elements.generate_captions.addEventListener("click", () => void generateCaptions());
+  elements.asr_model.addEventListener("change", () => {
+    applyProject({
+      ...project,
+      ai: {
+        ...project.ai,
+        model: elements.asr_model.value
+      }
+    });
+  });
+  elements.cancel_job.addEventListener("click", cancelActiveJob);
+  elements.job_dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    if (activeJobController && activeJobCancelable) {
+      cancelActiveJob();
+    }
+  });
+  elements.job_dialog.addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") {
+      return;
+    }
+    event.preventDefault();
+    const target = elements.cancel_job.hidden
+      ? elements.job_dialog.querySelector(".job-card")
+      : elements.cancel_job;
+    target.focus();
+  });
+  elements.timeline_zoom.addEventListener("input", () => {
+    pixelsPerSecond = Number(elements.timeline_zoom.value);
+    renderTimeline();
+  });
+  elements.fit_timeline.addEventListener("click", () => {
+    const durationSeconds = Math.max(1, projectDurationMs(project) / 1000);
+    pixelsPerSecond = Math.max(20, Math.min(240, (elements.timeline_scroll.clientWidth - 20) / durationSeconds));
+    elements.timeline_zoom.value = String(Math.round(pixelsPerSecond));
+    renderTimeline();
+  });
+
+  bindOverlayDrag();
+  bindTimelineSeeking();
+  window.addEventListener("resize", () => {
+    renderTimeline({ keepScroll: true });
+    renderSubtitleOverlay();
+  });
+  window.addEventListener("keydown", (event) => {
+    const editingText = event.target.matches("input, textarea, select, [contenteditable='true']");
+    const interactive = Boolean(event.target.closest(
+      "button, a, input, textarea, select, [contenteditable='true'], [role='slider'], [role='tab']"
+    ));
+    if (!elements.job_dialog.hidden) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (activeJobController) {
+          cancelActiveJob();
+        }
+      }
+      return;
+    }
+    if (!editingText && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      event.shiftKey ? redo() : undo();
+    } else if (!editingText && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
+      event.preventDefault();
+      redo();
+    } else if (!interactive && event.code === "Space") {
+      event.preventDefault();
+      void togglePlayback();
+    } else if (!interactive && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      const delta = event.shiftKey ? 1_000 : 100;
+      void seekTimeline(project.playheadMs + (event.key === "ArrowLeft" ? -delta : delta));
+    }
+  });
+}
+
+async function loadSeed() {
+  const params = new URLSearchParams(location.search);
+  const requestedProjectId = params.get("project");
+  if (requestedProjectId) {
+    const key = `${EDITOR_SEED_PREFIX}${requestedProjectId}`;
+    const stored = await chrome.storage.local.get(key);
+    if (stored[key]?.captureState) {
+      return {
+        projectId: requestedProjectId,
+        captureState: stored[key].captureState
+      };
+    }
+  }
+  const stored = await chrome.storage.local.get(STORAGE_KEY);
+  const captureState = stored[STORAGE_KEY] || {};
+  return {
+    projectId: requestedProjectId || captureProjectId(captureState),
+    captureState
+  };
+}
+
+async function restoreMedia() {
+  if (project.mediaAsset?.fileHandleStored === false) {
+    showToast("이 원본의 파일 권한은 저장되지 않았습니다. ‘원본 연결’에서 파일을 다시 선택해 주세요.");
+    return;
+  }
+  const restored = await getFileFromStoredHandle(project.id);
+  if (restored?.file) {
+    mediaHandle = restored.handle;
+    await attachMediaFile(restored.file, { fileHandleStored: true });
+  } else if (restored?.handle && restored.permission !== "granted") {
+    showToast("저장된 원본 파일을 다시 쓰려면 ‘원본 연결’을 눌러 권한을 확인해 주세요.");
+  } else if (restored?.error) {
+    showToast("저장된 원본 파일 연결이 만료되었습니다. ‘원본 연결’에서 다시 선택해 주세요.", "error");
+  }
+}
+
+async function initializeSourceBinding() {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "KIRINUKI_EDITOR_READY",
+      projectId: project.id
+    });
+    sourceBindingConnected = Boolean(response?.ok && response?.connected);
+  } catch {
+    sourceBindingConnected = false;
+  }
+}
+
+async function initialize() {
+  bindActions();
+  const { projectId, captureState } = await loadSeed();
+  const storedProject = normalizeEditorProject(await loadProject(projectId));
+  let seedMergeError = null;
+  if (storedProject) {
+    try {
+      project = mergeCaptureIntoEditorProject(storedProject, captureState);
+    } catch (error) {
+      project = storedProject;
+      seedMergeError = error;
+    }
+  } else {
+    project = createEditorProjectFromCapture(captureState, { id: projectId });
+  }
+  if (!project.selectedClipId && project.clips[0]) {
+    project.selectedClipId = project.clips[0].id;
+  }
+  await saveProject(project);
+  await initializeSourceBinding();
+  renderAll();
+  if (seedMergeError) {
+    showToast(`최신 선택 구간을 반영하지 못했습니다: ${seedMergeError.message}`, "error", 0);
+  }
+  await restoreMedia();
+  if (findSubtitleOverlaps(project).length > 0) {
+    showToast(
+      "이 프로젝트에는 서로 겹치는 자막이 있습니다. 내보내기 전에 자막 시작·끝 시각을 조정해 주세요.",
+      "error",
+      0
+    );
+  }
+}
+
+function applyCaptureSeedUpdate(captureState) {
+  try {
+    const next = mergeCaptureIntoEditorProject(project, captureState);
+    applyProject(next);
+    sourceBindingConnected = true;
+    void syncPreviewToPlayhead();
+    const overrun = mediaFile && clipOutsideMedia(next);
+    showToast(
+      overrun
+        ? "최신 선택 구간을 반영했지만 일부 컷이 현재 원본 길이 밖입니다. 정렬값을 확인해 주세요."
+        : "사이드패널의 최신 선택 구간을 반영했습니다.",
+      overrun ? "error" : "success",
+      overrun ? 7000 : 3600
+    );
+  } catch (error) {
+    showToast(`최신 선택 구간을 반영하지 못했습니다: ${error.message}`, "error", 0);
+  }
+}
+
+function flushPendingCaptureSeed() {
+  if (projectMutationLockCount > 0 || !pendingCaptureSeed) {
+    return;
+  }
+  const captureState = pendingCaptureSeed;
+  pendingCaptureSeed = null;
+  applyCaptureSeedUpdate(captureState);
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "KIRINUKI_SOURCE_BINDING_STATUS" && message.projectId === project?.id) {
+    sourceBindingConnected = Boolean(message.connected);
+    renderHeader();
+  } else if (
+    message?.type === "KIRINUKI_CAPTURE_SEED_UPDATED" &&
+    message.projectId === project?.id &&
+    message.captureState
+  ) {
+    if (projectMutationLockCount > 0) {
+      pendingCaptureSeed = message.captureState;
+    } else {
+      applyCaptureSeedUpdate(message.captureState);
+    }
+  }
+});
+
+window.addEventListener("beforeunload", () => {
+  void flushSave();
+  if (mediaUrl) {
+    URL.revokeObjectURL(mediaUrl);
+  }
+  cancelActiveJob();
+});
+
+window.addEventListener("pagehide", () => {
+  void flushSave();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    void flushSave();
+  }
+});
+
+void initialize().catch((error) => {
+  console.error(error);
+  showToast(`편집기를 열지 못했습니다: ${error.message}`, "error", 0);
+});
