@@ -32505,10 +32505,15 @@ async function renderProjectVideo(file, project2, {
 
 // src/editor/project-store.js
 var DATABASE_NAME = EDITOR_DATABASE_NAME;
-var DATABASE_VERSION = 2;
+var DATABASE_VERSION = 3;
 var PROJECTS = "projects";
 var HANDLES = "media-handles";
 var IMAGE_ASSETS = "image-assets";
+var LOCAL_DRAFTS = "local-drafts";
+var LOCAL_DRAFT_PROJECT_INDEX = "projectId";
+var LOCAL_DRAFT_SCHEMA = "chzzk-kirinuki-local-draft/v1";
+var MAX_LOCAL_DRAFTS = 5;
+var LOCAL_DRAFT_REASONS = /* @__PURE__ */ new Set(["manual", "auto", "pre-restore"]);
 var databasePromise = null;
 var activeDatabase = null;
 function clearCachedDatabase(database, attempt) {
@@ -32564,6 +32569,14 @@ function openDatabase() {
     }
     if (!database.objectStoreNames.contains(IMAGE_ASSETS)) {
       database.createObjectStore(IMAGE_ASSETS);
+    }
+    const localDraftStore = database.objectStoreNames.contains(LOCAL_DRAFTS) ? request.transaction.objectStore(LOCAL_DRAFTS) : database.createObjectStore(LOCAL_DRAFTS, { keyPath: "id" });
+    if (!localDraftStore.indexNames.contains(LOCAL_DRAFT_PROJECT_INDEX)) {
+      localDraftStore.createIndex(
+        LOCAL_DRAFT_PROJECT_INDEX,
+        LOCAL_DRAFT_PROJECT_INDEX,
+        { unique: false }
+      );
     }
   };
   request.onsuccess = () => {
@@ -32645,6 +32658,184 @@ async function saveProject(project2) {
   await transaction(PROJECTS, "readwrite", (store) => store.put(project2));
   return project2;
 }
+function cloneStoredValue(value) {
+  return structuredClone(value);
+}
+function requiredProjectId(project2) {
+  const projectId = String(project2?.id || "").trim();
+  if (!projectId) {
+    throw new TypeError("\uC784\uC2DC\uC800\uC7A5\uD560 \uD504\uB85C\uC81D\uD2B8 ID\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  return projectId;
+}
+function localDraftTimestamp(now) {
+  const date = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  const createdAtMs = date.getTime();
+  if (!Number.isFinite(createdAtMs)) {
+    throw new TypeError("\uC784\uC2DC\uC800\uC7A5 \uC2DC\uAC01\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  return {
+    createdAt: date.toISOString(),
+    createdAtMs
+  };
+}
+function localDraftId(value) {
+  const id = String(value || `local-draft-${crypto.randomUUID()}`).trim();
+  if (!id) {
+    throw new TypeError("\uC784\uC2DC\uC800\uC7A5 ID\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  return id;
+}
+function localDraftReason(value) {
+  const reason = String(value || "manual").trim();
+  if (!LOCAL_DRAFT_REASONS.has(reason)) {
+    throw new TypeError(`\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uC784\uC2DC\uC800\uC7A5 \uC0AC\uC720\uC785\uB2C8\uB2E4: ${reason}`);
+  }
+  return reason;
+}
+function createLocalDraftRecord(project2, {
+  reason = "manual",
+  restoredFromDraftId = null,
+  now = Date.now(),
+  id = null
+} = {}) {
+  const projectId = requiredProjectId(project2);
+  const timestamp = localDraftTimestamp(now);
+  return {
+    schema: LOCAL_DRAFT_SCHEMA,
+    id: localDraftId(id),
+    projectId,
+    ...timestamp,
+    reason: localDraftReason(reason),
+    restoredFromDraftId: restoredFromDraftId ? String(restoredFromDraftId) : null,
+    project: cloneStoredValue(project2)
+  };
+}
+function isLocalDraftRecord(value, projectId = null) {
+  if (!value || value.schema !== LOCAL_DRAFT_SCHEMA || !String(value.id || "") || !String(value.projectId || "") || !Number.isFinite(Number(value.createdAtMs)) || !value.project || String(value.project.id || "") !== String(value.projectId)) {
+    return false;
+  }
+  return projectId == null || String(value.projectId) === String(projectId);
+}
+function compareLocalDraftsNewestFirst(first, second) {
+  return Number(second.createdAtMs) - Number(first.createdAtMs) || String(second.id).localeCompare(String(first.id));
+}
+function trimLocalDrafts(store, projectId, removedIds) {
+  const request = store.index(LOCAL_DRAFT_PROJECT_INDEX).getAll(projectId);
+  request.onsuccess = () => {
+    const drafts = (request.result || []).filter((draft) => isLocalDraftRecord(draft, projectId)).sort(compareLocalDraftsNewestFirst);
+    for (const draft of drafts.slice(MAX_LOCAL_DRAFTS)) {
+      store.delete(draft.id);
+      removedIds.push(draft.id);
+    }
+  };
+}
+async function listLocalDrafts(projectId, { limit = MAX_LOCAL_DRAFTS } = {}) {
+  const normalizedProjectId = String(projectId || "").trim();
+  if (!normalizedProjectId) {
+    return [];
+  }
+  const requestedLimit = Number(limit);
+  const normalizedLimit = Number.isFinite(requestedLimit) ? Math.max(0, Math.min(MAX_LOCAL_DRAFTS, Math.floor(requestedLimit))) : MAX_LOCAL_DRAFTS;
+  if (normalizedLimit === 0) {
+    return [];
+  }
+  const drafts = await transaction(
+    LOCAL_DRAFTS,
+    "readonly",
+    (store) => store.index(LOCAL_DRAFT_PROJECT_INDEX).getAll(normalizedProjectId)
+  );
+  return (drafts || []).filter((draft) => isLocalDraftRecord(draft, normalizedProjectId)).sort(compareLocalDraftsNewestFirst).slice(0, normalizedLimit).map(cloneStoredValue);
+}
+async function loadLocalDraft(projectId, draftId) {
+  const normalizedProjectId = String(projectId || "").trim();
+  const normalizedDraftId = String(draftId || "").trim();
+  if (!normalizedProjectId || !normalizedDraftId) {
+    return null;
+  }
+  const draft = await transaction(
+    LOCAL_DRAFTS,
+    "readonly",
+    (store) => store.get(normalizedDraftId)
+  );
+  return isLocalDraftRecord(draft, normalizedProjectId) ? cloneStoredValue(draft) : null;
+}
+async function saveLocalDraft(project2, {
+  reason = "manual",
+  restoredFromDraftId = null,
+  now = Date.now(),
+  id = null
+} = {}) {
+  const storedProject = cloneStoredValue(project2);
+  const draft = createLocalDraftRecord(storedProject, {
+    reason,
+    restoredFromDraftId,
+    now,
+    id
+  });
+  const removedIds = [];
+  await transaction(
+    [PROJECTS, LOCAL_DRAFTS],
+    "readwrite",
+    (stores) => {
+      stores[PROJECTS].put(storedProject);
+      stores[LOCAL_DRAFTS].put(draft);
+      trimLocalDrafts(stores[LOCAL_DRAFTS], draft.projectId, removedIds);
+      return {
+        get result() {
+          return {
+            draft,
+            removedIds
+          };
+        }
+      };
+    }
+  );
+  return cloneStoredValue(draft);
+}
+async function restoreLocalDraft(currentProject, draftRecord, {
+  now = Date.now(),
+  id = null
+} = {}) {
+  const projectId = requiredProjectId(currentProject);
+  if (!isLocalDraftRecord(draftRecord, projectId)) {
+    throw new TypeError("\uC774 \uD504\uB85C\uC81D\uD2B8\uC5D0\uC11C \uBD88\uB7EC\uC62C \uC218 \uC788\uB294 \uC784\uC2DC\uC800\uC7A5\uBCF8\uC774 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  const restoredProject = cloneStoredValue(draftRecord.project);
+  if (requiredProjectId(restoredProject) !== projectId) {
+    throw new TypeError("\uC784\uC2DC\uC800\uC7A5\uBCF8\uC758 \uD504\uB85C\uC81D\uD2B8 ID\uAC00 \uD604\uC7AC \uD504\uB85C\uC81D\uD2B8\uC640 \uB2E4\uB985\uB2C8\uB2E4.");
+  }
+  const storedCurrentProject = cloneStoredValue(currentProject);
+  const preRestoreDraft = createLocalDraftRecord(storedCurrentProject, {
+    reason: "pre-restore",
+    restoredFromDraftId: draftRecord.id,
+    now,
+    id
+  });
+  const removedIds = [];
+  await transaction(
+    [PROJECTS, LOCAL_DRAFTS],
+    "readwrite",
+    (stores) => {
+      stores[PROJECTS].put(restoredProject);
+      stores[LOCAL_DRAFTS].put(preRestoreDraft);
+      trimLocalDrafts(stores[LOCAL_DRAFTS], projectId, removedIds);
+      return {
+        get result() {
+          return {
+            project: restoredProject,
+            preRestoreDraft,
+            removedIds
+          };
+        }
+      };
+    }
+  );
+  return {
+    project: cloneStoredValue(restoredProject),
+    preRestoreDraft: cloneStoredValue(preRestoreDraft)
+  };
+}
 async function saveMediaHandle(projectId, handle) {
   try {
     await transaction(HANDLES, "readwrite", (store) => store.put(handle, projectId));
@@ -32724,14 +32915,14 @@ async function pruneImageAssetBlobs(projectId, keepAssetIds = []) {
     Array.from(keepAssetIds || [], (assetId) => String(assetId || ""))
   );
   const deletedCount = await transaction(
-    [PROJECTS, IMAGE_ASSETS],
+    [PROJECTS, LOCAL_DRAFTS, IMAGE_ASSETS],
     "readwrite",
     (stores) => {
       let count = 0;
-      const projectRequest = stores[PROJECTS].get(targetProjectId);
-      projectRequest.onsuccess = () => {
-        const keep = new Set(requestedKeep);
-        for (const asset of projectRequest.result?.imageAssets || []) {
+      let pendingReferenceReads = 2;
+      const keep = new Set(requestedKeep);
+      const collectReferencedAssets = (candidateProject) => {
+        for (const asset of candidateProject?.imageAssets || []) {
           if (asset?.source?.kind !== "blob-key") {
             continue;
           }
@@ -32739,6 +32930,12 @@ async function pruneImageAssetBlobs(projectId, keepAssetIds = []) {
           if (blobKey) {
             keep.add(blobKey);
           }
+        }
+      };
+      const scanImageAssetsAfterReferences = () => {
+        pendingReferenceReads -= 1;
+        if (pendingReferenceReads > 0) {
+          return;
         }
         const request = stores[IMAGE_ASSETS].openKeyCursor();
         request.onsuccess = () => {
@@ -32753,6 +32950,20 @@ async function pruneImageAssetBlobs(projectId, keepAssetIds = []) {
           }
           cursor.continue();
         };
+      };
+      const projectRequest = stores[PROJECTS].get(targetProjectId);
+      projectRequest.onsuccess = () => {
+        collectReferencedAssets(projectRequest.result);
+        scanImageAssetsAfterReferences();
+      };
+      const draftsRequest = stores[LOCAL_DRAFTS].index(LOCAL_DRAFT_PROJECT_INDEX).getAll(targetProjectId);
+      draftsRequest.onsuccess = () => {
+        for (const draft of draftsRequest.result || []) {
+          if (isLocalDraftRecord(draft, targetProjectId)) {
+            collectReferencedAssets(draft.project);
+          }
+        }
+        scanImageAssetsAfterReferences();
       };
       return {
         get result() {
@@ -32772,6 +32983,8 @@ var elements = Object.fromEntries([
   "source-link-state",
   "undo",
   "redo",
+  "create-local-draft",
+  "open-local-drafts",
   "pick-media",
   "export-video",
   "clip-count",
@@ -32905,6 +33118,14 @@ var elements = Object.fromEntries([
   "job-progress",
   "job-percent",
   "cancel-job",
+  "local-draft-dialog",
+  "local-draft-title",
+  "local-draft-description",
+  "local-draft-list",
+  "local-draft-empty",
+  "local-draft-status",
+  "restore-local-draft",
+  "close-local-draft-dialog",
   "toast"
 ].map((id) => [id.replaceAll("-", "_"), document.querySelector(`#${id}`)]));
 var captionInspectorTab = elements.cue_selected_tab;
@@ -32945,6 +33166,13 @@ var liveTimelineGeometryFrame = null;
 var previewAudioClockTimer = null;
 var pendingAssetTimelineMs = null;
 var imageAssetRenderSequence = 0;
+var localDraftAutosaveTimer = null;
+var localDraftOperationQueue = Promise.resolve();
+var localDraftOperationActive = false;
+var automaticLocalDraftOperation = null;
+var lastAutomaticDraftAtMs = 0;
+var localDraftAutosaveAnchorAtMs = 0;
+var focusBeforeLocalDraftDialog = null;
 var imageAssetObjectUrls = /* @__PURE__ */ new Map();
 var EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
 var MAX_IMAGE_ASSET_BYTES = 25 * 1024 * 1024;
@@ -32955,6 +33183,8 @@ var ASSET_SUBROW_STRIDE_PX = 47;
 var ASSET_BLOCK_TOP_PX = 7;
 var MIN_TIMELINE_RANGE_MS = 100;
 var PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
+var LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1e3;
+var LOCAL_DRAFT_BUSY_RETRY_MS = 30 * 1e3;
 var ALLOWED_IMAGE_ASSET_TYPES = /* @__PURE__ */ new Set([
   "image/png",
   "image/jpeg",
@@ -33045,6 +33275,293 @@ function flushSave() {
     scheduleImageAssetBlobPrune();
     return savedProject;
   });
+}
+var localDraftDateFormatter = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit"
+});
+function localDraftReasonLabel(reason) {
+  return {
+    manual: "\uC218\uB3D9",
+    auto: "\uC790\uB3D9",
+    "pre-restore": "\uBCF5\uC6D0 \uC9C1\uC804"
+  }[reason] || "\uC784\uC2DC";
+}
+function setLocalDraftOperationActive(active) {
+  localDraftOperationActive = Boolean(active);
+  elements.create_local_draft.disabled = localDraftOperationActive;
+  elements.open_local_drafts.disabled = localDraftOperationActive;
+  elements.close_local_draft_dialog.disabled = localDraftOperationActive;
+  const selectedDraft = elements.local_draft_list.querySelector(
+    'input[name="local-draft-choice"]:checked'
+  );
+  elements.restore_local_draft.disabled = localDraftOperationActive || !selectedDraft;
+  for (const input of elements.local_draft_list.querySelectorAll("input")) {
+    input.disabled = localDraftOperationActive;
+  }
+}
+function queueLocalDraftOperation(operation) {
+  const queued = localDraftOperationQueue.catch(() => void 0).then(async () => {
+    setLocalDraftOperationActive(true);
+    try {
+      return await operation();
+    } finally {
+      setLocalDraftOperationActive(false);
+    }
+  });
+  localDraftOperationQueue = queued.catch(() => void 0);
+  return queued;
+}
+function localDraftSummary(draft) {
+  const snapshot = draft?.project || {};
+  return [
+    `\uCEF7 ${snapshot.clips?.length || 0}`,
+    `\uC790\uB9C9 ${snapshot.subtitles?.length || 0}`,
+    `\uC5D0\uC14B ${snapshot.imageAssets?.length || 0}`,
+    `\uC74C\uC131 ${snapshot.audioRegions?.length || 0}`
+  ].join(" \xB7 ");
+}
+function updateLocalDraftStatus(drafts = []) {
+  const count = Math.min(5, drafts.length);
+  const lastAutoText = lastAutomaticDraftAtMs > 0 ? ` \xB7 \uB9C8\uC9C0\uB9C9 \uC790\uB3D9 ${localDraftDateFormatter.format(lastAutomaticDraftAtMs)}` : "";
+  elements.local_draft_status.textContent = `\uCD5C\uADFC ${count}/5\uAC1C \xB7 5\uBD84\uB9C8\uB2E4 \uC790\uB3D9 \uC800\uC7A5${lastAutoText}`;
+  elements.open_local_drafts.title = `\uCD5C\uADFC \uC784\uC2DC\uC800\uC7A5 ${count}\uAC1C \uBD88\uB7EC\uC624\uAE30`;
+}
+function renderLocalDraftList(drafts, selectedId = "") {
+  const fragment = document.createDocumentFragment();
+  for (const draft of drafts) {
+    const label = document.createElement("label");
+    label.className = "local-draft-item";
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "local-draft-choice";
+    input.value = draft.id;
+    input.checked = draft.id === selectedId;
+    input.disabled = localDraftOperationActive;
+    input.addEventListener("change", () => {
+      elements.restore_local_draft.disabled = localDraftOperationActive;
+    });
+    const copy = document.createElement("span");
+    copy.className = "local-draft-item-copy";
+    const heading = document.createElement("span");
+    heading.className = "local-draft-item-heading";
+    const reason = document.createElement("span");
+    reason.className = `local-draft-reason ${draft.reason || "manual"}`;
+    reason.textContent = localDraftReasonLabel(draft.reason);
+    const time = document.createElement("time");
+    time.dateTime = draft.createdAt;
+    time.textContent = localDraftDateFormatter.format(
+      new Date(draft.createdAtMs || draft.createdAt)
+    );
+    heading.append(time, reason);
+    const summary = document.createElement("span");
+    summary.className = "local-draft-item-meta";
+    summary.textContent = localDraftSummary(draft);
+    copy.append(heading, summary);
+    label.append(input, copy);
+    fragment.append(label);
+  }
+  elements.local_draft_list.replaceChildren(fragment);
+  elements.local_draft_empty.hidden = drafts.length > 0;
+  elements.restore_local_draft.disabled = localDraftOperationActive || !elements.local_draft_list.querySelector(
+    'input[name="local-draft-choice"]:checked'
+  );
+  updateLocalDraftStatus(drafts);
+}
+async function refreshLocalDraftList({ preserveSelection = true } = {}) {
+  const selectedId = preserveSelection ? elements.local_draft_list.querySelector(
+    'input[name="local-draft-choice"]:checked'
+  )?.value || "" : "";
+  const drafts = await listLocalDrafts(project.id, { limit: 5 });
+  renderLocalDraftList(drafts, selectedId);
+  return drafts;
+}
+async function saveCurrentLocalDraft(reason, {
+  restoredFromDraftId = null,
+  announce = false
+} = {}) {
+  if (!project?.id) {
+    throw new Error("\uC784\uC2DC\uC800\uC7A5\uD560 \uD504\uB85C\uC81D\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  if (reason !== "auto") {
+    fieldEditSession = null;
+  }
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  const snapshot = cloneProject(project);
+  const draft = await saveLocalDraft(snapshot, {
+    reason,
+    restoredFromDraftId,
+    now: Date.now(),
+    id: crypto.randomUUID()
+  });
+  if (reason === "auto") {
+    lastAutomaticDraftAtMs = draft.createdAtMs;
+    localDraftAutosaveAnchorAtMs = draft.createdAtMs;
+  }
+  scheduleImageAssetBlobPrune();
+  if (elements.local_draft_dialog.open) {
+    await refreshLocalDraftList();
+  } else {
+    const drafts = await listLocalDrafts(project.id, { limit: 5 });
+    updateLocalDraftStatus(drafts);
+  }
+  if (announce) {
+    showToast("\uD604\uC7AC \uC0C1\uD0DC\uB97C \uC774 \uAE30\uAE30\uC5D0 \uC784\uC2DC\uC800\uC7A5\uD588\uC2B5\uB2C8\uB2E4.", "success");
+  }
+  return draft;
+}
+function createManualLocalDraft() {
+  void queueLocalDraftOperation(() => saveCurrentLocalDraft("manual", { announce: true })).catch((error) => {
+    showToast(`\uC784\uC2DC\uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
+  });
+}
+function localDraftAutosaveBlocked() {
+  return !project || pointerEditActive || rangeHandleDragActive || projectMutationLockCount > 0 || Boolean(activeJobController) || !elements.job_dialog.hidden || elements.local_draft_dialog.open || localDraftOperationActive;
+}
+function scheduleLocalDraftAutosave(delayMs = LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS) {
+  clearTimeout(localDraftAutosaveTimer);
+  localDraftAutosaveTimer = setTimeout(() => {
+    localDraftAutosaveTimer = null;
+    void runAutomaticLocalDraft();
+  }, Math.max(0, delayMs));
+}
+function runAutomaticLocalDraft() {
+  if (automaticLocalDraftOperation) {
+    return automaticLocalDraftOperation;
+  }
+  if (localDraftAutosaveBlocked()) {
+    scheduleLocalDraftAutosave(LOCAL_DRAFT_BUSY_RETRY_MS);
+    return Promise.resolve(null);
+  }
+  automaticLocalDraftOperation = queueLocalDraftOperation(
+    () => saveCurrentLocalDraft("auto")
+  ).catch((error) => {
+    console.warn("5\uBD84 \uC790\uB3D9 \uC784\uC2DC\uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", error);
+    showToast(`\uC790\uB3D9 \uC784\uC2DC\uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
+    return null;
+  }).finally(() => {
+    automaticLocalDraftOperation = null;
+    scheduleLocalDraftAutosave();
+  });
+  return automaticLocalDraftOperation;
+}
+async function openLocalDraftDialog() {
+  if (!elements.job_dialog.hidden) {
+    showToast("\uC9C4\uD589 \uC911\uC778 \uC791\uC5C5\uC774 \uB05D\uB09C \uB4A4 \uC784\uC2DC\uC800\uC7A5 \uAE30\uB85D\uC744 \uC5F4\uC5B4 \uC8FC\uC138\uC694.");
+    return;
+  }
+  focusBeforeLocalDraftDialog = elements.open_local_drafts;
+  try {
+    const drafts = await queueLocalDraftOperation(() => refreshLocalDraftList({ preserveSelection: false }));
+    elements.local_draft_dialog.hidden = false;
+    if (!elements.local_draft_dialog.open) {
+      elements.local_draft_dialog.showModal();
+    }
+    const firstInput = elements.local_draft_list.querySelector("input");
+    (firstInput || elements.close_local_draft_dialog).focus();
+    updateLocalDraftStatus(drafts);
+  } catch (error) {
+    showToast(`\uC784\uC2DC\uC800\uC7A5 \uBAA9\uB85D\uC744 \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${error.message}`, "error", 0);
+  }
+}
+function closeLocalDraftDialog() {
+  if (elements.local_draft_dialog.open) {
+    elements.local_draft_dialog.close();
+  }
+  elements.local_draft_dialog.hidden = true;
+}
+async function countSameProjectEditorTabs() {
+  const editorUrl = chrome.runtime.getURL("editor.html");
+  const tabs = await chrome.tabs.query({});
+  return tabs.filter((tab) => {
+    if (!String(tab.url || "").startsWith(editorUrl)) {
+      return false;
+    }
+    try {
+      return new URL(tab.url).searchParams.get("project") === project.id;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+async function restoreSelectedLocalDraft() {
+  const selectedId = elements.local_draft_list.querySelector(
+    'input[name="local-draft-choice"]:checked'
+  )?.value;
+  if (!selectedId) {
+    return;
+  }
+  await queueLocalDraftOperation(async () => {
+    if (await countSameProjectEditorTabs() > 1) {
+      throw new Error(
+        "\uAC19\uC740 \uD504\uB85C\uC81D\uD2B8 \uD3B8\uC9D1\uAE30 \uD0ED\uC774 \uB458 \uC774\uC0C1 \uC5F4\uB824 \uC788\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uD0ED\uC744 \uB2EB\uACE0 \uB2E4\uC2DC \uBD88\uB7EC\uC640 \uC8FC\uC138\uC694."
+      );
+    }
+    const draft = await loadLocalDraft(project.id, selectedId);
+    if (!draft) {
+      throw new Error("\uC120\uD0DD\uD55C \uC784\uC2DC\uC800\uC7A5\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+    }
+    const restoredProject = normalizeEditorProject(
+      cloneProject(draft.project)
+    );
+    if (!restoredProject || restoredProject.id !== project.id) {
+      throw new Error("\uB2E4\uB978 \uD504\uB85C\uC81D\uD2B8\uC758 \uC784\uC2DC\uC800\uC7A5\uC740 \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+    }
+    const currentProject = cloneProject(project);
+    elements.preview_video.pause();
+    stopPreviewAudioClock({ sync: false });
+    closeTimelineContextMenu();
+    lockProjectMutations();
+    try {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      await restoreLocalDraft(currentProject, draft, {
+        now: Date.now(),
+        id: crypto.randomUUID()
+      });
+      project = restoredProject;
+      undoStack = [currentProject];
+      redoStack = [];
+      fieldEditSession = null;
+      pendingPreviewSeek = null;
+      activeClipId = null;
+      clearTimelineRangeSelection({ render: false });
+      releaseAllImageAssetObjectUrls();
+      renderAll();
+      await syncPreviewToPlayhead();
+      scheduleImageAssetBlobPrune();
+      closeLocalDraftDialog();
+      try {
+        updateLocalDraftStatus(
+          await listLocalDrafts(project.id, { limit: 5 })
+        );
+      } catch (error) {
+        console.warn("\uBCF5\uC6D0 \uB4A4 \uC784\uC2DC\uC800\uC7A5 \uC0C1\uD0DC\uB97C \uAC31\uC2E0\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", error);
+      }
+      showToast(
+        "\uC784\uC2DC\uC800\uC7A5\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4. \uC9C1\uC804 \uC0C1\uD0DC\uB3C4 \uC790\uB3D9\uC73C\uB85C \uC784\uC2DC\uC800\uC7A5\uD588\uC2B5\uB2C8\uB2E4.",
+        "success",
+        5200
+      );
+    } finally {
+      unlockProjectMutations();
+    }
+  }).catch((error) => {
+    showToast(`\uC784\uC2DC\uC800\uC7A5 \uBD88\uB7EC\uC624\uAE30 \uC2E4\uD328: ${error.message}`, "error", 0);
+  });
+}
+function startLocalDraftAutosave() {
+  localDraftAutosaveAnchorAtMs = Date.now();
+  scheduleLocalDraftAutosave();
+}
+function stopLocalDraftAutosave() {
+  clearTimeout(localDraftAutosaveTimer);
+  localDraftAutosaveTimer = null;
 }
 function collectImageAssetBlobKeys(candidateProject, keys) {
   for (const asset of candidateProject?.imageAssets || []) {
@@ -35915,6 +36432,29 @@ function bindActions() {
   elements.project_name.addEventListener("blur", () => endFieldEdit("project-name"));
   elements.undo.addEventListener("click", undo);
   elements.redo.addEventListener("click", redo);
+  elements.create_local_draft.addEventListener("click", createManualLocalDraft);
+  elements.open_local_drafts.addEventListener("click", () => {
+    void openLocalDraftDialog();
+  });
+  elements.restore_local_draft.addEventListener("click", () => {
+    void restoreSelectedLocalDraft();
+  });
+  elements.close_local_draft_dialog.addEventListener(
+    "click",
+    closeLocalDraftDialog
+  );
+  elements.local_draft_dialog.addEventListener("cancel", (event) => {
+    if (localDraftOperationActive) {
+      event.preventDefault();
+    }
+  });
+  elements.local_draft_dialog.addEventListener("close", () => {
+    elements.local_draft_dialog.hidden = true;
+    if (focusBeforeLocalDraftDialog?.isConnected) {
+      focusBeforeLocalDraftDialog.focus();
+    }
+    focusBeforeLocalDraftDialog = null;
+  });
   elements.pick_media.addEventListener("click", () => void chooseMediaFile());
   elements.pick_media_empty.addEventListener("click", () => void chooseMediaFile());
   elements.media_input.addEventListener("change", () => {
@@ -36512,6 +37052,13 @@ function bindActions() {
     const interactive = Boolean(event.target.closest(
       "button, a, input, textarea, select, [contenteditable='true'], [role='slider'], [role='tab']"
     ));
+    if (elements.local_draft_dialog.open) {
+      if (event.key === "Escape" && !localDraftOperationActive) {
+        event.preventDefault();
+        closeLocalDraftDialog();
+      }
+      return;
+    }
     if (event.key === "Escape" && !elements.timeline_context_menu.hidden) {
       event.preventDefault();
       closeTimelineContextMenu();
@@ -36647,6 +37194,17 @@ async function initialize() {
       0
     );
   }
+  try {
+    const drafts = await listLocalDrafts(project.id, { limit: 5 });
+    lastAutomaticDraftAtMs = Number(
+      drafts.find((draft) => draft.reason === "auto")?.createdAtMs
+    ) || 0;
+    updateLocalDraftStatus(drafts);
+  } catch (error) {
+    console.warn("\uB85C\uCEEC \uC784\uC2DC\uC800\uC7A5 \uBAA9\uB85D\uC744 \uC900\uBE44\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", error);
+    elements.local_draft_status.textContent = "\uC784\uC2DC\uC800\uC7A5 \uBAA9\uB85D \uD655\uC778 \uC2E4\uD328";
+  }
+  startLocalDraftAutosave();
 }
 function applyCaptureSeedUpdate(captureState) {
   try {
@@ -36686,6 +37244,7 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 window.addEventListener("beforeunload", () => {
+  stopLocalDraftAutosave();
   stopPreviewAudioClock({ sync: false });
   void flushSave();
   if (mediaUrl) {
@@ -36695,11 +37254,34 @@ window.addEventListener("beforeunload", () => {
   cancelActiveJob();
 });
 window.addEventListener("pagehide", () => {
+  stopLocalDraftAutosave();
   void flushSave();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     void flushSave();
+  } else if (localDraftAutosaveAnchorAtMs > 0) {
+    const elapsed = Date.now() - localDraftAutosaveAnchorAtMs;
+    if (elapsed >= LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS) {
+      clearTimeout(localDraftAutosaveTimer);
+      localDraftAutosaveTimer = null;
+      void runAutomaticLocalDraft();
+    } else {
+      scheduleLocalDraftAutosave(
+        LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS - elapsed
+      );
+    }
+  }
+});
+window.addEventListener("pageshow", () => {
+  if (project && !localDraftAutosaveTimer) {
+    const elapsed = Math.max(
+      0,
+      Date.now() - localDraftAutosaveAnchorAtMs
+    );
+    scheduleLocalDraftAutosave(
+      Math.max(0, LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS - elapsed)
+    );
   }
 });
 void initialize().catch((error) => {

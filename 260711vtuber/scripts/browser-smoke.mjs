@@ -325,6 +325,11 @@ async function main() {
         "asset-end",
         "asset-scale",
         "asset-opacity",
+        "create-local-draft",
+        "open-local-drafts",
+        "local-draft-dialog",
+        "local-draft-list",
+        "restore-local-draft",
         "generate-captions",
         "export-video"
       ];
