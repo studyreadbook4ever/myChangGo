@@ -36,7 +36,6 @@ export const DEFAULT_CAPTION_AGENT_SETTINGS = Object.freeze({
 
 const ALLOWED_SOLAR_MODELS = new Set([
   "solar-pro3",
-  "solar-pro2",
   "solar-mini"
 ]);
 
@@ -157,6 +156,22 @@ export function captionProviderHeaders(endpoint, raw = {}) {
         value
       ])
   );
+}
+
+function captionAgentRequestHeaders(endpoint, token, providerConfig) {
+  const providerHeaders = captionProviderHeaders(endpoint, providerConfig);
+  const normalizedToken = String(token || "").trim();
+  if (Object.keys(providerHeaders).length > 0 && !normalizedToken) {
+    throw new Error(
+      "제공자 설정이나 API 키를 로컬 companion에 보내려면 세션 토큰이 필요합니다."
+    );
+  }
+  return {
+    ...providerHeaders,
+    ...(normalizedToken
+      ? { Authorization: `Bearer ${normalizedToken}` }
+      : {})
+  };
 }
 
 export function normalizeCaptionAgentEndpoint(value) {
@@ -804,11 +819,12 @@ export async function requestCaptionAgent({
     const headers = {
       "Content-Type": "application/json",
       "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
-      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
+      ...captionAgentRequestHeaders(
+        normalizedEndpoint,
+        token,
+        providerConfig
+      )
     };
-    if (String(token || "").trim()) {
-      headers.Authorization = `Bearer ${String(token).trim()}`;
-    }
     onProgress(0.08, "외부 자막 에이전트에 음성을 보내는 중");
     throwIfAborted(requestSignal);
     let response = await fetchImpl(normalizedEndpoint, {
@@ -886,11 +902,12 @@ export async function probeCaptionAgent({
   try {
     const headers = {
       "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
-      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
+      ...captionAgentRequestHeaders(
+        normalizedEndpoint,
+        token,
+        providerConfig
+      )
     };
-    if (String(token || "").trim()) {
-      headers.Authorization = `Bearer ${String(token).trim()}`;
-    }
     const response = await fetchImpl(normalizedEndpoint, {
       method: "GET",
       headers,

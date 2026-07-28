@@ -2,9 +2,11 @@ import {
   EDITOR_SEED_PREFIX,
   MAX_SUBTITLE_LANES,
   addSubtitleLane,
+  appendAiSubtitleDrafts,
   applyMediaAlignmentOffset,
   audioRegionAtTimeline,
   audioRegionTimelineRange,
+  canReorderClipGroup,
   captureProjectId,
   clipDurationMs,
   createAudioRegion,
@@ -20,12 +22,14 @@ import {
   imageAssetsAtTimeline,
   imageAssetTimelineRange,
   findSubtitleOverlaps,
+  mapSourceToTimeline,
   mapTimelineToSource,
   mergeAiWarnings,
   mergeCaptureIntoEditorProject,
   normalizeEditorProject,
   projectDurationMs,
   reorderClip,
+  reorderClipGroup,
   replaceAiSubtitleDraft,
   rippleDeleteTimelineRange,
   serializeSrt,
@@ -72,6 +76,11 @@ import {
   requestCaptionAgent,
   saveCaptionAgentSettings
 } from "./caption-agent.js";
+import {
+  nextEnabledPreviewClip,
+  preparedPreviewMatches,
+  previewReachedClipBoundary
+} from "./preview-transition.js";
 
 const elements = Object.fromEntries([
   "project-name",
@@ -91,6 +100,11 @@ const elements = Object.fromEntries([
   "source-offset",
   "apply-source-offset",
   "clip-list",
+  "clip-group-toolbar",
+  "clip-group-status",
+  "move-selected-clips-up",
+  "move-selected-clips-down",
+  "clear-clip-group-selection",
   "clip-template",
   "focus-source",
   "preview-source-tab",
@@ -124,6 +138,7 @@ const elements = Object.fromEntries([
   "caption-upstage-api-key",
   "clear-caption-provider-keys",
   "caption-model",
+  "caption-advanced-settings",
   "test-caption-agent",
   "caption-agent-warning",
   "generate-captions",
@@ -271,6 +286,11 @@ let rangeEndMs = null;
 let rangeHandleDragActive = false;
 let liveTimelineGeometryFrame = null;
 let previewAudioClockTimer = null;
+let previewPlaybackFrame = null;
+let standbyPreviewVideo = null;
+let previewPreloadSequence = 0;
+let preparedPreview = null;
+let previewBoundaryTransitioning = false;
 let pendingAssetTimelineMs = null;
 let imageAssetRenderSequence = 0;
 let localDraftAutosaveTimer = null;
@@ -282,6 +302,7 @@ let localDraftAutosaveAnchorAtMs = 0;
 let focusBeforeLocalDraftDialog = null;
 let captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
 const imageAssetObjectUrls = new Map();
+const clipGroupSelection = new Set();
 
 const EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
 const MAX_IMAGE_ASSET_BYTES = 25 * 1024 * 1024;
@@ -292,6 +313,7 @@ const ASSET_SUBROW_STRIDE_PX = 47;
 const ASSET_BLOCK_TOP_PX = 7;
 const MIN_TIMELINE_RANGE_MS = 100;
 const PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
+const PREVIEW_PRELOAD_TIMEOUT_MS = 12_000;
 const LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1_000;
 const LOCAL_DRAFT_BUSY_RETRY_MS = 30 * 1_000;
 const ALLOWED_IMAGE_ASSET_TYPES = new Set([
@@ -1062,24 +1084,192 @@ function renderMediaCard() {
   elements.media_meta.textContent = `${asset.sizeLabel || ""}${dimensions} · ${formatTime(asset.durationMs, { compact: true })}`;
 }
 
+function pruneClipGroupSelection() {
+  const availableIds = new Set(
+    project.clips.map((clip) => clip.id)
+  );
+  for (const clipId of clipGroupSelection) {
+    if (!availableIds.has(clipId)) {
+      clipGroupSelection.delete(clipId);
+    }
+  }
+}
+
+function clipListPositionMap() {
+  return new Map(
+    [...elements.clip_list.querySelectorAll(".clip-item")].map((item) => [
+      item.dataset.id,
+      item.getBoundingClientRect().top
+    ])
+  );
+}
+
+function animateClipListReorder(previousPositions) {
+  if (
+    !previousPositions?.size ||
+    globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+  ) {
+    return;
+  }
+  for (const item of elements.clip_list.querySelectorAll(".clip-item")) {
+    const previousTop = previousPositions.get(item.dataset.id);
+    const currentTop = item.getBoundingClientRect().top;
+    const delta = Number.isFinite(previousTop) ? previousTop - currentTop : 0;
+    if (Math.abs(delta) < 0.5 || typeof item.animate !== "function") {
+      continue;
+    }
+    item.animate(
+      [
+        { transform: `translateY(${delta}px)` },
+        { transform: "translateY(0)" }
+      ],
+      {
+        duration: 210,
+        easing: "cubic-bezier(0.22, 1, 0.36, 1)"
+      }
+    );
+  }
+}
+
+function renderClipGroupControls({ announcement = "" } = {}) {
+  pruneClipGroupSelection();
+  const selectedCount = clipGroupSelection.size;
+  elements.clip_group_toolbar.hidden = project.clips.length === 0;
+  elements.move_selected_clips_up.disabled = !canReorderClipGroup(
+    project.clips,
+    clipGroupSelection,
+    -1
+  );
+  elements.move_selected_clips_down.disabled = !canReorderClipGroup(
+    project.clips,
+    clipGroupSelection,
+    1
+  );
+  elements.clear_clip_group_selection.disabled = selectedCount === 0;
+  const status = announcement || (
+    selectedCount > 0 ? `${selectedCount}개 컷 체크됨` : "체크한 컷 없음"
+  );
+  if (elements.clip_group_status.textContent !== status) {
+    elements.clip_group_status.textContent = status;
+  }
+  for (const item of elements.clip_list.querySelectorAll(".clip-item")) {
+    const checked = clipGroupSelection.has(item.dataset.id);
+    item.classList.toggle("clip-group-selected", checked);
+    const checkbox = item.querySelector(".clip-group-checkbox");
+    if (checkbox && checkbox.checked !== checked) {
+      checkbox.checked = checked;
+    }
+  }
+}
+
+function focusClipGroupCheckbox(clipId) {
+  const item = [...elements.clip_list.querySelectorAll(".clip-item")]
+    .find((candidate) => candidate.dataset.id === clipId);
+  item?.querySelector(".clip-group-checkbox:not(:disabled)")?.focus({
+    preventScroll: true
+  });
+}
+
+function focusClipGroupMoveControl(direction) {
+  const requested = direction < 0
+    ? elements.move_selected_clips_up
+    : elements.move_selected_clips_down;
+  const reverse = direction < 0
+    ? elements.move_selected_clips_down
+    : elements.move_selected_clips_up;
+  const target = !requested.disabled
+    ? requested
+    : !reverse.disabled
+      ? reverse
+      : elements.clear_clip_group_selection;
+  target?.focus({ preventScroll: true });
+}
+
+function moveSelectedClipGroup(direction, {
+  restoreCheckboxClipId = null,
+  focusControl = false
+} = {}) {
+  const nextProject = anchorPlayheadAfterClipReorder(
+    reorderClipGroup(project, clipGroupSelection, direction)
+  );
+  if (!nextProject || nextProject === project) {
+    renderClipGroupControls();
+    if (restoreCheckboxClipId) {
+      focusClipGroupCheckbox(restoreCheckboxClipId);
+    } else if (focusControl) {
+      focusClipGroupMoveControl(direction);
+    }
+    return false;
+  }
+  const previousPositions = clipListPositionMap();
+  clearTimelineRangeSelection({ render: false });
+  applyProject(nextProject);
+  animateClipListReorder(previousPositions);
+  renderClipGroupControls({
+    announcement: `${clipGroupSelection.size}개 컷을 한 단계 ${direction < 0 ? "위로" : "아래로"} 이동`
+  });
+  if (restoreCheckboxClipId) {
+    focusClipGroupCheckbox(restoreCheckboxClipId);
+  } else if (focusControl) {
+    focusClipGroupMoveControl(direction);
+  }
+  void syncPreviewToPlayhead();
+  return true;
+}
+
+function anchorPlayheadAfterClipReorder(nextProject) {
+  if (!nextProject || nextProject === project) {
+    return nextProject;
+  }
+  const current = mapTimelineToSource(project, project.playheadMs);
+  const anchoredPlayheadMs = current
+    ? mapSourceToTimeline(nextProject, current.clipId, current.sourceMs)
+    : null;
+  if (anchoredPlayheadMs == null) {
+    return nextProject;
+  }
+  activeClipId = current.clipId;
+  return {
+    ...nextProject,
+    playheadMs: anchoredPlayheadMs,
+    selectedClipId: current.clipId
+  };
+}
+
 function renderClipList() {
+  pruneClipGroupSelection();
   elements.clip_count.textContent = String(project.clips.length);
   elements.clip_list.replaceChildren();
   project.clips.forEach((clip, index) => {
     const fragment = elements.clip_template.content.cloneNode(true);
     const item = fragment.querySelector(".clip-item");
+    const clipDisabled = clip.enabled === false;
     item.dataset.id = clip.id;
     item.classList.toggle("selected", project.selectedClipId === clip.id);
+    item.classList.toggle("clip-disabled", clipDisabled);
+    item.classList.toggle("clip-group-selected", clipGroupSelection.has(clip.id));
     fragment.querySelector(".clip-index").textContent = String(index + 1);
-    fragment.querySelector(".clip-title").textContent = clip.note || `선택 구간 ${index + 1}`;
+    const clipTitle = clip.note || `선택 구간 ${index + 1}`;
+    fragment.querySelector(".clip-title").textContent = clipTitle;
     fragment.querySelector(".clip-time").textContent = `${formatTime(clip.sourceStartMs)} → ${formatTime(clip.sourceEndMs)}`;
     fragment.querySelector(".clip-duration").textContent = formatDuration(clipDurationMs(clip));
+    const checkbox = fragment.querySelector(".clip-group-checkbox");
+    checkbox.dataset.clipId = clip.id;
+    checkbox.checked = clipGroupSelection.has(clip.id);
+    checkbox.setAttribute(
+      "aria-label",
+      `${index + 1}번 컷 ${clipTitle}, 묶음 이동 선택`
+    );
+    checkbox.title = clipDisabled
+      ? "출력 비활성 컷도 묶음 순서 이동 가능"
+      : "묶음 이동할 컷 체크";
     const up = fragment.querySelector("[data-action='up']");
     const down = fragment.querySelector("[data-action='down']");
     up.disabled = index === 0;
     down.disabled = index === project.clips.length - 1;
     elements.clip_list.append(fragment);
   });
+  renderClipGroupControls();
 }
 
 function renderCueInspector() {
@@ -2472,7 +2662,7 @@ function updatePlayhead() {
 
 function renderTransport() {
   const clip = mapTimelineToSource(project, project.playheadMs);
-  elements.preview_video.style.visibility = clip ? "" : "hidden";
+  elements.preview_video.style.visibility = clip && mediaFile ? "" : "hidden";
   activeClipId = clip?.clipId || project.clips[0]?.id || null;
   elements.previous_clip.disabled = project.clips.length === 0;
   elements.next_clip.disabled = project.clips.length === 0;
@@ -2502,6 +2692,254 @@ function sourceMsToPreviewSeconds(sourceMs) {
 function previewSecondsToSourceMs(previewSeconds) {
   const mediaOriginMs = Number(project.mediaAsset?.mediaOriginMs) || 0;
   return previewSeconds * 1000 - mediaOriginMs;
+}
+
+function configurePreviewVideoLayer(video, { active }) {
+  video.classList.add("preview-video");
+  video.classList.toggle("preview-video-active", active);
+  video.classList.toggle("preview-video-standby", !active);
+  if (!active) {
+    video.preload = "auto";
+  }
+  video.style.visibility = active && mediaFile ? "" : "hidden";
+  video.style.zIndex = active ? "1" : "0";
+  video.style.pointerEvents = "none";
+  video.setAttribute("aria-hidden", active ? "false" : "true");
+  if (!active) {
+    video.muted = true;
+  }
+}
+
+function ensureStandbyPreviewVideo() {
+  if (standbyPreviewVideo) {
+    return standbyPreviewVideo;
+  }
+  const video = document.createElement("video");
+  video.id = "preview-video-standby";
+  video.preload = "auto";
+  video.playsInline = true;
+  configurePreviewVideoLayer(video, { active: false });
+  elements.stage.insertBefore(video, elements.stage_empty);
+  standbyPreviewVideo = video;
+  bindPreviewVideoEvents(video);
+  return video;
+}
+
+function cancelPreviewPreload({ clearSource = false } = {}) {
+  previewPreloadSequence += 1;
+  preparedPreview = null;
+  if (!standbyPreviewVideo) {
+    return;
+  }
+  standbyPreviewVideo.pause();
+  configurePreviewVideoLayer(standbyPreviewVideo, { active: false });
+  if (clearSource) {
+    standbyPreviewVideo.removeAttribute("src");
+    standbyPreviewVideo.load();
+  }
+}
+
+function waitForStandbyEvent(video, eventName, sequence) {
+  return new Promise((resolve, reject) => {
+    let timeout = null;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      video.removeEventListener(eventName, handleEvent);
+      video.removeEventListener("error", handleError);
+    };
+    const handleEvent = () => {
+      cleanup();
+      resolve(sequence === previewPreloadSequence);
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error("다음 컷 미리보기를 미리 읽지 못했습니다."));
+    };
+    video.addEventListener(eventName, handleEvent, { once: true });
+    video.addEventListener("error", handleError, { once: true });
+    timeout = setTimeout(() => {
+      cleanup();
+      resolve(false);
+    }, PREVIEW_PRELOAD_TIMEOUT_MS);
+  });
+}
+
+async function prepareNextClipPreview(fromClipId = activeClipId) {
+  const next = nextEnabledPreviewClip(project?.clips, fromClipId);
+  if (!mediaUrl || !next || !standbyPreviewVideo) {
+    cancelPreviewPreload();
+    return false;
+  }
+  const targetSeconds = sourceMsToPreviewSeconds(next.sourceStartMs);
+  if (
+    preparedPreview
+    && preparedPreview.fromClipId === fromClipId
+    && preparedPreview.clipId === next.id
+    && Math.abs(preparedPreview.targetSeconds - targetSeconds) <= 0.03
+  ) {
+    return preparedPreview.promise;
+  }
+
+  const video = standbyPreviewVideo;
+  const sequence = ++previewPreloadSequence;
+  video.pause();
+  configurePreviewVideoLayer(video, { active: false });
+  preparedPreview = {
+    sequence,
+    fromClipId,
+    clipId: next.id,
+    targetSeconds,
+    ready: false,
+    promise: null
+  };
+
+  const operation = (async () => {
+    try {
+      if (video.src !== mediaUrl) {
+        video.src = mediaUrl;
+      }
+      if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+        const loaded = await waitForStandbyEvent(video, "loadedmetadata", sequence);
+        if (!loaded) {
+          return false;
+        }
+      }
+      if (sequence !== previewPreloadSequence) {
+        return false;
+      }
+      if (Number.isFinite(video.duration) && video.duration + 0.02 < targetSeconds) {
+        return false;
+      }
+      if (
+        Math.abs(video.currentTime - targetSeconds) > 0.02
+        || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
+      ) {
+        const seeked = waitForStandbyEvent(
+          video,
+          Math.abs(video.currentTime - targetSeconds) > 0.02 ? "seeked" : "loadeddata",
+          sequence
+        );
+        if (Math.abs(video.currentTime - targetSeconds) > 0.02) {
+          video.currentTime = targetSeconds;
+        }
+        if (!await seeked) {
+          return false;
+        }
+      }
+      if (
+        sequence !== previewPreloadSequence
+        || Math.abs(video.currentTime - targetSeconds) > 0.03
+      ) {
+        return false;
+      }
+      if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+        const canPlay = await waitForStandbyEvent(video, "canplay", sequence);
+        if (!canPlay) {
+          return false;
+        }
+      }
+      if (
+        sequence !== previewPreloadSequence
+        || video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA
+      ) {
+        return false;
+      }
+      if (preparedPreview?.sequence === sequence) {
+        preparedPreview.ready = true;
+      }
+      return true;
+    } catch (error) {
+      if (sequence === previewPreloadSequence) {
+        console.warn("다음 컷을 미리 준비하지 못해 일반 탐색으로 전환합니다.", error);
+      }
+      return false;
+    }
+  })();
+  const promise = operation.then((ready) => {
+    if (!ready && preparedPreview?.sequence === sequence) {
+      preparedPreview = null;
+    }
+    return ready;
+  });
+  preparedPreview.promise = promise;
+  return promise;
+}
+
+function stopPreviewPlaybackClock() {
+  if (previewPlaybackFrame !== null) {
+    cancelAnimationFrame(previewPlaybackFrame);
+    previewPlaybackFrame = null;
+  }
+}
+
+function startPreviewPlaybackClock() {
+  if (previewPlaybackFrame !== null || elements.preview_video.paused) {
+    return;
+  }
+  const tick = () => {
+    previewPlaybackFrame = null;
+    if (elements.preview_video.paused || elements.preview_video.ended || !mediaFile) {
+      return;
+    }
+    if (!pendingPreviewSeek && !previewBoundaryTransitioning) {
+      const clip = project.clips.find((candidate) => candidate.id === activeClipId);
+      const sourceMs = previewSecondsToSourceMs(elements.preview_video.currentTime);
+      if (clip && previewReachedClipBoundary(sourceMs, clip.sourceEndMs)) {
+        handleVideoTimeUpdate();
+      }
+    }
+    if (!elements.preview_video.paused && !elements.preview_video.ended) {
+      previewPlaybackFrame = requestAnimationFrame(tick);
+    }
+  };
+  previewPlaybackFrame = requestAnimationFrame(tick);
+}
+
+function transitionToPreparedPreview(next) {
+  const nextVideo = standbyPreviewVideo;
+  const previousVideo = elements.preview_video;
+  const targetSeconds = sourceMsToPreviewSeconds(next.sourceStartMs);
+  if (
+    previewBoundaryTransitioning
+    || !nextVideo
+    || !preparedPreviewMatches(preparedPreview, next, targetSeconds)
+  ) {
+    return false;
+  }
+
+  previewBoundaryTransitioning = true;
+  previewPreloadSequence += 1;
+  preparedPreview = null;
+  previousVideo.muted = true;
+  configurePreviewVideoLayer(nextVideo, { active: true });
+  configurePreviewVideoLayer(previousVideo, { active: false });
+  previousVideo.id = "preview-video-standby";
+  nextVideo.id = "preview-video";
+  elements.preview_video = nextVideo;
+  standbyPreviewVideo = previousVideo;
+  activeClipId = next.id;
+  project.selectedClipId = next.id;
+  project.playheadMs = next.timelineStartMs;
+  updatePlayhead();
+  applyPreviewAudioSettings(next.timelineStartMs);
+
+  const playback = nextVideo.play();
+  previousVideo.pause();
+  void playback
+    .then(() => {
+      void prepareNextClipPreview(next.id);
+    })
+    .catch((error) => {
+      nextVideo.pause();
+      elements.play_toggle.classList.remove("playing");
+      stopPreviewPlaybackClock();
+      stopPreviewAudioClock();
+      console.warn("미리 준비한 다음 컷을 재생하지 못했습니다.", error);
+    })
+    .finally(() => {
+      previewBoundaryTransitioning = false;
+    });
+  return true;
 }
 
 async function seekPreviewToSourceMs(sourceMs) {
@@ -2597,6 +3035,7 @@ async function seekTimeline(timelineMs, { play = false } = {}) {
   if (!mapping) {
     return;
   }
+  cancelPreviewPreload();
   project.playheadMs = mapping.timelineMs;
   activeClipId = mapping.clipId;
   project.selectedClipId = mapping.clipId;
@@ -2609,6 +3048,7 @@ async function seekTimeline(timelineMs, { play = false } = {}) {
     if (play) {
       await elements.preview_video.play();
     }
+    void prepareNextClipPreview(mapping.clipId);
   }
   updatePlayhead();
 }
@@ -2650,31 +3090,45 @@ function adjacentClip(direction) {
   }
 }
 
-function handleVideoTimeUpdate() {
-  if (pendingPreviewSeek) {
+function handleVideoTimeUpdate(event) {
+  const video = event?.currentTarget || elements.preview_video;
+  if (
+    video !== elements.preview_video
+    || pendingPreviewSeek
+    || previewBoundaryTransitioning
+  ) {
     return;
   }
   const clip = project.clips.find((candidate) => candidate.id === activeClipId);
   if (!clip) {
     return;
   }
-  const sourceMs = previewSecondsToSourceMs(elements.preview_video.currentTime);
-  if (sourceMs >= clip.sourceEndMs - 35) {
-    const enabled = project.clips.filter((candidate) => candidate.enabled !== false);
-    const index = enabled.findIndex((candidate) => candidate.id === clip.id);
-    const next = enabled[index + 1];
-    if (next && !elements.preview_video.paused) {
+  const sourceMs = previewSecondsToSourceMs(video.currentTime);
+  if (previewReachedClipBoundary(sourceMs, clip.sourceEndMs)) {
+    const next = nextEnabledPreviewClip(project.clips, clip.id);
+    if (next && !video.paused) {
+      if (transitionToPreparedPreview(next)) {
+        return;
+      }
+      previewBoundaryTransitioning = true;
+      cancelPreviewPreload();
       activeClipId = next.id;
       project.selectedClipId = next.id;
       project.playheadMs = next.timelineStartMs;
       updatePlayhead();
       void seekPreviewToSourceMs(next.sourceStartMs)
         .then(() => elements.preview_video.play())
-        .catch((error) => console.warn("다음 컷 미리보기를 시작하지 못했습니다.", error));
+        .then(() => {
+          void prepareNextClipPreview(next.id);
+        })
+        .catch((error) => console.warn("다음 컷 미리보기를 시작하지 못했습니다.", error))
+        .finally(() => {
+          previewBoundaryTransitioning = false;
+        });
       return;
     }
     project.playheadMs = clip.timelineStartMs + clipDurationMs(clip);
-    elements.preview_video.pause();
+    video.pause();
     updatePlayhead();
     return;
   }
@@ -2683,6 +3137,34 @@ function handleVideoTimeUpdate() {
     Math.min(clip.timelineStartMs + clipDurationMs(clip), clip.timelineStartMs + sourceMs - clip.sourceStartMs)
   );
   updatePlayhead();
+}
+
+function bindPreviewVideoEvents(video) {
+  video.addEventListener("timeupdate", handleVideoTimeUpdate);
+  video.addEventListener("play", (event) => {
+    if (event.currentTarget !== elements.preview_video) {
+      return;
+    }
+    elements.play_toggle.classList.add("playing");
+    startPreviewAudioClock();
+    startPreviewPlaybackClock();
+    void prepareNextClipPreview(activeClipId);
+  });
+  video.addEventListener("pause", (event) => {
+    if (event.currentTarget !== elements.preview_video) {
+      return;
+    }
+    elements.play_toggle.classList.remove("playing");
+    stopPreviewPlaybackClock();
+    stopPreviewAudioClock();
+  });
+  video.addEventListener("loadedmetadata", (event) => {
+    if (event.currentTarget !== elements.preview_video) {
+      return;
+    }
+    void renderImageAssetOverlays();
+    renderSubtitleOverlay();
+  });
 }
 
 function selectCue(cueId, { seek = false } = {}) {
@@ -3128,6 +3610,7 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
   const previousMediaUrl = mediaUrl;
   let nextMediaUrl = null;
   try {
+    cancelPreviewPreload({ clearSource: true });
     const asset = await inspectMediaFile(file);
     if (!asset.hasVideo) {
       throw new Error("영상 트랙이 없는 파일입니다.");
@@ -3181,9 +3664,13 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
     }
     if (previousMediaUrl && elements.preview_video.src !== previousMediaUrl) {
       elements.preview_video.src = previousMediaUrl;
+      if (standbyPreviewVideo) {
+        standbyPreviewVideo.src = previousMediaUrl;
+      }
     } else if (!previousMediaUrl && !mediaUrl) {
       elements.preview_video.removeAttribute("src");
       elements.preview_video.load();
+      cancelPreviewPreload({ clearSource: true });
     }
     hideJob();
     showToast(error.message, "error", 0);
@@ -3246,8 +3733,17 @@ async function testCaptionAgentConnection() {
       ...config,
       signal: controller.signal
     });
+    const availableModels = Array.isArray(result.availableModels)
+      ? result.availableModels.map((model) => String(model))
+      : [];
+    if (
+      availableModels.length > 0
+      && !availableModels.includes(config.model)
+    ) {
+      throw new Error(`로컬 companion이 ${config.model} 모델을 지원하지 않습니다.`);
+    }
     const provider = result.provider ? ` · ${result.provider}` : "";
-    const model = result.model || result.defaultModel || config.model;
+    const model = config.model;
     const readiness = result.configured?.ready === false
       ? " · STT/Upstage 설정 미완료"
       : "";
@@ -3258,6 +3754,9 @@ async function testCaptionAgentConnection() {
     );
   } catch (error) {
     const canceled = error.name === "AbortError";
+    if (!canceled) {
+      elements.caption_advanced_settings.open = true;
+    }
     showToast(
       canceled ? "자막 에이전트 연결 확인을 취소했습니다." : `자막 에이전트 연결 실패: ${error.message}`,
       canceled ? "info" : "error",
@@ -3311,6 +3810,7 @@ async function generateCaptions() {
   try {
     config = await prepareCaptionAgentConfig();
   } catch (error) {
+    elements.caption_advanced_settings.open = true;
     showToast(`자막 에이전트 설정을 확인해 주세요: ${error.message}`, "error", 0);
     activeJobController = null;
     elements.generate_captions.disabled = false;
@@ -3480,6 +3980,12 @@ async function generateCaptions() {
     );
   } catch (error) {
     const canceled = error.name === "AbortError";
+    if (
+      !canceled
+      && /(?:STT|전사|companion|에이전트|API 키)/iu.test(error.message)
+    ) {
+      elements.caption_advanced_settings.open = true;
+    }
     project = {
       ...project,
       ai: {
@@ -4206,9 +4712,65 @@ function bindActions() {
     });
   }
 
+  elements.move_selected_clips_up.addEventListener("click", () => {
+    moveSelectedClipGroup(-1, { focusControl: true });
+  });
+  elements.move_selected_clips_down.addEventListener("click", () => {
+    moveSelectedClipGroup(1, { focusControl: true });
+  });
+  elements.clear_clip_group_selection.addEventListener("click", () => {
+    clipGroupSelection.clear();
+    renderClipGroupControls({ announcement: "컷 체크를 모두 해제함" });
+  });
+  elements.clip_list.addEventListener("change", (event) => {
+    const checkbox = event.target.closest(".clip-group-checkbox");
+    if (!checkbox || checkbox.disabled) {
+      return;
+    }
+    if (checkbox.checked) {
+      clipGroupSelection.add(checkbox.dataset.clipId);
+    } else {
+      clipGroupSelection.delete(checkbox.dataset.clipId);
+    }
+    renderClipGroupControls();
+  });
+  elements.clip_list.addEventListener("keydown", (event) => {
+    if (
+      !event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const focusedClipId = event.target.closest(".clip-item")?.dataset.id || null;
+    moveSelectedClipGroup(event.key === "ArrowUp" ? -1 : 1, {
+      restoreCheckboxClipId: focusedClipId
+    });
+  });
+  elements.clip_group_toolbar.addEventListener("keydown", (event) => {
+    if (
+      !event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    moveSelectedClipGroup(event.key === "ArrowUp" ? -1 : 1, {
+      focusControl: true
+    });
+  });
   elements.clip_list.addEventListener("click", (event) => {
     const item = event.target.closest(".clip-item");
     if (!item) {
+      return;
+    }
+    if (event.target.closest(".clip-group-check")) {
       return;
     }
     const clip = project.clips.find((candidate) => candidate.id === item.dataset.id);
@@ -4219,7 +4781,9 @@ function bindActions() {
     if (action) {
       const index = project.clips.findIndex((candidate) => candidate.id === clip.id);
       clearTimelineRangeSelection({ render: false });
-      applyProject(reorderClip(project, clip.id, action === "up" ? index - 1 : index + 1));
+      applyProject(anchorPlayheadAfterClipReorder(
+        reorderClip(project, clip.id, action === "up" ? index - 1 : index + 1)
+      ));
       const nextItem = [...elements.clip_list.querySelectorAll(".clip-item")]
         .find((candidate) => candidate.dataset.id === clip.id);
       const nextAction = nextItem?.querySelector(`[data-action="${action}"]`);
@@ -4237,22 +4801,12 @@ function bindActions() {
     scheduleSave();
   });
 
+  configurePreviewVideoLayer(elements.preview_video, { active: true });
+  bindPreviewVideoEvents(elements.preview_video);
+  ensureStandbyPreviewVideo();
   elements.play_toggle.addEventListener("click", () => void togglePlayback());
   elements.previous_clip.addEventListener("click", () => adjacentClip(-1));
   elements.next_clip.addEventListener("click", () => adjacentClip(1));
-  elements.preview_video.addEventListener("timeupdate", handleVideoTimeUpdate);
-  elements.preview_video.addEventListener("play", () => {
-    elements.play_toggle.classList.add("playing");
-    startPreviewAudioClock();
-  });
-  elements.preview_video.addEventListener("pause", () => {
-    elements.play_toggle.classList.remove("playing");
-    stopPreviewAudioClock();
-  });
-  elements.preview_video.addEventListener("loadedmetadata", () => {
-    void renderImageAssetOverlays();
-    renderSubtitleOverlay();
-  });
   elements.toggle_mute.addEventListener("click", () => {
     previewMuted = !previewMuted;
     applyPreviewAudioSettings();
@@ -4980,6 +5534,170 @@ function flushPendingCaptureSeed() {
   applyCaptureSeedUpdate(captureState);
 }
 
+function normalizeLocalCaptionFirstPass(detail) {
+  const runId = String(detail?.runId || "").trim();
+  if (!runId || runId.length > 160) {
+    throw new TypeError("로컬 자막 초벌 실행 ID가 올바르지 않습니다.");
+  }
+  if (!Array.isArray(detail?.cues) || detail.cues.length === 0) {
+    throw new TypeError("추가할 로컬 자막 초벌이 없습니다.");
+  }
+  if (detail.cues.length > MAX_CAPTION_AGENT_CUES_PER_RUN) {
+    throw new TypeError(
+      `한 번에 추가할 수 있는 로컬 자막은 최대 ${MAX_CAPTION_AGENT_CUES_PER_RUN.toLocaleString("ko-KR")}개입니다.`
+    );
+  }
+  const clipsById = new Map(project.clips.map((clip) => [clip.id, clip]));
+  const cues = detail.cues.map((rawCue, index) => {
+    const clipId = String(rawCue?.clipId || "");
+    const clip = clipsById.get(clipId);
+    if (!clip) {
+      throw new TypeError(`${index + 1}번 로컬 자막의 컷을 찾을 수 없습니다.`);
+    }
+    const startOffsetMs = Math.round(Number(rawCue.startOffsetMs));
+    const endOffsetMs = Math.round(Number(rawCue.endOffsetMs));
+    const durationMs = clipDurationMs(clip);
+    if (
+      !Number.isFinite(startOffsetMs)
+      || !Number.isFinite(endOffsetMs)
+      || startOffsetMs < 0
+      || endOffsetMs > durationMs
+      || endOffsetMs - startOffsetMs < MIN_TIMELINE_RANGE_MS
+      || endOffsetMs - startOffsetMs > 5_000
+    ) {
+      throw new TypeError(
+        `${index + 1}번 로컬 자막은 컷 안의 0.1~5초 구간이어야 합니다.`
+      );
+    }
+    const text = String(rawCue.text || "")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .replace(/[.。]+$/u, "")
+      .trim();
+    if (!text || text.length > 500) {
+      throw new TypeError(`${index + 1}번 로컬 자막 텍스트가 비었거나 너무 깁니다.`);
+    }
+    const placement = String(rawCue.remoteMeta?.placement || "bottom").toLowerCase();
+    return {
+      ...rawCue,
+      id: String(rawCue.id || `cue-codex-${crypto.randomUUID()}`),
+      clipId,
+      startOffsetMs,
+      endOffsetMs,
+      text,
+      origin: "ai",
+      humanEdited: false,
+      remoteMeta: {
+        speakerId: String(
+          rawCue.remoteMeta?.speakerId || "codex-local-first-pass"
+        ).slice(0, 80),
+        reviewRequired: rawCue.remoteMeta?.reviewRequired !== false,
+        placement: ["top", "center", "bottom"].includes(placement)
+          ? placement
+          : "bottom"
+      }
+    };
+  });
+  return {
+    runId,
+    model: String(detail?.model || "Codex local first pass").slice(0, 120),
+    cues
+  };
+}
+
+async function applyLocalCaptionFirstPass(detail) {
+  if (!project?.id || detail?.projectId !== project.id) {
+    throw new TypeError("현재 프로젝트에 적용할 로컬 자막 초벌이 아닙니다.");
+  }
+  if (projectMutationLockCount > 0 || pointerEditActive || rangeHandleDragActive) {
+    throw new Error("진행 중인 편집 동작이 끝난 뒤 로컬 자막 초벌을 적용해 주세요.");
+  }
+  const normalized = normalizeLocalCaptionFirstPass(detail);
+  if (
+    project.ai?.provider === "codex-local-first-pass"
+    && project.ai?.lastRequestId === normalized.runId
+  ) {
+    return {
+      ok: true,
+      alreadyApplied: true,
+      cueCount: project.subtitles.filter((cue) => (
+        cue.remoteMeta?.speakerId === "codex-local-first-pass"
+      )).length
+    };
+  }
+
+  const before = cloneProject(project);
+  const nextWithCues = appendAiSubtitleDrafts(project, normalized.cues);
+  const next = {
+    ...nextWithCues,
+    ai: {
+      ...nextWithCues.ai,
+      provider: "codex-local-first-pass",
+      model: normalized.model,
+      resolvedModel: normalized.model,
+      lastRequestId: normalized.runId,
+      status: "done",
+      progress: 1,
+      lastRunAt: new Date().toISOString(),
+      error: null
+    }
+  };
+  const previousIds = new Set(before.subtitles.map((cue) => cue.id));
+  const addedCount = next.subtitles.filter((cue) => !previousIds.has(cue.id)).length;
+  if (addedCount === 0) {
+    throw new Error("새로 추가할 로컬 자막 초벌이 없습니다.");
+  }
+
+  lockProjectMutations();
+  try {
+    await saveLocalDraft(next, {
+      reason: "manual",
+      now: Date.now(),
+      id: crypto.randomUUID()
+    });
+    pushUndo(before);
+    project = next;
+    fieldEditSession = null;
+    renderAll({ keepScroll: true });
+    updateLocalDraftStatus(
+      await listLocalDrafts(project.id, { limit: 5 })
+    );
+    showToast(
+      `Codex 로컬 초벌 자막 ${addedCount}개를 기존 자막과 별도로 추가했습니다.`,
+      "success",
+      6500
+    );
+    return {
+      ok: true,
+      alreadyApplied: false,
+      addedCount,
+      totalSubtitleCount: project.subtitles.length,
+      subtitleLaneCount: project.subtitleLaneCount
+    };
+  } finally {
+    unlockProjectMutations();
+  }
+}
+
+window.addEventListener("kirinuki:apply-local-caption-first-pass", (event) => {
+  const detail = event.detail;
+  const requestId = String(detail?.requestId || "");
+  void queueLocalDraftOperation(() => applyLocalCaptionFirstPass(detail))
+    .then((result) => {
+      window.dispatchEvent(new CustomEvent(
+        "kirinuki:local-caption-first-pass-result",
+        { detail: { requestId, ...result } }
+      ));
+    })
+    .catch((error) => {
+      window.dispatchEvent(new CustomEvent(
+        "kirinuki:local-caption-first-pass-result",
+        { detail: { requestId, ok: false, error: error.message } }
+      ));
+      showToast(`Codex 로컬 자막 초벌을 적용하지 못했습니다: ${error.message}`, "error", 0);
+    });
+});
+
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === "KIRINUKI_SOURCE_BINDING_STATUS" && message.projectId === project?.id) {
     sourceBindingConnected = Boolean(message.connected);
@@ -4999,7 +5717,9 @@ chrome.runtime.onMessage.addListener((message) => {
 
 window.addEventListener("beforeunload", () => {
   stopLocalDraftAutosave();
+  stopPreviewPlaybackClock();
   stopPreviewAudioClock({ sync: false });
+  cancelPreviewPreload({ clearSource: true });
   void flushSave();
   if (mediaUrl) {
     URL.revokeObjectURL(mediaUrl);

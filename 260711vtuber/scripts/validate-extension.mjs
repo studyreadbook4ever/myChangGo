@@ -239,11 +239,17 @@ for (const id of [
   "caption-upstage-api-key",
   "clear-caption-provider-keys",
   "caption-model",
+  "caption-advanced-settings",
   "test-caption-agent",
   "caption-agent-warning",
   "generate-captions",
   "create-local-draft",
   "open-local-drafts",
+  "clip-group-toolbar",
+  "clip-group-status",
+  "move-selected-clips-up",
+  "move-selected-clips-down",
+  "clear-clip-group-selection",
   "local-draft-dialog",
   "local-draft-list",
   "restore-local-draft",
@@ -258,6 +264,7 @@ assert(editorScript.includes("renderProjectVideo"), "편집기 번들에 영상 
 assert(editorScript.includes("extractClipPcm16k"), "편집기 번들에 선택 구간 음성 추출 경로가 없습니다.");
 assert(editorScript.includes("requestCaptionAgent"), "편집기 번들에 외부 자막 에이전트 요청 경로가 없습니다.");
 assert(editorScript.includes("solar-pro3"), "편집기 번들에 Solar Pro 3 기본 모델이 없습니다.");
+assert(editorScript.includes("solar-mini"), "편집기 번들에 Solar Mini 선택 모델이 없습니다.");
 assert(editorScript.includes("MAX_REMOTE_CUE_DURATION_MS = 4e3"), "원격 자막 4초 상한 검증이 없습니다.");
 assert(editorScript.includes("encodePcm16WavBase64"), "선택 구간 PCM을 표준 WAV 요청으로 바꾸지 않습니다.");
 assert(editorScript.includes("ensureCaptionAgentPermission"), "사용자 선택 원격 에이전트 권한 요청 경로가 없습니다.");
@@ -315,6 +322,9 @@ assert(
   "파일 commit 단계의 취소 불가 전환이 없습니다."
 );
 assert(editorHtml.includes('value="solar-pro3" selected'), "Solar Pro 3가 자막 기본 모델로 선택되지 않았습니다.");
+assert(editorHtml.includes('option value="solar-mini"'), "Solar Mini 선택지가 없습니다.");
+assert(!editorHtml.includes('option value="solar-pro2"'), "사용하지 않는 Solar Pro 2 선택지가 남아 있습니다.");
+assert(editorHtml.includes('id="caption-advanced-settings"'), "STT·companion 세부설정 접기가 없습니다.");
 assert(editorHtml.includes("자막 하나는 최대 4초"), "편집기 UI에 4초 자막 원칙이 없습니다.");
 assert(!editorScript.toLowerCase().includes("xenova/whisper"), "편집기 번들에 로컬 Whisper 모델 경로가 남아 있습니다.");
 assert(editingGuide.includes("authority: USER"), "사용자 확정 컷 권한 지침이 누락되었습니다.");

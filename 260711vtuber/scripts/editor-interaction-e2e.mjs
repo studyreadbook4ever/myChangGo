@@ -882,6 +882,140 @@ async function main() {
     ) ? state : false;
   }, "합성 MP4 파일 input 연결", { timeout: 25_000 });
 
+  const previewSeekSetup = await executeAsync(`
+    const done = arguments[arguments.length - 1];
+    const video = document.querySelector("#preview-video");
+    const target = 3.65;
+    const finish = () => done({
+      currentTime: video.currentTime,
+      readyState: video.readyState,
+      standbyReadyState: document.querySelector("#preview-video-standby")?.readyState || 0
+    });
+    if (Math.abs(video.currentTime - target) <= 0.02) {
+      finish();
+      return;
+    }
+    const timeout = setTimeout(() => done({
+      error: "preview transition seek timeout",
+      currentTime: video.currentTime
+    }), 5_000);
+    video.addEventListener("seeked", () => {
+      clearTimeout(timeout);
+      finish();
+    }, { once: true });
+    video.currentTime = target;
+  `);
+  assert(
+    !previewSeekSetup?.error &&
+      Math.abs(previewSeekSetup.currentTime - 3.65) <= 0.02,
+    `컷 경계 전환 검증 시작 시각을 맞추지 못했습니다: ${JSON.stringify(previewSeekSetup)}`
+  );
+  const standbyPreloadState = await waitUntil(async () => {
+    const state = await executeSync(`
+      const standby = document.querySelector("#preview-video-standby");
+      return {
+        currentTime: standby?.currentTime || 0,
+        readyState: standby?.readyState || 0
+      };
+    `);
+    return (
+      Math.abs(state.currentTime - 5) <= 0.03
+      && state.readyState >= 3
+    ) ? state : false;
+  }, "다음 컷의 재생 여유 데이터 선행 준비", { timeout: 8_000 });
+  const previewTransitionSetup = await executeSync(`
+    const original = document.querySelector("#preview-video");
+    const trace = {
+      original,
+      startedAt: 0,
+      lastOld: null,
+      firstNew: null
+    };
+    globalThis.__kirinukiE2ePreviewTransition = trace;
+    const tick = (now) => {
+      const current = document.querySelector("#preview-video");
+      if (current === original) {
+        trace.lastOld = {
+          wallMs: now,
+          currentTime: current.currentTime,
+          readyState: current.readyState
+        };
+        requestAnimationFrame(tick);
+        return;
+      }
+      trace.firstNew = {
+        wallMs: now,
+        currentTime: current?.currentTime || 0,
+        readyState: current?.readyState || 0,
+        paused: current?.paused
+      };
+    };
+    requestAnimationFrame(tick);
+    return {
+      currentTime: original?.currentTime || 0,
+      standbyReadyState: document.querySelector("#preview-video-standby")?.readyState || 0
+    };
+  `);
+  await clickElement("#play-toggle");
+  await executeSync(`
+    globalThis.__kirinukiE2ePreviewTransition.startedAt = performance.now();
+    return true;
+  `);
+  const previewTransitionTrace = await waitUntil(async () => {
+    const trace = await executeSync(`
+      const value = globalThis.__kirinukiE2ePreviewTransition;
+      return value?.firstNew ? {
+        startedAt: value.startedAt,
+        lastOld: value.lastOld,
+        firstNew: value.firstNew
+      } : null;
+    `);
+    return trace || false;
+  }, "미리 준비한 다음 컷으로 실제 video layer 전환", { timeout: 4_000 });
+  const previewTransitionGapMs = (
+    previewTransitionTrace.firstNew.wallMs -
+    previewTransitionTrace.lastOld.wallMs
+  );
+  assert(
+    previewTransitionTrace.lastOld.currentTime >= 3.9 &&
+      previewTransitionTrace.firstNew.currentTime >= 5 &&
+      previewTransitionTrace.firstNew.currentTime < 5.2 &&
+      previewTransitionTrace.firstNew.paused === false &&
+      previewTransitionGapMs >= 0 &&
+      previewTransitionGapMs < 120,
+    `컷 경계 미리보기 전환이 끊김 상한을 넘었습니다: ${JSON.stringify({
+      setup: previewTransitionSetup,
+      trace: previewTransitionTrace,
+      gapMs: previewTransitionGapMs
+    })}`
+  );
+  await clickElement("#play-toggle");
+  await waitUntil(
+    () => executeSync(`return document.querySelector("#preview-video")?.paused === true;`),
+    "컷 경계 전환 검증 뒤 미리보기 정지"
+  );
+  await clickElement("#previous-clip");
+  await waitUntil(async () => {
+    const state = await executeSync(`
+      const video = document.querySelector("#preview-video");
+      return {
+        currentTime: video?.currentTime || 0,
+        paused: video?.paused
+      };
+    `);
+    return (
+      state.paused === true &&
+      Math.abs(state.currentTime - 0.5) <= 0.04
+    ) ? state : false;
+  }, "컷 경계 검증 뒤 첫 컷 정지 위치 복원");
+  const previewTransitionSmoke = {
+    seek: previewSeekSetup,
+    preload: standbyPreloadState,
+    setup: previewTransitionSetup,
+    trace: previewTransitionTrace,
+    layerGapMs: previewTransitionGapMs
+  };
+
   await clearAndType("#source-offset", "-1");
   await clickElement("#apply-source-offset");
   await delay(180);
@@ -2650,6 +2784,121 @@ async function main() {
     ) ? state : false;
   }, "hot seed 반영 editor DOM");
 
+  await clickElement(
+    '.clip-item[data-id="clip-selection-b"] .clip-select'
+  );
+  const clipGroupAnchorBefore = await waitForStoredProject(
+    (candidate) => {
+      const selected = candidate.clips.find(
+        (clip) => clip.id === "clip-selection-b"
+      );
+      return (
+        candidate.selectedClipId === selected?.id
+        && candidate.playheadMs === selected.timelineStartMs
+      );
+    },
+    "묶음 이동 전 현재 컷 재생헤드 앵커"
+  );
+  await clickElement(
+    '.clip-item[data-id="clip-selection-b"] .clip-group-checkbox'
+  );
+  await clickElement(
+    '.clip-item[data-id="clip-selection-a"] .clip-group-checkbox'
+  );
+  const clipGroupReady = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        checked: [...document.querySelectorAll(".clip-group-checkbox:checked")]
+          .map((checkbox) => checkbox.closest(".clip-item")?.dataset.id),
+        status: document.querySelector("#clip-group-status")?.textContent || "",
+        upDisabled: document.querySelector("#move-selected-clips-up")?.disabled,
+        downDisabled: document.querySelector("#move-selected-clips-down")?.disabled
+      };
+    `);
+    return (
+      state.checked.join(",") === "clip-selection-b,clip-selection-a" &&
+      state.status.includes("2개") &&
+      state.upDisabled === true &&
+      state.downDisabled === false
+    ) ? state : false;
+  }, "두 컷 체크와 묶음 이동 경계 상태");
+
+  await clickElement("#move-selected-clips-down");
+  const clipGroupMovedDown = await waitForStoredProject(
+    (candidate) => {
+      const anchored = candidate.clips.find(
+        (clip) => clip.id === "clip-selection-b"
+      );
+      return (
+        Boolean(anchored)
+        &&
+        candidate.clips.map((clip) => clip.id).join(",") ===
+        "clip-selection-c,clip-selection-b,clip-selection-a"
+        && candidate.selectedClipId === anchored?.id
+        && candidate.playheadMs === anchored.timelineStartMs
+      );
+    },
+    "체크한 두 컷의 상대 순서 보존 아래 이동"
+  );
+  const clipGroupDownDom = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        order: [...document.querySelectorAll("#clip-list .clip-item")]
+          .map((item) => item.dataset.id),
+        checked: [...document.querySelectorAll(".clip-group-checkbox:checked")]
+          .map((checkbox) => checkbox.closest(".clip-item")?.dataset.id),
+        selectedId: document.querySelector(".clip-item.selected")?.dataset.id || null,
+        activeId: document.activeElement?.id || null
+      };
+    `);
+    return (
+      state.order.join(",") === "clip-selection-c,clip-selection-b,clip-selection-a" &&
+      state.checked.join(",") === "clip-selection-b,clip-selection-a" &&
+      state.selectedId === "clip-selection-b" &&
+      state.activeId === "move-selected-clips-up"
+    ) ? state : false;
+  }, "묶음 아래 이동 DOM·체크·focus 보존");
+
+  await clickElement("#move-selected-clips-up");
+  const clipGroupRestored = await waitForStoredProject(
+    (candidate) => (
+      candidate.clips.map((clip) => clip.id).join(",") ===
+      "clip-selection-b,clip-selection-a,clip-selection-c"
+    ),
+    "체크한 두 컷 묶음 위 이동으로 원래 순서 복원"
+  );
+  await clickElement("#clear-clip-group-selection");
+  const clipGroupCleared = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        checkedCount: document.querySelectorAll(".clip-group-checkbox:checked").length,
+        status: document.querySelector("#clip-group-status")?.textContent || "",
+        clearDisabled: document.querySelector("#clear-clip-group-selection")?.disabled
+      };
+    `);
+    return (
+      state.checkedCount === 0 &&
+      state.status.includes("해제") &&
+      state.clearDisabled === true
+    ) ? state : false;
+  }, "컷 묶음 선택 전체 해제");
+  assert(
+    !Object.hasOwn(clipGroupMovedDown, "clipGroupSelection") &&
+    !Object.hasOwn(clipGroupRestored, "clipGroupSelection"),
+    "컷 체크 UI 상태가 프로젝트에 저장되었습니다."
+  );
+  const clipGroupMoveSmoke = {
+    anchorBefore: {
+      selectedClipId: clipGroupAnchorBefore.selectedClipId,
+      playheadMs: clipGroupAnchorBefore.playheadMs
+    },
+    ready: clipGroupReady,
+    movedDownOrder: clipGroupMovedDown.clips.map((clip) => clip.id),
+    downDom: clipGroupDownDom,
+    restoredOrder: clipGroupRestored.clips.map((clip) => clip.id),
+    cleared: clipGroupCleared
+  };
+
   await clickElement("#create-local-draft");
   const manualLocalDraft = await waitUntil(async () => {
     const drafts = await readLocalDrafts();
@@ -2828,10 +3077,6 @@ async function main() {
   const localDraftRestoreUi = await waitUntil(async () => {
     const state = await executeSync(`
       const dialog = document.querySelector("#local-draft-dialog");
-      const overlay = document.querySelector(
-        '#image-asset-overlays .image-asset-overlay[data-asset-id="${imageAssetId}"]'
-      );
-      const image = overlay?.querySelector("img");
       return {
         hidden: dialog?.hidden,
         open: dialog?.open,
@@ -2840,12 +3085,6 @@ async function main() {
           "#asset-track .asset-block"
         ).length,
         projectName: document.querySelector("#project-name")?.value || "",
-        restoredImageLoaded: Boolean(
-          overlay &&
-          !overlay.hidden &&
-          image?.complete &&
-          image.naturalWidth > 0
-        ),
         draftStatus: document.querySelector(
           "#local-draft-status"
         )?.textContent?.trim() || ""
@@ -2857,10 +3096,31 @@ async function main() {
       state.activeId === "open-local-drafts" &&
       state.assetCount === 1 &&
       state.projectName === manualLocalDraft.project.name &&
-      state.restoredImageLoaded &&
       state.draftStatus.includes("최근 3/5개")
     ) ? state : false;
   }, "임시저장 복원 DOM과 focus");
+  await clickElement(`.asset-block[data-id="${imageAssetId}"] .asset-block-body`);
+  const restoredDraftImage = await waitUntil(async () => {
+    const state = await executeSync(`
+      const overlay = document.querySelector(
+        '#image-asset-overlays .image-asset-overlay[data-asset-id="${imageAssetId}"]'
+      );
+      const image = overlay?.querySelector("img");
+      const thumbnail = document.querySelector("#asset-thumbnail");
+      return {
+        overlayVisible: Boolean(overlay && !overlay.hidden),
+        overlayLoaded: Boolean(image?.complete && image.naturalWidth > 0),
+        thumbnailLoaded: Boolean(
+          thumbnail?.complete && thumbnail.naturalWidth > 0
+        )
+      };
+    `);
+    return (
+      state.overlayVisible &&
+      state.overlayLoaded &&
+      state.thumbnailLoaded
+    ) ? state : false;
+  }, "임시저장 이미지 Blob 재연결");
   const localDraftSmoke = {
     manual: {
       id: manualLocalDraft.id,
@@ -2879,6 +3139,7 @@ async function main() {
       projectName: draft.project?.name
     })),
     restoreUi: localDraftRestoreUi,
+    restoredImage: restoredDraftImage,
     beforeRestoreProject: {
       name: beforeRestoreProject.name,
       imageAssets: beforeRestoreProject.imageAssets?.length || 0
@@ -3623,6 +3884,7 @@ async function main() {
         after: cueHandleNudgeAfter
       },
       reorderKeyboardFocus,
+      clipGroupMove: clipGroupMoveSmoke,
       rippleRange: {
         toolbar: toolbarRange,
         handleBeforeDrag: rangeHandleBeforeDrag,
@@ -3649,7 +3911,8 @@ async function main() {
         canceled: aiDialogCanceled,
         captionFetch: aiFetchProbe
       },
-      aiSuccess: aiSuccessSmoke
+      aiSuccess: aiSuccessSmoke,
+      previewTransition: previewTransitionSmoke
     },
     restoredDom,
     resetSmoke,

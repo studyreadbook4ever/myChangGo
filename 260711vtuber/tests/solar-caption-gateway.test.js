@@ -12,7 +12,9 @@ import {
   MAX_SOLAR_PROMPT_BYTES,
   MAX_STT_SEGMENTS,
   MAX_STT_WORDS,
+  SOLAR_PRO3_HIGH_REASONING_MIN_TOKENS,
   UPSTAGE_CHAT_COMPLETIONS_URL,
+  normalizeSolarCaptionModel,
   normalizeSttTranscript,
   requestExternalStt,
   requestSolarCaptions,
@@ -156,6 +158,17 @@ test("외부 STT의 segment·word 초 시각을 클립 기준 정수 밀리초�
 test("외부 STT 배열 개수와 Solar 전사 프롬프트 크기를 처리 전에 제한한다", () => {
   assert.throws(
     () => normalizeSttTranscript({
+      text: "시간 정보 없는 전사문"
+    }, {
+      clipDurationMs: 8_000
+    }),
+    (error) => (
+      error?.code === "TIMED_TRANSCRIPT_REQUIRED"
+      && error?.httpStatus === 502
+    )
+  );
+  assert.throws(
+    () => normalizeSttTranscript({
       segments: Array.from(
         { length: MAX_STT_SEGMENTS + 1 },
         () => ({})
@@ -178,7 +191,8 @@ test("외부 STT 배열 개수와 Solar 전사 프롬프트 크기를 처리 전
   );
   assert.throws(
     () => normalizeSttTranscript({
-      text: "가".repeat(MAX_SOLAR_PROMPT_BYTES)
+      text: "가".repeat(MAX_SOLAR_PROMPT_BYTES),
+      segments: [{ start: 0, end: 1, text: "가" }]
     }, {
       clipDurationMs: 8_000
     }),
@@ -223,6 +237,8 @@ test("파이프라인은 base64 WAV를 외부 STT에만 보내고 Solar json_sch
     assert.equal(init.headers.authorization, `Bearer ${TEST_ENV.UPSTAGE_API_KEY}`);
     const body = JSON.parse(init.body);
     assert.equal(body.model, DEFAULT_SOLAR_MODEL);
+    assert.equal(body.reasoning_effort, "high");
+    assert.equal(body.max_tokens, SOLAR_PRO3_HIGH_REASONING_MIN_TOKENS);
     assert.equal(body.messages[1].content.includes(rawAudio), false);
     const solarInput = JSON.parse(body.messages[1].content);
     assert.deepEqual(
@@ -318,6 +334,83 @@ test("Solar는 json_schema와 json_object가 모두 미지원이면 response_for
   assert.equal(result.cues[0].text, "뭐야?");
 });
 
+test("Solar Mini 선택은 실제 Upstage 모델까지 관통하고 Pro 3 전용 reasoning 필드를 보내지 않는다", async () => {
+  const request = captionRequest({ model: "solar-mini" });
+  const rawAudio = request.audio.data;
+  let transcribeCalls = 0;
+  let solarCalls = 0;
+  const result = await runCaptionPipeline(request, {
+    upstageApiKey: "test-upstage-key",
+    sttModel: "local-deterministic-test",
+    transcribeAudio: async (validatedRequest, transcriberOptions) => {
+      transcribeCalls += 1;
+      assert.equal(validatedRequest.model, "solar-mini");
+      assert.equal(validatedRequest.wavBase64, rawAudio);
+      assert.equal(
+        Object.hasOwn(transcriberOptions, "upstageApiKey"),
+        false
+      );
+      assert(Buffer.isBuffer(transcriberOptions.wavBytes));
+      return {
+        text: "빠른 초벌",
+        segments: [{
+          startMs: 100,
+          endMs: 1_200,
+          text: "빠른 초벌"
+        }],
+        words: []
+      };
+    },
+    fetchImpl: async (url, init) => {
+      solarCalls += 1;
+      assert.equal(String(url), UPSTAGE_CHAT_COMPLETIONS_URL);
+      const body = JSON.parse(init.body);
+      assert.equal(body.model, "solar-mini");
+      assert.equal(Object.hasOwn(body, "reasoning_effort"), false);
+      assert.equal(body.messages[1].content.includes(rawAudio), false);
+      return jsonResponse({
+        model: "solar-mini-250422",
+        choices: [{
+          message: {
+            content: JSON.stringify({
+              cues: [{
+                startMs: 100,
+                endMs: 1_200,
+                text: "빠른 초벌",
+                speakerId: "main",
+                reviewRequired: false,
+                placement: "bottom"
+              }]
+            })
+          }
+        }]
+      });
+    }
+  });
+
+  assert.equal(transcribeCalls, 1);
+  assert.equal(solarCalls, 1);
+  assert.equal(result.sttModel, "local-deterministic-test");
+  assert.equal(result.captionModel, "solar-mini");
+  assert.equal(result.resolvedModel, "solar-mini-250422");
+});
+
+test("새 자막 모델 계약은 Solar Pro 3와 Solar Mini만 허용한다", () => {
+  assert.equal(normalizeSolarCaptionModel("solar-pro3"), "solar-pro3");
+  assert.equal(normalizeSolarCaptionModel("solar-mini"), "solar-mini");
+  assert.throws(
+    () => normalizeSolarCaptionModel("solar-pro2"),
+    (error) => error?.code === "UNSUPPORTED_SOLAR_MODEL"
+  );
+  assert.throws(
+    () => resolveCaptionPipelineConfig({
+      ...TEST_ENV,
+      KIRINUKI_SOLAR_MODEL: "made-up-audio-solar"
+    }),
+    (error) => error?.code === "UNSUPPORTED_SOLAR_MODEL"
+  );
+});
+
 test("Solar가 발화를 비우거나 잘못된 JSON을 주면 다음 안전한 응답 형식으로 재시도한다", async () => {
   const request = normalizedCaptionRequest({
     clip: {
@@ -362,6 +455,53 @@ test("Solar가 발화를 비우거나 잘못된 JSON을 주면 다음 안전한 
   });
   assert.equal(callCount, 2);
   assert.equal(result.cues[0].text, "안 들렸어?");
+});
+
+test("Solar가 길이 제한 등으로 중단한 부분 JSON은 완료 자막으로 받지 않는다", async () => {
+  const request = normalizedCaptionRequest({
+    clip: {
+      id: "gateway-clip-1",
+      title: "",
+      durationMs: 4_000
+    }
+  });
+  let callCount = 0;
+  await assert.rejects(
+    requestSolarCaptions(request, {
+      text: "앞 문장 뒤 문장",
+      segments: [{
+        startMs: 100,
+        endMs: 3_000,
+        text: "앞 문장 뒤 문장"
+      }],
+      words: []
+    }, {
+      fetchImpl: async () => {
+        callCount += 1;
+        return jsonResponse({
+          choices: [{
+            finish_reason: "length",
+            message: {
+              content: JSON.stringify({
+                cues: [{
+                  startMs: 100,
+                  endMs: 900,
+                  text: "앞 문장",
+                  speakerId: "main",
+                  reviewRequired: false,
+                  placement: "bottom"
+                }]
+              })
+            }
+          }]
+        });
+      },
+      upstageApiKey: "test-upstage-key",
+      solarModel: "solar-pro3"
+    }),
+    (error) => error?.code === "INCOMPLETE_SOLAR_RESPONSE"
+  );
+  assert.equal(callCount, 1);
 });
 
 test("외부 STT가 인식한 발화가 전혀 없으면 Solar 호출 없이 검수 경고를 반환한다", async () => {
@@ -555,6 +695,13 @@ test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET �
     },
     model: "solar-pro3",
     defaultModel: "solar-pro3",
+    availableModels: ["solar-pro3", "solar-mini"],
+    transcription: {
+      mode: "external-timed-stt",
+      solarInput: "text-only",
+      requiresTimedTranscript: true,
+      ready: true
+    },
     requestSchema: CAPTION_AGENT_REQUEST_SCHEMA_ID,
     responseSchema: CAPTION_AGENT_RESPONSE_SCHEMA_ID,
     maxCueDurationMs: 4_000,
@@ -654,6 +801,36 @@ test("브라우저에서 입력한 STT·Upstage 키는 요청 단위로 환경 �
     ready: false
   });
 
+  const upstageOnlyHeaders = {
+    ...authHeaders,
+    "x-kirinuki-upstage-api-key": "runtime-upstage-secret"
+  };
+  const upstageOnly = await localHttpJson({
+    port,
+    method: "GET",
+    headers: upstageOnlyHeaders
+  });
+  assert.deepEqual(upstageOnly.body.configured, {
+    sttEndpoint: false,
+    sttApiKey: false,
+    upstageApiKey: true,
+    ready: false
+  });
+  assert.equal(upstageOnly.body.transcription.ready, false);
+
+  const upstageOnlyPost = await localHttpJson({
+    port,
+    method: "POST",
+    headers: upstageOnlyHeaders,
+    body: captionRequest()
+  });
+  assert.equal(upstageOnlyPost.status, 400);
+  assert.equal(
+    upstageOnlyPost.body.error.code,
+    "TIMED_STT_REQUIRED"
+  );
+  assert.equal(pipelineCalls.length, 0);
+
   const missingPost = await localHttpJson({
     port,
     method: "POST",
@@ -661,7 +838,8 @@ test("브라우저에서 입력한 STT·Upstage 키는 요청 단위로 환경 �
     body: captionRequest()
   });
   assert.equal(missingPost.status, 400);
-  assert.equal(missingPost.body.error.code, "MISSING_CONFIGURATION");
+  assert.equal(missingPost.body.error.code, "TIMED_STT_REQUIRED");
+  assert.match(missingPost.body.error.message, /직접 전사하지 않습니다/u);
   assert.equal(pipelineCalls.length, 0);
 
   const providerHeaders = {

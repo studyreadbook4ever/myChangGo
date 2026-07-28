@@ -1,5 +1,6 @@
 import {
   KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT,
+  SUPPORTED_SOLAR_CAPTION_MODELS,
   UPSTAGE_CAPTION_JSON_SCHEMA,
   CaptionProtocolError,
   createCaptionAgentResponse,
@@ -10,9 +11,11 @@ import {
 export const UPSTAGE_CHAT_COMPLETIONS_URL =
   "https://api.upstage.ai/v1/chat/completions";
 export const DEFAULT_SOLAR_MODEL = "solar-pro3";
+export const DEFAULT_TRANSCRIPTION_MODE = "external-timed-stt";
 export const DEFAULT_STT_MODEL = "whisper-1";
 export const DEFAULT_MAX_AUDIO_BYTES = 64 * 1024 * 1024;
-export const DEFAULT_SOLAR_MAX_TOKENS = 4_096;
+export const DEFAULT_SOLAR_MAX_TOKENS = 16_384;
+export const SOLAR_PRO3_HIGH_REASONING_MIN_TOKENS = 16_384;
 export const DEFAULT_PIPELINE_TIMEOUT_MS = 15 * 60 * 1_000;
 export const MAX_PIPELINE_TIMEOUT_MS = 20 * 60 * 1_000;
 export const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -142,6 +145,23 @@ function sttModelName(value, {
   return normalized;
 }
 
+export function normalizeSolarCaptionModel(value, {
+  fallback = DEFAULT_SOLAR_MODEL,
+  httpStatus = 500
+} = {}) {
+  const normalized = String(value || fallback).trim() || fallback;
+  if (!SUPPORTED_SOLAR_CAPTION_MODELS.includes(normalized)) {
+    throw new CaptionGatewayError(
+      `Solar 자막 모델은 ${SUPPORTED_SOLAR_CAPTION_MODELS.join(" 또는 ")}만 지원합니다.`,
+      {
+        code: "UNSUPPORTED_SOLAR_MODEL",
+        httpStatus
+      }
+    );
+  }
+  return normalized;
+}
+
 export function resolveCaptionPipelineConfig(
   env = process.env,
   { allowMissingProviderConfig = false } = {}
@@ -170,9 +190,9 @@ export function resolveCaptionPipelineConfig(
       "UPSTAGE_API_KEY",
       providerOptions
     ),
-    solarModel: String(
+    solarModel: normalizeSolarCaptionModel(
       env.KIRINUKI_SOLAR_MODEL || DEFAULT_SOLAR_MODEL
-    ).trim() || DEFAULT_SOLAR_MODEL,
+    ),
     solarMaxTokens: Number.isFinite(maxTokens) && maxTokens >= 256
       ? Math.min(32_768, Math.floor(maxTokens))
       : DEFAULT_SOLAR_MAX_TOKENS,
@@ -209,7 +229,7 @@ export function resolveCaptionPipelineRequestConfig(
     overrideSttEndpoint || baseSttEndpoint,
     "STT API 주소",
     {
-      ...requestOptions,
+      ...optionalRequestOptions,
       allowQuery: !overrideSttEndpoint
     }
   );
@@ -231,14 +251,24 @@ export function resolveCaptionPipelineRequestConfig(
       }
     );
   }
+  const sttApiKey = providerApiKey(
+    overrideSttApiKey || baseConfig.sttApiKey,
+    "STT API 키",
+    optionalRequestOptions
+  );
+  if (!sttEndpoint || !sttApiKey) {
+    throw new CaptionGatewayError(
+      "Solar Chat은 음성을 직접 전사하지 않습니다. 시간 정보가 있는 외부 STT API 주소와 키가 필요합니다.",
+      {
+        code: "TIMED_STT_REQUIRED",
+        httpStatus: 400
+      }
+    );
+  }
   return {
     ...baseConfig,
     sttEndpoint,
-    sttApiKey: providerApiKey(
-      overrideSttApiKey || baseConfig.sttApiKey,
-      "STT API 키",
-      requestOptions
-    ),
+    sttApiKey,
     sttModel: sttModelName(
       overrides.sttModel || baseConfig.sttModel,
       { httpStatus: 400 }
@@ -247,7 +277,10 @@ export function resolveCaptionPipelineRequestConfig(
       overrides.upstageApiKey || baseConfig.upstageApiKey,
       "Upstage API 키",
       requestOptions
-    )
+    ),
+    solarModel: normalizeSolarCaptionModel(baseConfig.solarModel, {
+      httpStatus: 400
+    })
   };
 }
 
@@ -404,11 +437,13 @@ export function normalizeSttTranscript(payload, { clipDurationMs } = {}) {
 
   const text = normalizeTranscriptText(payload.text);
   if (segments.length === 0 && words.length === 0 && text) {
-    segments.push({
-      startMs: 0,
-      endMs: duration,
-      text
-    });
+    throw new CaptionGatewayError(
+      "외부 STT가 발화 텍스트만 반환하고 시간 정보를 반환하지 않았습니다.",
+      {
+        code: "TIMED_TRANSCRIPT_REQUIRED",
+        httpStatus: 502
+      }
+    );
   }
   const transcript = { text, segments, words };
   if (Buffer.byteLength(JSON.stringify(transcript)) > MAX_SOLAR_PROMPT_BYTES) {
@@ -425,6 +460,15 @@ function decodeWavBase64(value, maxAudioBytes) {
     bytes = Buffer.from(value, "base64");
   } catch {
     throw new CaptionProtocolError("WAV base64를 해석하지 못했습니다.", {
+      code: "INVALID_WAV"
+    });
+  }
+  return validateWavBytes(bytes, maxAudioBytes);
+}
+
+function validateWavBytes(bytes, maxAudioBytes) {
+  if (!Buffer.isBuffer(bytes)) {
+    throw new CaptionProtocolError("WAV 바이트가 Buffer가 아닙니다.", {
       code: "INVALID_WAV"
     });
   }
@@ -556,6 +600,7 @@ export async function requestExternalStt(request, {
   sttApiKey,
   sttModel = DEFAULT_STT_MODEL,
   maxAudioBytes = DEFAULT_MAX_AUDIO_BYTES,
+  wavBytes,
   signal
 }) {
   if (typeof fetchImpl !== "function") {
@@ -564,9 +609,11 @@ export async function requestExternalStt(request, {
       httpStatus: 500
     });
   }
-  const wavBytes = decodeWavBase64(request.wavBase64, maxAudioBytes);
+  const audioBytes = wavBytes === undefined
+    ? decodeWavBase64(request.wavBase64, maxAudioBytes)
+    : validateWavBytes(wavBytes, maxAudioBytes);
   const form = new FormData();
-  form.append("file", new Blob([wavBytes], { type: "audio/wav" }), "clip.wav");
+  form.append("file", new Blob([audioBytes], { type: "audio/wav" }), "clip.wav");
   form.append("model", sttModel);
   form.append("language", "ko");
   form.append("response_format", "verbose_json");
@@ -686,19 +733,33 @@ export async function requestSolarCaptions(request, transcript, {
   solarMaxTokens = DEFAULT_SOLAR_MAX_TOKENS,
   signal
 }) {
+  const selectedModel = normalizeSolarCaptionModel(solarModel, {
+    httpStatus: 400
+  });
+  const apiKey = providerApiKey(
+    upstageApiKey,
+    "Upstage API 키",
+    { required: true, httpStatus: 400 }
+  );
   const messages = [
     { role: "system", content: KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT },
     { role: "user", content: buildSolarCaptionUserPrompt(request, transcript) }
   ];
   const attempts = ["json_schema", "json_object", "plain"];
+  const effectiveMaxTokens = selectedModel === "solar-pro3"
+    ? Math.max(SOLAR_PRO3_HIGH_REASONING_MIN_TOKENS, solarMaxTokens)
+    : solarMaxTokens;
 
   for (const [attemptIndex, attempt] of attempts.entries()) {
     const responseFormat = responseFormatForAttempt(attempt);
     const body = {
-      model: solarModel,
+      model: selectedModel,
       temperature: 0.1,
-      max_tokens: solarMaxTokens,
+      max_tokens: effectiveMaxTokens,
       messages,
+      ...(selectedModel === "solar-pro3"
+        ? { reasoning_effort: "high" }
+        : {}),
       ...(responseFormat ? { response_format: responseFormat } : {})
     };
     const response = await externalFetch(fetchImpl, UPSTAGE_CHAT_COMPLETIONS_URL, {
@@ -706,7 +767,7 @@ export async function requestSolarCaptions(request, transcript, {
       redirect: "error",
       headers: {
         accept: "application/json",
-        authorization: `Bearer ${upstageApiKey}`,
+        authorization: `Bearer ${apiKey}`,
         "content-type": "application/json"
       },
       body: JSON.stringify(body),
@@ -731,6 +792,15 @@ export async function requestSolarCaptions(request, transcript, {
       });
     }
     try {
+      const finishReason = String(
+        payload.json?.choices?.[0]?.finish_reason || ""
+      ).trim();
+      if (finishReason && finishReason !== "stop") {
+        throw new CaptionGatewayError(
+          "Solar 응답이 완전히 생성되기 전에 중단되었습니다.",
+          { code: "INCOMPLETE_SOLAR_RESPONSE" }
+        );
+      }
       const parsed = parseJsonObject(messageContent(payload.json));
       const rawCues = parsed.cues ?? parsed.captions ?? parsed.subtitles;
       const normalized = normalizeCaptionCuesDetailed(rawCues, {
@@ -747,7 +817,7 @@ export async function requestSolarCaptions(request, transcript, {
       }
       return {
         ...normalized,
-        resolvedModel: String(payload.json.model || solarModel)
+        resolvedModel: String(payload.json.model || selectedModel)
       };
     } catch (error) {
       if (
@@ -771,6 +841,7 @@ export async function requestSolarCaptions(request, transcript, {
 
 export async function runCaptionPipeline(rawRequest, {
   fetchImpl = globalThis.fetch,
+  transcribeAudio = requestExternalStt,
   signal,
   pipelineTimeoutMs = DEFAULT_PIPELINE_TIMEOUT_MS,
   ...config
@@ -787,11 +858,34 @@ export async function runCaptionPipeline(rawRequest, {
   try {
     const validatedRequest = validateCaptionAgentRequest(rawRequest);
     const request = validatedRequest;
-    const captionModel = request.model || config.solarModel || DEFAULT_SOLAR_MODEL;
-    const transcript = await requestExternalStt(request, {
+    const captionModel = normalizeSolarCaptionModel(
+      request.model || config.solarModel || DEFAULT_SOLAR_MODEL,
+      { httpStatus: 400 }
+    );
+    if (typeof transcribeAudio !== "function") {
+      throw new CaptionGatewayError(
+        "오디오를 시간 정보가 있는 전사문으로 바꿀 transcribeAudio 구현이 필요합니다.",
+        {
+          code: "TIMED_TRANSCRIBER_REQUIRED",
+          httpStatus: 500
+        }
+      );
+    }
+    const wavBytes = decodeWavBase64(
+      request.wavBase64,
+      config.maxAudioBytes || DEFAULT_MAX_AUDIO_BYTES
+    );
+    const transcriptPayload = await transcribeAudio(request, {
       fetchImpl,
-      ...config,
+      sttEndpoint: config.sttEndpoint,
+      sttApiKey: config.sttApiKey,
+      sttModel: config.sttModel,
+      maxAudioBytes: config.maxAudioBytes,
+      wavBytes,
       signal: pipelineSignal
+    });
+    const transcript = normalizeSttTranscript(transcriptPayload, {
+      clipDurationMs: request.clipDurationMs
     });
     if (!transcriptHasRecognizableContent(transcript)) {
       return createCaptionAgentResponse({

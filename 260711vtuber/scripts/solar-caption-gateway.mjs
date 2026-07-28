@@ -10,10 +10,12 @@ import {
   CAPTION_AGENT_RESPONSE_SCHEMA_ID,
   MAX_CAPTION_CUE_DURATION_MS,
   MAX_CLIP_DURATION_MS,
+  SUPPORTED_SOLAR_CAPTION_MODELS,
   CaptionProtocolError
 } from "../src/caption-agent/protocol.js";
 import {
   CaptionGatewayError,
+  DEFAULT_TRANSCRIPTION_MODE,
   resolveCaptionPipelineConfig,
   resolveCaptionPipelineRequestConfig,
   runCaptionPipeline
@@ -269,6 +271,13 @@ function capabilityResponse(config, overrides) {
     },
     model: effectivePipeline.solarModel,
     defaultModel: effectivePipeline.solarModel,
+    availableModels: [...SUPPORTED_SOLAR_CAPTION_MODELS],
+    transcription: {
+      mode: DEFAULT_TRANSCRIPTION_MODE,
+      solarInput: "text-only",
+      requiresTimedTranscript: true,
+      ready: configured.sttEndpoint && configured.sttApiKey
+    },
     requestSchema: CAPTION_AGENT_REQUEST_SCHEMA_ID,
     responseSchema: CAPTION_AGENT_RESPONSE_SCHEMA_ID,
     maxCueDurationMs: MAX_CAPTION_CUE_DURATION_MS,

@@ -12,6 +12,7 @@ import {
   MAX_CAPTION_CUES,
   MAX_CAPTION_WARNINGS,
   MAX_CLIP_DURATION_MS,
+  SUPPORTED_SOLAR_CAPTION_MODELS,
   UPSTAGE_CAPTION_JSON_SCHEMA,
   CaptionProtocolError,
   createCaptionAgentResponse,
@@ -103,6 +104,14 @@ test("프로토콜은 한국어 VTuber 키리누키 규칙과 평평한 Solar cu
     CAPTION_AGENT_RESPONSE_SCHEMA_ID
   );
   assert(CAPTION_AGENT_REQUEST_JSON_SCHEMA.required.includes("requestId"));
+  assert.deepEqual(
+    CAPTION_AGENT_REQUEST_JSON_SCHEMA.properties.model.enum,
+    ["solar-pro3", "solar-mini"]
+  );
+  assert.deepEqual(
+    SUPPORTED_SOLAR_CAPTION_MODELS,
+    ["solar-pro3", "solar-mini"]
+  );
   assert.equal(
     CAPTION_AGENT_REQUEST_JSON_SCHEMA.properties.audio.properties.data.maxLength,
     4 * Math.ceil(MAX_AUDIO_WAV_BYTES / 3)
@@ -185,6 +194,10 @@ test("caption-agent 요청은 스키마·한국어·클립 길이·base64를 엄
   assert.throws(
     () => validateCaptionAgentRequest(protocolRequest({ locale: "en-US" })),
     (error) => error.code === "UNSUPPORTED_LANGUAGE"
+  );
+  assert.throws(
+    () => validateCaptionAgentRequest(protocolRequest({ model: "solar-pro2" })),
+    (error) => error.code === "INVALID_REQUEST_FIELD"
   );
   assert.throws(
     () => validateCaptionAgentRequest(protocolRequest({ visual: undefined })),
