@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "acquire:youtube": "node scripts/acquire-youtube.mjs",
     "build": "node scripts/build-editor.mjs",
     "caption-gateway": "node scripts/solar-caption-gateway.mjs",
     "test": "node --test tests/*.test.js",

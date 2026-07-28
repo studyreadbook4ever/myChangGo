@@ -47,6 +47,28 @@ YouTube 생방송 진행 중 페이지와 광고 재생 중에는 타임스탬�
 
 Extension은 치지직·YouTube 영상을 다운로드하지 않고 DRM, 로그인, 지역 또는 접근 제한을 우회하지 않습니다. 편집과 내보내기에는 본인이 소유하거나 사용 허가를 받아 별도로 준비한 로컬 원본 파일이 반드시 필요합니다.
 
+### yt-dlp로 YouTube 원본을 준비하는 선택 경로
+
+본인이 소유하거나 다운로드·편집 권한을 받은 YouTube VOD라면 Extension 밖의 로컬 CLI를 사용할 수 있습니다. 오픈소스 `yt-dlp`와 FFmpeg를 설치한 뒤 저장소 최상위에서 실행합니다.
+
+```bash
+# 최고 제공 스트림 우선. 기본 프로필
+npm run acquire:youtube -- \
+  --output-dir "/로컬/원본/폴더" \
+  "https://www.youtube.com/watch?v=<video-id>"
+
+# Chromium 편집 호환성 우선
+npm run acquire:youtube -- \
+  --profile editor-safe \
+  --output-dir "/로컬/원본/폴더" \
+  "https://www.youtube.com/watch?v=<video-id>"
+```
+
+- `quality-first`: `bv*+ba/b`의 최고 영상·음성을 FFmpeg `-c copy`로 병합합니다. 추가 재인코딩 손실은 없지만 결과 MKV나 선택 코덱을 현재 Chromium이 열지 못할 수 있습니다.
+- `editor-safe`: 최고 H.264 MP4와 AAC M4A를 MP4로 병합하고, 같은 코덱의 단일 MP4를 폴백으로 사용합니다. 호환성은 높지만 H.264로 제공되지 않는 고해상도는 선택하지 못할 수 있습니다.
+- 둘 다 재생목록·기존 파일 덮어쓰기를 막고 `.part` 이어받기를 사용합니다. 완료 시 출력되는 최종 경로의 파일을 **원본 연결**에서 선택합니다.
+- 이 경로는 쿠키를 자동으로 읽거나 DRM·로그인·지역 제한을 우회하지 않습니다. 실행 파일이 PATH 밖에 있으면 `YT_DLP_BINARY`, `FFMPEG_BINARY`를 지정하세요.
+
 ## 사용자 확정 컷
 
 사이드패널에서 저장한 시작·끝은 `authority: USER`인 사용자 선택입니다.
@@ -368,7 +390,7 @@ Extension은 현재 탭에서 입력한 외부 STT·Upstage API 키를 보관하
 
 ## 알려진 제한
 
-- 치지직·YouTube 영상을 다운로드하거나 DRM·로그인·지역·접근 제한을 우회하지 않습니다. 로컬 원본은 사용자가 권리를 확인해 직접 준비해야 합니다.
+- Extension 자체는 치지직·YouTube 영상을 다운로드하거나 DRM·로그인·지역·접근 제한을 우회하지 않습니다. 선택적 YouTube 로컬 획득 CLI도 사용자가 다운로드·편집 권한을 확인한 VOD에만 사용해야 합니다.
 - YouTube는 유한한 길이의 VOD만 지원합니다. 진행 중인 라이브, 광고 재생 중, 다른 사이트의 iframe 안에 삽입된 플레이어에서는 타임스탬프를 찍지 않습니다.
 - Chrome/Chromium 120 이상을 대상으로 합니다. 실제 코덱 지원은 운영체제와 브라우저 빌드에 따라 다릅니다.
 - 주 영상 트랙과 주 오디오 트랙만 사용합니다. 다중 카메라·다중 음성 트랙을 보존하지 않습니다.
