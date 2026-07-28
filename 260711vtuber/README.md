@@ -100,6 +100,27 @@ export KIRINUKI_PIPELINE_TIMEOUT_MS='900000'
 - 진행 중인 YouTube 라이브와 다른 사이트 안의 YouTube iframe은 지원하지 않습니다. 종료되어 유한한 길이로 재생되는 영상은 VOD로 사용할 수 있습니다.
 - Extension은 YouTube 미디어를 내려받지 않습니다. 편집·렌더에는 본인이 소유하거나 사용 허가를 받은 로컬 원본을 별도로 연결해야 합니다.
 
+### 선택적 YouTube 로컬 원본 획득
+
+본인이 소유하거나 다운로드·편집 권한을 받은 YouTube VOD는 별도 로컬 CLI에서 오픈소스 [yt-dlp](https://github.com/yt-dlp/yt-dlp)와 [FFmpeg](https://ffmpeg.org/)로 준비할 수 있습니다. 이 CLI는 Extension 안에서 실행되지 않으며 DRM·로그인·지역·접근 제한을 우회하거나 브라우저 쿠키를 자동으로 읽지 않습니다. `yt-dlp`와 `ffmpeg`를 먼저 설치한 뒤 저장소 최상위에서 실행하세요.
+
+```bash
+# 기본: YouTube가 제공하는 최고 영상·음성 스트림을 아카이브 우선으로 보존
+npm run acquire:youtube -- \
+  --output-dir "/로컬/원본/폴더" \
+  "https://www.youtube.com/watch?v=<video-id>"
+
+# 편집 안전형: 최고 H.264 MP4 영상 + AAC M4A 음성을 MP4로 병합
+npm run acquire:youtube -- \
+  --profile editor-safe \
+  --output-dir "/로컬/원본/폴더" \
+  "https://www.youtube.com/watch?v=<video-id>"
+```
+
+기본 `quality-first`는 `bv*+ba/b`를 선택하고 FFmpeg stream copy로 병합합니다. 원래 압축 스트림을 다시 인코딩하지 않으므로 추가 화질·음질 손실은 없지만, 조합에 따라 결과가 MKV가 되어 현재 Chromium 빌드에서 미리보기되지 않을 수 있습니다. `editor-safe`는 Chromium 호환성을 위해 H.264/AAC MP4만 고르므로 대개 안정적이지만, YouTube가 H.264로 제공하지 않는 1440p·4K가 있으면 그보다 낮은 해상도가 선택될 수 있습니다. YouTube 원본 자체가 이미 손실 압축이므로 여기서 “무재인코딩”은 받은 스트림을 그대로 보존한다는 뜻이지 손실 압축을 복원한다는 뜻은 아닙니다.
+
+두 프로필 모두 재생목록을 받지 않고, 기존 파일을 덮어쓰지 않으며, 중단된 전송은 `.part`로 이어받습니다. 병합은 `-c copy`이고 `--recode-video`·음성 추출 변환은 사용하지 않습니다. 완료되면 `after_move` 최종 파일 경로를 출력하므로 해당 파일을 편집기의 **원본 연결**에서 선택하세요. 실행 파일이 PATH 밖에 있으면 `YT_DLP_BINARY`와 `FFMPEG_BINARY`에 각각 경로를 지정할 수 있습니다.
+
 ### LIVE와 다시보기·로컬 파일 시간 맞추기
 
 같은 채널의 LIVE와 공식 다시보기가 같은 방송 시작 시각을 가지면 편집기는 둘을 같은 회차로 연결합니다. 기준은 `channelId + broadcastStartedAt/liveOpenDate`입니다. 원본 파일의 0초가 치지직 방송의 0초와 같다면 오프셋은 `0`으로 둡니다.
@@ -211,7 +232,7 @@ Codex가 프로젝트 폴더의 `AGENTS.md`를 지속 지침으로 읽는 구조
 
 ## 알려진 제한
 
-- 치지직·YouTube 영상을 다운로드하거나 DRM·접근 제한을 우회하지 않습니다. 본인이 소유하거나 사용 허가를 받은 로컬 원본이 필요합니다.
+- Extension 자체는 치지직·YouTube 영상을 다운로드하거나 DRM·접근 제한을 우회하지 않습니다. YouTube의 선택적 로컬 획득 CLI도 본인이 소유하거나 다운로드·편집 권한을 받은 VOD에만 사용해야 합니다.
 - YouTube는 VOD만 지원합니다. 진행 중인 라이브, 광고 재생 시각, 임의 사이트 내부 iframe은 타임스탬프 대상으로 사용하지 않습니다.
 - 입력 컨테이너를 읽을 수 있어도 Chrome이 영상·오디오 코덱을 디코딩하지 못하면 미리보기·자막용 오디오 추출·렌더가 실패할 수 있습니다.
 - Upstage에는 이 흐름에 사용할 공개 STT가 없고 Solar Pro 3는 텍스트 모델이라 음성을 직접 전사할 수 없습니다. 자막 생성에는 호환되는 별도 외부 STT와 네트워크 연결이 필요합니다.
