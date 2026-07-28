@@ -44,10 +44,14 @@ import {
 import {
   deleteMediaHandle,
   getFileFromStoredHandle,
+  listLocalDrafts,
   loadImageAssetBlob,
+  loadLocalDraft,
   loadProject,
   pruneImageAssetBlobs,
+  restoreLocalDraft,
   saveMediaHandle,
+  saveLocalDraft,
   saveProjectWithImageAssetBlob,
   saveProject
 } from "./project-store.js";
@@ -59,6 +63,8 @@ const elements = Object.fromEntries([
   "source-link-state",
   "undo",
   "redo",
+  "create-local-draft",
+  "open-local-drafts",
   "pick-media",
   "export-video",
   "clip-count",
@@ -192,6 +198,14 @@ const elements = Object.fromEntries([
   "job-progress",
   "job-percent",
   "cancel-job",
+  "local-draft-dialog",
+  "local-draft-title",
+  "local-draft-description",
+  "local-draft-list",
+  "local-draft-empty",
+  "local-draft-status",
+  "restore-local-draft",
+  "close-local-draft-dialog",
   "toast"
 ].map((id) => [id.replaceAll("-", "_"), document.querySelector(`#${id}`)]));
 
@@ -234,6 +248,13 @@ let liveTimelineGeometryFrame = null;
 let previewAudioClockTimer = null;
 let pendingAssetTimelineMs = null;
 let imageAssetRenderSequence = 0;
+let localDraftAutosaveTimer = null;
+let localDraftOperationQueue = Promise.resolve();
+let localDraftOperationActive = false;
+let automaticLocalDraftOperation = null;
+let lastAutomaticDraftAtMs = 0;
+let localDraftAutosaveAnchorAtMs = 0;
+let focusBeforeLocalDraftDialog = null;
 const imageAssetObjectUrls = new Map();
 
 const EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
@@ -245,6 +266,8 @@ const ASSET_SUBROW_STRIDE_PX = 47;
 const ASSET_BLOCK_TOP_PX = 7;
 const MIN_TIMELINE_RANGE_MS = 100;
 const PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
+const LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1_000;
+const LOCAL_DRAFT_BUSY_RETRY_MS = 30 * 1_000;
 const ALLOWED_IMAGE_ASSET_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -353,6 +376,350 @@ function flushSave() {
     scheduleImageAssetBlobPrune();
     return savedProject;
   });
+}
+
+const localDraftDateFormatter = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit"
+});
+
+function localDraftReasonLabel(reason) {
+  return {
+    manual: "수동",
+    auto: "자동",
+    "pre-restore": "복원 직전"
+  }[reason] || "임시";
+}
+
+function setLocalDraftOperationActive(active) {
+  localDraftOperationActive = Boolean(active);
+  elements.create_local_draft.disabled = localDraftOperationActive;
+  elements.open_local_drafts.disabled = localDraftOperationActive;
+  elements.close_local_draft_dialog.disabled = localDraftOperationActive;
+  const selectedDraft = elements.local_draft_list.querySelector(
+    'input[name="local-draft-choice"]:checked'
+  );
+  elements.restore_local_draft.disabled = (
+    localDraftOperationActive || !selectedDraft
+  );
+  for (const input of elements.local_draft_list.querySelectorAll("input")) {
+    input.disabled = localDraftOperationActive;
+  }
+}
+
+function queueLocalDraftOperation(operation) {
+  const queued = localDraftOperationQueue
+    .catch(() => undefined)
+    .then(async () => {
+      setLocalDraftOperationActive(true);
+      try {
+        return await operation();
+      } finally {
+        setLocalDraftOperationActive(false);
+      }
+    });
+  localDraftOperationQueue = queued.catch(() => undefined);
+  return queued;
+}
+
+function localDraftSummary(draft) {
+  const snapshot = draft?.project || {};
+  return [
+    `컷 ${snapshot.clips?.length || 0}`,
+    `자막 ${snapshot.subtitles?.length || 0}`,
+    `에셋 ${snapshot.imageAssets?.length || 0}`,
+    `음성 ${snapshot.audioRegions?.length || 0}`
+  ].join(" · ");
+}
+
+function updateLocalDraftStatus(drafts = []) {
+  const count = Math.min(5, drafts.length);
+  const lastAutoText = lastAutomaticDraftAtMs > 0
+    ? ` · 마지막 자동 ${localDraftDateFormatter.format(lastAutomaticDraftAtMs)}`
+    : "";
+  elements.local_draft_status.textContent = (
+    `최근 ${count}/5개 · 5분마다 자동 저장${lastAutoText}`
+  );
+  elements.open_local_drafts.title = (
+    `최근 임시저장 ${count}개 불러오기`
+  );
+}
+
+function renderLocalDraftList(drafts, selectedId = "") {
+  const fragment = document.createDocumentFragment();
+  for (const draft of drafts) {
+    const label = document.createElement("label");
+    label.className = "local-draft-item";
+
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "local-draft-choice";
+    input.value = draft.id;
+    input.checked = draft.id === selectedId;
+    input.disabled = localDraftOperationActive;
+    input.addEventListener("change", () => {
+      elements.restore_local_draft.disabled = localDraftOperationActive;
+    });
+
+    const copy = document.createElement("span");
+    copy.className = "local-draft-item-copy";
+
+    const heading = document.createElement("span");
+    heading.className = "local-draft-item-heading";
+
+    const reason = document.createElement("span");
+    reason.className = `local-draft-reason ${draft.reason || "manual"}`;
+    reason.textContent = localDraftReasonLabel(draft.reason);
+
+    const time = document.createElement("time");
+    time.dateTime = draft.createdAt;
+    time.textContent = localDraftDateFormatter.format(
+      new Date(draft.createdAtMs || draft.createdAt)
+    );
+    heading.append(time, reason);
+
+    const summary = document.createElement("span");
+    summary.className = "local-draft-item-meta";
+    summary.textContent = localDraftSummary(draft);
+
+    copy.append(heading, summary);
+    label.append(input, copy);
+    fragment.append(label);
+  }
+  elements.local_draft_list.replaceChildren(fragment);
+  elements.local_draft_empty.hidden = drafts.length > 0;
+  elements.restore_local_draft.disabled = (
+    localDraftOperationActive ||
+    !elements.local_draft_list.querySelector(
+      'input[name="local-draft-choice"]:checked'
+    )
+  );
+  updateLocalDraftStatus(drafts);
+}
+
+async function refreshLocalDraftList({ preserveSelection = true } = {}) {
+  const selectedId = preserveSelection
+    ? elements.local_draft_list.querySelector(
+      'input[name="local-draft-choice"]:checked'
+    )?.value || ""
+    : "";
+  const drafts = await listLocalDrafts(project.id, { limit: 5 });
+  renderLocalDraftList(drafts, selectedId);
+  return drafts;
+}
+
+async function saveCurrentLocalDraft(reason, {
+  restoredFromDraftId = null,
+  announce = false
+} = {}) {
+  if (!project?.id) {
+    throw new Error("임시저장할 프로젝트가 없습니다.");
+  }
+  if (reason !== "auto") {
+    fieldEditSession = null;
+  }
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  const snapshot = cloneProject(project);
+  const draft = await saveLocalDraft(snapshot, {
+    reason,
+    restoredFromDraftId,
+    now: Date.now(),
+    id: crypto.randomUUID()
+  });
+  if (reason === "auto") {
+    lastAutomaticDraftAtMs = draft.createdAtMs;
+    localDraftAutosaveAnchorAtMs = draft.createdAtMs;
+  }
+  scheduleImageAssetBlobPrune();
+  if (elements.local_draft_dialog.open) {
+    await refreshLocalDraftList();
+  } else {
+    const drafts = await listLocalDrafts(project.id, { limit: 5 });
+    updateLocalDraftStatus(drafts);
+  }
+  if (announce) {
+    showToast("현재 상태를 이 기기에 임시저장했습니다.", "success");
+  }
+  return draft;
+}
+
+function createManualLocalDraft() {
+  void queueLocalDraftOperation(() => (
+    saveCurrentLocalDraft("manual", { announce: true })
+  )).catch((error) => {
+    showToast(`임시저장 실패: ${error.message}`, "error", 0);
+  });
+}
+
+function localDraftAutosaveBlocked() {
+  return (
+    !project ||
+    pointerEditActive ||
+    rangeHandleDragActive ||
+    projectMutationLockCount > 0 ||
+    Boolean(activeJobController) ||
+    !elements.job_dialog.hidden ||
+    elements.local_draft_dialog.open ||
+    localDraftOperationActive
+  );
+}
+
+function scheduleLocalDraftAutosave(delayMs = LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS) {
+  clearTimeout(localDraftAutosaveTimer);
+  localDraftAutosaveTimer = setTimeout(() => {
+    localDraftAutosaveTimer = null;
+    void runAutomaticLocalDraft();
+  }, Math.max(0, delayMs));
+}
+
+function runAutomaticLocalDraft() {
+  if (automaticLocalDraftOperation) {
+    return automaticLocalDraftOperation;
+  }
+  if (localDraftAutosaveBlocked()) {
+    scheduleLocalDraftAutosave(LOCAL_DRAFT_BUSY_RETRY_MS);
+    return Promise.resolve(null);
+  }
+  automaticLocalDraftOperation = queueLocalDraftOperation(
+    () => saveCurrentLocalDraft("auto")
+  )
+    .catch((error) => {
+      console.warn("5분 자동 임시저장에 실패했습니다.", error);
+      showToast(`자동 임시저장 실패: ${error.message}`, "error", 0);
+      return null;
+    })
+    .finally(() => {
+      automaticLocalDraftOperation = null;
+      scheduleLocalDraftAutosave();
+    });
+  return automaticLocalDraftOperation;
+}
+
+async function openLocalDraftDialog() {
+  if (!elements.job_dialog.hidden) {
+    showToast("진행 중인 작업이 끝난 뒤 임시저장 기록을 열어 주세요.");
+    return;
+  }
+  focusBeforeLocalDraftDialog = elements.open_local_drafts;
+  try {
+    const drafts = await queueLocalDraftOperation(() => (
+      refreshLocalDraftList({ preserveSelection: false })
+    ));
+    elements.local_draft_dialog.hidden = false;
+    if (!elements.local_draft_dialog.open) {
+      elements.local_draft_dialog.showModal();
+    }
+    const firstInput = elements.local_draft_list.querySelector("input");
+    (firstInput || elements.close_local_draft_dialog).focus();
+    updateLocalDraftStatus(drafts);
+  } catch (error) {
+    showToast(`임시저장 목록을 열지 못했습니다: ${error.message}`, "error", 0);
+  }
+}
+
+function closeLocalDraftDialog() {
+  if (elements.local_draft_dialog.open) {
+    elements.local_draft_dialog.close();
+  }
+  elements.local_draft_dialog.hidden = true;
+}
+
+async function countSameProjectEditorTabs() {
+  const editorUrl = chrome.runtime.getURL("editor.html");
+  const tabs = await chrome.tabs.query({});
+  return tabs.filter((tab) => {
+    if (!String(tab.url || "").startsWith(editorUrl)) {
+      return false;
+    }
+    try {
+      return new URL(tab.url).searchParams.get("project") === project.id;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+async function restoreSelectedLocalDraft() {
+  const selectedId = elements.local_draft_list.querySelector(
+    'input[name="local-draft-choice"]:checked'
+  )?.value;
+  if (!selectedId) {
+    return;
+  }
+  await queueLocalDraftOperation(async () => {
+    if (await countSameProjectEditorTabs() > 1) {
+      throw new Error(
+        "같은 프로젝트 편집기 탭이 둘 이상 열려 있습니다. 다른 탭을 닫고 다시 불러와 주세요."
+      );
+    }
+    const draft = await loadLocalDraft(project.id, selectedId);
+    if (!draft) {
+      throw new Error("선택한 임시저장을 찾지 못했습니다.");
+    }
+    const restoredProject = normalizeEditorProject(
+      cloneProject(draft.project)
+    );
+    if (!restoredProject || restoredProject.id !== project.id) {
+      throw new Error("다른 프로젝트의 임시저장은 불러올 수 없습니다.");
+    }
+
+    const currentProject = cloneProject(project);
+    elements.preview_video.pause();
+    stopPreviewAudioClock({ sync: false });
+    closeTimelineContextMenu();
+    lockProjectMutations();
+    try {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      await restoreLocalDraft(currentProject, draft, {
+        now: Date.now(),
+        id: crypto.randomUUID()
+      });
+      project = restoredProject;
+      undoStack = [currentProject];
+      redoStack = [];
+      fieldEditSession = null;
+      pendingPreviewSeek = null;
+      activeClipId = null;
+      clearTimelineRangeSelection({ render: false });
+      releaseAllImageAssetObjectUrls();
+      renderAll();
+      await syncPreviewToPlayhead();
+      scheduleImageAssetBlobPrune();
+      closeLocalDraftDialog();
+      try {
+        updateLocalDraftStatus(
+          await listLocalDrafts(project.id, { limit: 5 })
+        );
+      } catch (error) {
+        console.warn("복원 뒤 임시저장 상태를 갱신하지 못했습니다.", error);
+      }
+      showToast(
+        "임시저장을 불러왔습니다. 직전 상태도 자동으로 임시저장했습니다.",
+        "success",
+        5200
+      );
+    } finally {
+      unlockProjectMutations();
+    }
+  }).catch((error) => {
+    showToast(`임시저장 불러오기 실패: ${error.message}`, "error", 0);
+  });
+}
+
+function startLocalDraftAutosave() {
+  localDraftAutosaveAnchorAtMs = Date.now();
+  scheduleLocalDraftAutosave();
+}
+
+function stopLocalDraftAutosave() {
+  clearTimeout(localDraftAutosaveTimer);
+  localDraftAutosaveTimer = null;
 }
 
 function collectImageAssetBlobKeys(candidateProject, keys) {
@@ -3512,6 +3879,29 @@ function bindActions() {
   elements.project_name.addEventListener("blur", () => endFieldEdit("project-name"));
   elements.undo.addEventListener("click", undo);
   elements.redo.addEventListener("click", redo);
+  elements.create_local_draft.addEventListener("click", createManualLocalDraft);
+  elements.open_local_drafts.addEventListener("click", () => {
+    void openLocalDraftDialog();
+  });
+  elements.restore_local_draft.addEventListener("click", () => {
+    void restoreSelectedLocalDraft();
+  });
+  elements.close_local_draft_dialog.addEventListener(
+    "click",
+    closeLocalDraftDialog
+  );
+  elements.local_draft_dialog.addEventListener("cancel", (event) => {
+    if (localDraftOperationActive) {
+      event.preventDefault();
+    }
+  });
+  elements.local_draft_dialog.addEventListener("close", () => {
+    elements.local_draft_dialog.hidden = true;
+    if (focusBeforeLocalDraftDialog?.isConnected) {
+      focusBeforeLocalDraftDialog.focus();
+    }
+    focusBeforeLocalDraftDialog = null;
+  });
   elements.pick_media.addEventListener("click", () => void chooseMediaFile());
   elements.pick_media_empty.addEventListener("click", () => void chooseMediaFile());
   elements.media_input.addEventListener("change", () => {
@@ -4131,6 +4521,13 @@ function bindActions() {
     const interactive = Boolean(event.target.closest(
       "button, a, input, textarea, select, [contenteditable='true'], [role='slider'], [role='tab']"
     ));
+    if (elements.local_draft_dialog.open) {
+      if (event.key === "Escape" && !localDraftOperationActive) {
+        event.preventDefault();
+        closeLocalDraftDialog();
+      }
+      return;
+    }
     if (event.key === "Escape" && !elements.timeline_context_menu.hidden) {
       event.preventDefault();
       closeTimelineContextMenu();
@@ -4273,6 +4670,17 @@ async function initialize() {
       0
     );
   }
+  try {
+    const drafts = await listLocalDrafts(project.id, { limit: 5 });
+    lastAutomaticDraftAtMs = Number(
+      drafts.find((draft) => draft.reason === "auto")?.createdAtMs
+    ) || 0;
+    updateLocalDraftStatus(drafts);
+  } catch (error) {
+    console.warn("로컬 임시저장 목록을 준비하지 못했습니다.", error);
+    elements.local_draft_status.textContent = "임시저장 목록 확인 실패";
+  }
+  startLocalDraftAutosave();
 }
 
 function applyCaptureSeedUpdate(captureState) {
@@ -4322,6 +4730,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 window.addEventListener("beforeunload", () => {
+  stopLocalDraftAutosave();
   stopPreviewAudioClock({ sync: false });
   void flushSave();
   if (mediaUrl) {
@@ -4332,12 +4741,36 @@ window.addEventListener("beforeunload", () => {
 });
 
 window.addEventListener("pagehide", () => {
+  stopLocalDraftAutosave();
   void flushSave();
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     void flushSave();
+  } else if (localDraftAutosaveAnchorAtMs > 0) {
+    const elapsed = Date.now() - localDraftAutosaveAnchorAtMs;
+    if (elapsed >= LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS) {
+      clearTimeout(localDraftAutosaveTimer);
+      localDraftAutosaveTimer = null;
+      void runAutomaticLocalDraft();
+    } else {
+      scheduleLocalDraftAutosave(
+        LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS - elapsed
+      );
+    }
+  }
+});
+
+window.addEventListener("pageshow", () => {
+  if (project && !localDraftAutosaveTimer) {
+    const elapsed = Math.max(
+      0,
+      Date.now() - localDraftAutosaveAnchorAtMs
+    );
+    scheduleLocalDraftAutosave(
+      Math.max(0, LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS - elapsed)
+    );
   }
 });
 

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 const DATABASE_NAME = "chzzk-kirinuki-studio";
 const PROJECT_STORE = "projects";
+const LOCAL_DRAFT_STORE = "local-drafts";
 const SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 const STORAGE_KEY = "chzzkKirinukiProjectV1";
 const WORKSPACE_META_KEY = "chzzkKirinukiWorkspaceMetaV1";
@@ -528,6 +529,43 @@ async function readStoredProject() {
   `, [PROJECT_ID, DATABASE_NAME, PROJECT_STORE]);
   assert(!result?.error, `IndexedDB 읽기 실패: ${result?.error}`);
   return result?.value || null;
+}
+
+async function readLocalDrafts() {
+  const result = await executeAsync(`
+    const [databaseName, storeName, projectId] = arguments;
+    const done = arguments[arguments.length - 1];
+    const open = indexedDB.open(databaseName);
+    open.onerror = () => done({
+      error: String(open.error || "IndexedDB open failed")
+    });
+    open.onsuccess = () => {
+      const database = open.result;
+      if (!database.objectStoreNames.contains(storeName)) {
+        database.close();
+        done({ error: "local draft store missing" });
+        return;
+      }
+      const transaction = database.transaction(storeName, "readonly");
+      const request = transaction.objectStore(storeName).getAll();
+      request.onerror = () => {
+        database.close();
+        done({ error: String(request.error || "local draft read failed") });
+      };
+      request.onsuccess = () => {
+        const drafts = request.result
+          .filter((draft) => String(draft.projectId) === String(projectId))
+          .sort((left, right) => (
+            Number(right.createdAtMs) - Number(left.createdAtMs) ||
+            String(right.id).localeCompare(String(left.id))
+          ));
+        database.close();
+        done({ drafts });
+      };
+    };
+  `, [DATABASE_NAME, LOCAL_DRAFT_STORE, PROJECT_ID]);
+  assert(!result?.error, `로컬 임시저장 읽기 실패: ${result?.error}`);
+  return result?.drafts || [];
 }
 
 async function readImageAssetBlobKeys() {
@@ -2332,6 +2370,241 @@ async function main() {
     ) ? state : false;
   }, "hot seed 반영 editor DOM");
 
+  await clickElement("#create-local-draft");
+  const manualLocalDraft = await waitUntil(async () => {
+    const drafts = await readLocalDrafts();
+    return (
+      drafts.length === 1 &&
+      drafts[0].reason === "manual" &&
+      drafts[0].project?.imageAssets?.some(
+        (asset) => asset.id === imageAssetId
+      )
+    ) ? drafts[0] : false;
+  }, "수동 로컬 임시저장");
+  const manualDraftStatus = await executeSync(`
+    return document.querySelector("#local-draft-status")
+      ?.textContent?.trim() || "";
+  `);
+  assert(
+    !manualDraftStatus.includes("마지막 자동"),
+    `자동저장 전 상태가 자동저장 완료로 표시됩니다: ${manualDraftStatus}`
+  );
+
+  const beforeRestoreProjectName = "복원 직전 E2E 상태";
+  await clearAndType("#project-name", beforeRestoreProjectName);
+  await clickElement(`.asset-block[data-id="${imageAssetId}"] .asset-block-body`);
+  await clickElement("#delete-asset");
+  const beforeRestoreProject = await waitForStoredProject(
+    (candidate) => (
+      candidate.name === beforeRestoreProjectName &&
+      !candidate.imageAssets?.some((asset) => asset.id === imageAssetId)
+    ),
+    "임시저장 뒤 현재 프로젝트 변경"
+  );
+
+  await delay(3_500);
+  const snapshotProtectedAssetKeys = await readImageAssetBlobKeys();
+  assert(
+    snapshotProtectedAssetKeys.includes(imageAssetId),
+    `임시저장만 참조하는 이미지 Blob이 조기 삭제됐습니다: ${JSON.stringify(
+      snapshotProtectedAssetKeys
+    )}`
+  );
+
+  await executeSync(`
+    const originalNow = Date.now;
+    const advancedNow = originalNow() + 5 * 60 * 1000 + 1;
+    Date.now = () => advancedNow;
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new PageTransitionEvent("pageshow", {
+        persisted: false
+      }));
+    } finally {
+      Date.now = originalNow;
+    }
+  `);
+  const autoLocalDrafts = await waitUntil(async () => {
+    const drafts = await readLocalDrafts();
+    return (
+      drafts.length === 2 &&
+      drafts.some((draft) => (
+        draft.reason === "auto" &&
+        draft.project?.name === beforeRestoreProjectName &&
+        !draft.project?.imageAssets?.some(
+          (asset) => asset.id === imageAssetId
+        )
+      ))
+    ) ? drafts : false;
+  }, "5분 경과 visibility 복귀 자동 임시저장");
+  await delay(350);
+  const stableAutomaticDrafts = await readLocalDrafts();
+  assert(
+    stableAutomaticDrafts.length === 2 &&
+      stableAutomaticDrafts.filter((draft) => draft.reason === "auto").length === 1,
+    `동시 lifecycle 이벤트가 자동 임시저장을 중복 생성했습니다: ${JSON.stringify(
+      stableAutomaticDrafts.map((draft) => draft.reason)
+    )}`
+  );
+
+  await clickElement("#open-local-drafts");
+  const localDraftDialogOpened = await waitUntil(async () => {
+    const state = await executeSync(`
+      const dialog = document.querySelector("#local-draft-dialog");
+      return {
+        hidden: dialog?.hidden,
+        open: dialog?.open,
+        options: document.querySelectorAll(
+          '#local-draft-list input[name="local-draft-choice"]'
+        ).length,
+        activeInside: Boolean(dialog?.contains(document.activeElement)),
+        restoreDisabled: document.querySelector(
+          "#restore-local-draft"
+        )?.disabled
+      };
+    `);
+    return (
+      state.hidden === false &&
+      state.open === true &&
+      state.options === 2 &&
+      state.activeInside &&
+      state.restoreDisabled
+    ) ? state : false;
+  }, "최근 로컬 임시저장 dialog");
+
+  await pressKey(KEY.ESCAPE);
+  let localDraftDialogEscaped;
+  try {
+    localDraftDialogEscaped = await waitUntil(async () => {
+      const state = await executeSync(`
+        const dialog = document.querySelector("#local-draft-dialog");
+        return {
+          hidden: dialog?.hidden,
+          open: dialog?.open,
+          activeId: document.activeElement?.id || null
+        };
+      `);
+      return (
+        state.hidden === true &&
+        state.open === false &&
+        state.activeId === "open-local-drafts"
+      ) ? state : false;
+    }, "로컬 임시저장 dialog Escape와 focus 복원");
+  } catch (error) {
+    const actual = await executeSync(`
+      const dialog = document.querySelector("#local-draft-dialog");
+      return {
+        hidden: dialog?.hidden,
+        open: dialog?.open,
+        activeId: document.activeElement?.id || null,
+        activeTag: document.activeElement?.tagName || null,
+        openerDisabled: document.querySelector("#open-local-drafts")?.disabled,
+        restoreDisabled: document.querySelector("#restore-local-draft")?.disabled
+      };
+    `);
+    throw new Error(`${error.message}: ${JSON.stringify(actual)}`);
+  }
+
+  await clickElement("#open-local-drafts");
+  await waitUntil(
+    () => executeSync(
+      `return document.querySelector("#local-draft-dialog")?.open === true;`
+    ),
+    "로컬 임시저장 dialog 재개방"
+  );
+  await clickElement(
+    `#local-draft-list input[value="${manualLocalDraft.id}"]`
+  );
+  await waitUntil(
+    () => executeSync(
+      `return document.querySelector("#restore-local-draft")?.disabled === false;`
+    ),
+    "임시저장 복원 선택"
+  );
+  await clickElement("#restore-local-draft");
+
+  const restoredFromLocalDraft = await waitForStoredProject(
+    (candidate) => (
+      candidate.name === manualLocalDraft.project.name &&
+      candidate.imageAssets?.some((asset) => asset.id === imageAssetId)
+    ),
+    "복원 직전 저장 뒤 선택 임시저장 복원"
+  );
+  const draftsAfterRestore = await waitUntil(async () => {
+    const drafts = await readLocalDrafts();
+    const preRestore = drafts.find(
+      (draft) => draft.reason === "pre-restore"
+    );
+    return (
+      drafts.length === 3 &&
+      preRestore?.restoredFromDraftId === manualLocalDraft.id &&
+      preRestore.project?.name === beforeRestoreProjectName &&
+      !preRestore.project?.imageAssets?.some(
+        (asset) => asset.id === imageAssetId
+      )
+    ) ? drafts : false;
+  }, "불러오기 직전 현재 상태 자동 임시저장");
+  const localDraftRestoreUi = await waitUntil(async () => {
+    const state = await executeSync(`
+      const dialog = document.querySelector("#local-draft-dialog");
+      const overlay = document.querySelector(
+        '#image-asset-overlays .image-asset-overlay[data-asset-id="${imageAssetId}"]'
+      );
+      const image = overlay?.querySelector("img");
+      return {
+        hidden: dialog?.hidden,
+        open: dialog?.open,
+        activeId: document.activeElement?.id || null,
+        assetCount: document.querySelectorAll(
+          "#asset-track .asset-block"
+        ).length,
+        projectName: document.querySelector("#project-name")?.value || "",
+        restoredImageLoaded: Boolean(
+          overlay &&
+          !overlay.hidden &&
+          image?.complete &&
+          image.naturalWidth > 0
+        ),
+        draftStatus: document.querySelector(
+          "#local-draft-status"
+        )?.textContent?.trim() || ""
+      };
+    `);
+    return (
+      state.hidden === true &&
+      state.open === false &&
+      state.activeId === "open-local-drafts" &&
+      state.assetCount === 1 &&
+      state.projectName === manualLocalDraft.project.name &&
+      state.restoredImageLoaded &&
+      state.draftStatus.includes("최근 3/5개")
+    ) ? state : false;
+  }, "임시저장 복원 DOM과 focus");
+  const localDraftSmoke = {
+    manual: {
+      id: manualLocalDraft.id,
+      reason: manualLocalDraft.reason,
+      projectName: manualLocalDraft.project.name
+    },
+    autoReasons: autoLocalDrafts.map((draft) => draft.reason),
+    protectedAssetKeys: snapshotProtectedAssetKeys,
+    dialogOpened: localDraftDialogOpened,
+    dialogEscaped: localDraftDialogEscaped,
+    restoredProjectName: restoredFromLocalDraft.name,
+    draftsAfterRestore: draftsAfterRestore.map((draft) => ({
+      id: draft.id,
+      reason: draft.reason,
+      restoredFromDraftId: draft.restoredFromDraftId,
+      projectName: draft.project?.name
+    })),
+    restoreUi: localDraftRestoreUi,
+    beforeRestoreProject: {
+      name: beforeRestoreProject.name,
+      imageAssets: beforeRestoreProject.imageAssets?.length || 0
+    }
+  };
+
   const finalPersistedCue = hotSeedProject.subtitles.find((cue) => cue.id === cueId);
   assert(finalPersistedCue, "hot seed 저장본에서 자막을 찾지 못했습니다.");
   const finalPersistedAsset = hotSeedProject.imageAssets?.find((asset) => asset.id === imageAssetId);
@@ -3062,6 +3335,7 @@ async function main() {
     },
     semantics: {
       nativeSpaceButton,
+      localDrafts: localDraftSmoke,
       multitrackUi: multitrackUiProbe,
       cueHandleNudge: {
         before: cueHandleNudgeBefore,

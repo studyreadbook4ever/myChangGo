@@ -206,6 +206,12 @@ for (const id of [
   "audio-volume",
   "audio-mute",
   "generate-captions",
+  "create-local-draft",
+  "open-local-drafts",
+  "local-draft-dialog",
+  "local-draft-list",
+  "restore-local-draft",
+  "close-local-draft-dialog",
   "export-video",
   "source-offset",
   "apply-source-offset"
@@ -225,6 +231,12 @@ assert(editorScript.includes("openTimelineContextMenu"), "자막·음성 우클�
 assert(editorScript.includes("updateAudioRegion"), "구간별 음성 설정 저장 경로가 없습니다.");
 assert(editorScript.includes("applyAudioAutomationToSample"), "구간별 음성 설정 렌더 경로가 없습니다.");
 assert(editorScript.includes("findAudioRegionOverlaps"), "겹치는 음성 설정 구간 방지가 없습니다.");
+assert(
+  editorScript.includes("saveLocalDraft") &&
+    editorScript.includes("restoreLocalDraft") &&
+    editorScript.includes("LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS"),
+  "수동·5분 자동·복원 직전 로컬 임시저장 경로가 없습니다."
+);
 assert(editorScript.includes("imageAssetsAtTimeline"), "이미지 에셋 미리보기 경로가 없습니다.");
 assert(
   editorScript.includes("saveProjectWithImageAssetBlob"),
