@@ -8,9 +8,11 @@ import {
   MIN_SUBTITLE_LANES,
   SUPPORTED_IMAGE_ASSET_MIME_TYPES,
   addSubtitleLane,
+  appendAiSubtitleDrafts,
   applyMediaAlignmentOffset,
   audioRegionAtTimeline,
   audioRegionTimelineRange,
+  canReorderClipGroup,
   captureStateSourceConflict,
   captureProjectId,
   createAudioRegion,
@@ -34,6 +36,7 @@ import {
   normalizeImageAssetSource,
   projectDurationMs,
   reorderClip,
+  reorderClipGroup,
   replaceAiSubtitleDraft,
   rippleDeleteTimelineRange,
   serializeSrt,
@@ -657,6 +660,71 @@ test("AI 재실행은 사람이 수정한 AI 자막을 덮어쓰지 않는다", 
   assert.deepEqual(findSubtitleOverlaps(project), []);
 });
 
+test("로컬 AI 초벌은 기존 사람·AI 자막을 그대로 두고 충돌 없는 별도 레인에 한 번만 추가한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  const human = createSubtitleCue(project, {
+    id: "human-cue",
+    clipId: "clip-first",
+    startOffsetMs: 500,
+    endOffsetMs: 2_500,
+    text: "사용자가 만든 자막",
+    lane: 0,
+    origin: "human"
+  });
+  const priorAi = {
+    ...createSubtitleCue(project, {
+      id: "prior-ai-cue",
+      clipId: "clip-first",
+      startOffsetMs: 700,
+      endOffsetMs: 2_200,
+      text: "사용자가 남겨 둔 기존 AI 자막",
+      lane: 1,
+      origin: "ai"
+    }),
+    humanEdited: false
+  };
+  project = {
+    ...project,
+    subtitles: [human, priorAi],
+    selectedCueId: human.id
+  };
+
+  const appended = appendAiSubtitleDrafts(project, [{
+    id: "codex-first-pass-1",
+    clipId: "clip-first",
+    startOffsetMs: 800,
+    endOffsetMs: 2_000,
+    text: "Codex 초벌",
+    origin: "ai",
+    remoteMeta: {
+      speakerId: "codex-local-first-pass",
+      reviewRequired: true,
+      placement: "bottom"
+    }
+  }]);
+  const repeated = appendAiSubtitleDrafts(appended, [{
+    id: "codex-first-pass-1",
+    clipId: "clip-first",
+    startOffsetMs: 800,
+    endOffsetMs: 2_000,
+    text: "중복되면 안 됨",
+    origin: "ai"
+  }]);
+
+  assert.deepEqual(
+    repeated.subtitles.filter((cue) => cue.id === human.id),
+    [human]
+  );
+  assert.deepEqual(
+    repeated.subtitles.filter((cue) => cue.id === priorAi.id),
+    [priorAi]
+  );
+  assert.equal(repeated.subtitles.filter((cue) => cue.id === "codex-first-pass-1").length, 1);
+  assert.equal(repeated.subtitles.find((cue) => cue.id === "codex-first-pass-1").lane, 2);
+  assert.equal(repeated.subtitleLaneCount, 3);
+  assert.equal(repeated.selectedCueId, human.id);
+});
+
 test("단어 타임스탬프를 읽기 쉬운 자막 cue 초안으로 묶는다", () => {
   const drafts = transcriptChunksToCueDrafts([
     { text: "안녕하세요", timestamp: [0.1, 0.7] },
@@ -832,6 +900,85 @@ test("컷 길이와 순서가 바뀌면 타임라인을 다시 흐르게 한다"
   project = reorderClip(project, "clip-second", 0);
   assert.equal(project.clips[0].id, "clip-second");
   assert.equal(project.clips[1].timelineStartMs, 6_500);
+});
+
+test("체크한 여러 컷은 상대 순서를 유지하며 한 단계씩 위아래로 이동한다", () => {
+  const project = createEditorProjectFromCapture({
+    ...captureState,
+    segments: ["a", "b", "c", "d", "e"].map((id, index) => ({
+      id,
+      startSeconds: index * 2,
+      endSeconds: index * 2 + 1,
+      description: id.toUpperCase()
+    }))
+  });
+  const selected = new Set(["clip-b", "clip-d"]);
+
+  assert.equal(canReorderClipGroup(project.clips, selected, -1), true);
+  assert.equal(canReorderClipGroup(project.clips, selected, 1), true);
+  const movedUp = reorderClipGroup(project, selected, -1);
+  assert.deepEqual(
+    movedUp.clips.map((clip) => clip.id),
+    ["clip-b", "clip-a", "clip-d", "clip-c", "clip-e"]
+  );
+  assert.deepEqual(
+    movedUp.clips.filter((clip) => selected.has(clip.id)).map((clip) => clip.id),
+    ["clip-b", "clip-d"]
+  );
+  assert.deepEqual(
+    movedUp.clips.map((clip) => clip.timelineStartMs),
+    [0, 1_000, 2_000, 3_000, 4_000]
+  );
+
+  const movedDown = reorderClipGroup(project, selected, 1);
+  assert.deepEqual(
+    movedDown.clips.map((clip) => clip.id),
+    ["clip-a", "clip-c", "clip-b", "clip-e", "clip-d"]
+  );
+  assert.deepEqual(
+    movedDown.clips.filter((clip) => selected.has(clip.id)).map((clip) => clip.id),
+    ["clip-b", "clip-d"]
+  );
+});
+
+test("묶음 이동은 경계에서 비활성화되고 출력 비활성 컷도 순서를 옮길 수 있다", () => {
+  const base = createEditorProjectFromCapture({
+    ...captureState,
+    segments: ["a", "b", "c"].map((id, index) => ({
+      id,
+      startSeconds: index * 2,
+      endSeconds: index * 2 + 1,
+      description: id.toUpperCase()
+    }))
+  });
+  const project = {
+    ...base,
+    clips: base.clips.map((clip) => (
+      clip.id === "clip-b" ? { ...clip, enabled: false } : clip
+    ))
+  };
+
+  assert.equal(canReorderClipGroup(project.clips, ["clip-a"], -1), false);
+  assert.equal(canReorderClipGroup(project.clips, ["clip-c"], 1), false);
+  assert.equal(canReorderClipGroup(project.clips, ["clip-b"], -1), true);
+  assert.deepEqual(
+    reorderClipGroup(project, ["clip-b"], -1).clips.map((clip) => clip.id),
+    ["clip-b", "clip-a", "clip-c"]
+  );
+
+  const movedAcrossDisabled = reorderClipGroup(project, ["clip-c"], -1);
+  assert.deepEqual(
+    movedAcrossDisabled.clips.map((clip) => [clip.id, clip.enabled]),
+    [
+      ["clip-a", true],
+      ["clip-c", true],
+      ["clip-b", false]
+    ]
+  );
+  assert.deepEqual(
+    movedAcrossDisabled.clips.map((clip) => clip.timelineStartMs),
+    [0, 1_000, 2_000]
+  );
 });
 
 test("컷 trim은 남은 자막의 원본 발화 시각을 보존하고 잘려나간 자막은 제거한다", () => {

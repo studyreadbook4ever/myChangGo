@@ -2,6 +2,10 @@ export const CAPTION_AGENT_REQUEST_SCHEMA_ID =
   "chzzk-kirinuki-caption-request/v1";
 export const CAPTION_AGENT_RESPONSE_SCHEMA_ID =
   "chzzk-kirinuki-caption-response/v1";
+export const SUPPORTED_SOLAR_CAPTION_MODELS = Object.freeze([
+  "solar-pro3",
+  "solar-mini"
+]);
 
 export const MAX_CAPTION_CUE_DURATION_MS = 4_000;
 export const MAX_CAPTION_CUES = 4_000;
@@ -46,7 +50,7 @@ export const CAPTION_AGENT_REQUEST_JSON_SCHEMA = Object.freeze({
     requestId: { type: "string", minLength: 1, maxLength: 128 },
     model: {
       type: "string",
-      enum: ["solar-pro3", "solar-pro2", "solar-mini"]
+      enum: SUPPORTED_SOLAR_CAPTION_MODELS
     },
     locale: { const: "ko-KR" },
     clip: {
@@ -442,7 +446,7 @@ export function validateCaptionAgentRequest(value) {
       issues: ["locale"]
     });
   }
-  const supportedModels = new Set(["solar-pro3", "solar-pro2", "solar-mini"]);
+  const supportedModels = new Set(SUPPORTED_SOLAR_CAPTION_MODELS);
   if (!supportedModels.has(value.model)) {
     throw new CaptionProtocolError("지원하지 않는 Solar 모델입니다.", {
       code: "INVALID_REQUEST_FIELD",

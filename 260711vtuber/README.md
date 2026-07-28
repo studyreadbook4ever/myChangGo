@@ -47,9 +47,9 @@ Extension 소스를 수정한 뒤에는 `chrome://extensions`에서 다시 로�
 
 긴 원본을 통째로 메모리에 복사하지 않습니다. 미리보기·자막용 오디오 추출·렌더링은 사용자가 선택한 구간을 기준으로 디스크에서 필요한 부분만 읽습니다.
 
-자막 에이전트는 선택 컷 오디오를 외부 STT로 전사한 다음, 타임코드가 있는 전사문을 Upstage Solar Pro 3에 보내 의미 단위 cue로 정리합니다. Solar Pro 3는 음성을 직접 전사하는 모델이 아니므로 외부 STT가 반드시 필요합니다. 편집기는 각 컷의 대표 프레임 7장을 이 기기에서만 축소 분석해 top·center·bottom의 방해도 점수를 만들고, Solar는 cue 시각에 가까운 점수를 바탕으로 위치를 고릅니다. 결과는 인식된 발화를 빠뜨리지 않고 cue당 최대 4초로 나누며, 문장 끝 마침표는 제거하되 물음표 등 의미 있는 문장부호는 유지하는 검수용 초안입니다.
+자막 에이전트는 선택 컷 오디오를 외부 STT로 전사한 다음, 타임코드가 있는 전사문을 Upstage Solar에 보내 의미 단위 cue로 정리합니다. `solar-pro3`는 품질 우선으로 `reasoning_effort: high`와 최소 16,384 completion token 예산을 사용하고, `solar-mini`는 빠른 초벌용으로 reasoning 필드를 보내지 않습니다. 둘 다 음성을 직접 전사하는 모델이 아니므로 시간 정보가 있는 STT가 반드시 필요합니다. 편집기는 각 컷의 대표 프레임 7장을 이 기기에서만 축소 분석해 top·center·bottom의 방해도 점수를 만들고, Solar는 cue 시각에 가까운 점수를 바탕으로 위치를 고릅니다. 결과는 인식된 발화를 빠뜨리지 않고 cue당 최대 4초로 나누며, 문장 끝 마침표는 제거하되 물음표 등 의미 있는 문장부호는 유지하는 검수용 초안입니다.
 
-한 번의 실행은 활성 컷 최대 500개, 새 AI cue 최대 10,000개로 제한합니다. 더 큰 작업은 활성 컷을 나눠 실행해 브라우저 메모리와 외부 API 비용을 통제하세요.
+한 번의 실행은 활성 컷 최대 500개, 새 AI cue 최대 10,000개로 제한합니다. 모델의 context보다 긴 단일 컷 전사문은 Solar 요청이 실패할 수 있으므로 긴 장면은 먼저 여러 컷으로 나눠 실행하세요. 더 큰 작업은 활성 컷을 나눠 실행해 브라우저 메모리와 외부 API 비용을 통제하세요.
 
 ### 자막 에이전트와 API 키 연결
 
@@ -59,11 +59,11 @@ Extension 소스를 수정한 뒤에는 `chrome://extensions`에서 다시 로�
 
 - **자막 에이전트 Endpoint**: 기본값 `http://127.0.0.1:4319/v1/captions`
 - **세션 토큰**: companion의 `KIRINUKI_AGENT_TOKEN`과 같은 값
-- **Solar 모델**: 기본값 `solar-pro3`
+- **Solar 모델**: 품질 우선 `solar-pro3`(기본값) 또는 빠른 초벌 `solar-mini`
 - **STT API 주소·모델명·API 키**: 사용 중인 호환 STT 제공자의 값
 - **Upstage API 키**: Solar Chat API를 호출할 키
 
-자막 에이전트 endpoint·Solar 모델·STT 주소·STT 모델명 같은 비밀이 아닌 설정만 `chrome.storage.local`에 저장됩니다. 세션 토큰과 두 API 키는 프로젝트·임시저장·IndexedDB·Chrome 저장소에 넣지 않고 현재 편집기 탭의 메모리에만 둡니다. **입력한 API 키 지우기**로 즉시 비울 수 있습니다. 제공자 API 키는 정확한 Bearer 세션 토큰으로 인증된 `127.0.0.1` 또는 `localhost` companion에만 요청 헤더로 전달하며, 원격 HTTPS 자막 에이전트에는 전달하지 않습니다.
+자막 에이전트 endpoint·Solar 모델·STT 주소·STT 모델명 같은 비밀이 아닌 설정만 `chrome.storage.local`에 저장됩니다. 세션 토큰과 두 API 키는 프로젝트·임시저장·IndexedDB·Chrome 저장소에 넣지 않고 현재 편집기 탭의 메모리에만 둡니다. **입력한 API 키 지우기**로 즉시 비울 수 있습니다. 제공자 API 키는 비어 있지 않은 Bearer 세션 토큰과 함께 `127.0.0.1` 또는 `localhost` companion에만 요청 헤더로 전달하며, 토큰이 없으면 요청 전에 중단하고 원격 HTTPS 자막 에이전트에는 전달하지 않습니다.
 
 Extension ID를 `chrome://extensions`에서 확인하고, reference gateway는 최소한 다음처럼 실행합니다.
 
@@ -73,7 +73,9 @@ export KIRINUKI_AGENT_TOKEN='<충분히 긴 임의 토큰>'
 npm run caption-gateway
 ```
 
-gateway는 `127.0.0.1`에만 바인딩됩니다. `KIRINUKI_ALLOWED_ORIGIN`에는 와일드카드가 아니라 현재 Extension의 정확한 origin 하나를 지정하고, 편집기에 같은 세션 토큰과 STT·Upstage 값을 넣은 뒤 **연결 확인**을 누르세요.
+gateway는 `127.0.0.1`에만 바인딩됩니다. `KIRINUKI_ALLOWED_ORIGIN`에는 와일드카드가 아니라 현재 Extension의 정확한 origin 하나를 지정하고, 편집기에 같은 세션 토큰과 STT·Upstage 값을 넣은 뒤 **연결 확인**을 누르세요. 로컬 companion 프로세스나 해당 포트를 신뢰할 수 없는 환경에서는 API 키를 편집기에 넣지 말고 아래 환경 변수 방식으로 companion에 직접 보관하세요.
+
+Solar Chat의 공식 입력은 텍스트이므로 **Upstage API 키 하나만 입력한 raw audio 요청은 준비 완료로 표시하지 않습니다.** gateway core에는 검증된 로컬 STT를 연결할 수 있는 `transcribeAudio` 경계가 있지만 이 저장소는 로컬 음성인식 모델을 번들하지 않습니다. 기본 reference gateway는 외부 timed STT 주소·키가 빠지면 `TIMED_STT_REQUIRED`로 중단하며, WAV를 Solar Chat 요청에 넣는 가상의 폴백은 사용하지 않습니다.
 
 API 키를 편집기에 매번 넣고 싶지 않다면 companion 환경 변수에 두는 기존 방식도 지원합니다.
 

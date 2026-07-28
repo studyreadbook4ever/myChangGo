@@ -599,6 +599,81 @@ svg {
   line-height: 1.4;
 }
 
+.clip-group-toolbar {
+  min-height: 31px;
+  margin: -4px 0 8px;
+  padding: 3px 3px 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  color: var(--muted);
+  background: rgba(10, 13, 18, 0.76);
+}
+
+#clip-group-status {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 8px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clip-group-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+}
+
+.clip-group-actions button {
+  min-width: 25px;
+  height: 23px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--panel-raised);
+  font-size: 9px;
+  font-weight: 760;
+  transition:
+    border-color 130ms ease,
+    color 130ms ease,
+    background-color 130ms ease;
+}
+
+.clip-group-actions button:first-child {
+  border-radius: 5px 0 0 5px;
+}
+
+.clip-group-actions button + button {
+  margin-left: -1px;
+}
+
+.clip-group-actions button:last-child {
+  border-radius: 0 5px 5px 0;
+}
+
+.clip-group-actions button.clear {
+  min-width: 34px;
+  color: var(--subtle);
+  font-size: 7.5px;
+}
+
+.clip-group-actions button:hover:not(:disabled),
+.clip-group-actions button:focus-visible {
+  position: relative;
+  z-index: 1;
+  border-color: rgba(154, 134, 255, 0.62);
+  color: #e2ddff;
+  background: rgba(154, 134, 255, 0.13);
+}
+
+.clip-group-actions button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
 .clip-list {
   min-height: 0;
   flex: 1;
@@ -616,12 +691,70 @@ svg {
   border-radius: 8px;
   background: var(--panel-raised);
   overflow: hidden;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background-color 150ms ease;
+}
+
+.clip-item:hover {
+  border-color: var(--line-bright);
+}
+
+.clip-item:focus-within {
+  border-color: rgba(154, 134, 255, 0.68);
+  box-shadow: 0 0 0 2px rgba(154, 134, 255, 0.11);
 }
 
 .clip-item.selected {
   border-color: rgba(0, 230, 163, 0.58);
   box-shadow: inset 2px 0 0 var(--mint);
   background: linear-gradient(90deg, rgba(0, 230, 163, 0.08), var(--panel-raised) 60%);
+}
+
+.clip-item.clip-group-selected {
+  border-color: rgba(154, 134, 255, 0.65);
+  box-shadow: inset 2px 0 0 var(--purple);
+  background: linear-gradient(90deg, rgba(154, 134, 255, 0.12), var(--panel-raised) 66%);
+}
+
+.clip-item.selected.clip-group-selected {
+  box-shadow:
+    inset 2px 0 0 var(--mint),
+    inset 5px 0 0 rgba(154, 134, 255, 0.72);
+}
+
+.clip-item.clip-disabled {
+  opacity: 0.48;
+}
+
+.clip-group-check {
+  width: 28px;
+  flex: 0 0 28px;
+  display: grid;
+  place-items: center;
+  border-right: 1px solid var(--line);
+  background: rgba(7, 9, 13, 0.45);
+  transition: background-color 130ms ease;
+}
+
+.clip-group-check:hover {
+  background: rgba(154, 134, 255, 0.09);
+}
+
+.clip-group-check:has(.clip-group-checkbox:checked) {
+  background: rgba(154, 134, 255, 0.16);
+}
+
+.clip-group-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--purple);
+}
+
+.clip-group-checkbox:disabled {
+  cursor: not-allowed;
 }
 
 .clip-select {
@@ -715,6 +848,14 @@ svg {
 
 .clip-actions button:disabled {
   opacity: 0.25;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .clip-item,
+  .clip-group-check,
+  .clip-group-actions button {
+    transition: none;
+  }
 }
 
 .source-jump {
@@ -819,10 +960,18 @@ svg {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.23);
 }
 
-#preview-video {
+.preview-video {
+  position: absolute;
+  inset: 0;
+  display: block;
+  min-width: 0;
+  min-height: 0;
   width: 100%;
   height: 100%;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
+  object-position: center;
   background: #020304;
 }
 
@@ -906,6 +1055,7 @@ svg {
 .safe-area {
   position: absolute;
   inset: 7%;
+  z-index: 4;
   border: 1px dashed rgba(255, 255, 255, 0.07);
   pointer-events: none;
   opacity: 0;
@@ -1201,9 +1351,18 @@ svg {
   margin-top: 11px;
 }
 
-.select-field > span {
+.select-field > span,
+.select-field > .select-field-label {
   color: var(--muted);
   font-size: 8px;
+}
+
+.select-field > span em,
+.select-field > .select-field-label em {
+  margin-left: 4px;
+  color: var(--mint);
+  font-style: normal;
+  font-size: 7px;
 }
 
 .select-field select,
@@ -1223,6 +1382,23 @@ svg {
   border-color: rgba(176, 160, 255, 0.7);
   outline: 2px solid rgba(154, 134, 255, 0.16);
   outline-offset: 1px;
+}
+
+.caption-key-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.caption-key-row input {
+  min-width: 0;
+}
+
+.caption-key-clear {
+  height: 31px;
+  border-color: rgba(154, 134, 255, 0.24);
+  color: #c9c1ef;
+  white-space: nowrap;
 }
 
 .caption-agent-row {
@@ -1267,14 +1443,22 @@ svg {
   padding: 0 8px 9px;
 }
 
+.caption-agent-advanced-intro {
+  margin: 8px 1px 2px;
+  color: #aaa4c1;
+  font-size: 7.5px;
+  line-height: 1.5;
+}
+
 .caption-provider-fields .select-field {
   margin-top: 8px;
 }
 
-.caption-provider-clear {
-  width: 100%;
-  margin-top: 9px;
-  border-color: rgba(154, 134, 255, 0.2);
+.caption-agent-rules-title {
+  display: block;
+  margin: 10px 2px 6px;
+  color: #c9c1ef;
+  font-size: 8px;
 }
 
 .caption-agent-policy ul {
@@ -1286,7 +1470,7 @@ svg {
 }
 
 .caption-agent-privacy {
-  margin: 8px 1px 0;
+  margin: 8px 1px 1px;
   color: #8f8aa7;
   font-size: 7.5px;
   line-height: 1.5;

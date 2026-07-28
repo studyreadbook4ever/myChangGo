@@ -177,6 +177,14 @@ test("비밀 API 키는 자막 에이전트 저장 설정에 포함하지 않는
   );
   assert.equal(JSON.stringify(persisted).includes("must-not-persist"), false);
   assert.deepEqual(normalizeCaptionAgentSettings(settings), settings);
+  assert.equal(
+    normalizeCaptionAgentSettings({ ...settings, model: "solar-mini" }).model,
+    "solar-mini"
+  );
+  assert.equal(
+    normalizeCaptionAgentSettings({ ...settings, model: "solar-pro2" }).model,
+    "solar-pro3"
+  );
 });
 
 test("16kHz mono Float32 PCM을 올바른 PCM16 WAV base64로 만든다", () => {
@@ -237,6 +245,25 @@ test("요청은 실제 컷 메모·길이와 한국어 키리누키 4초 정책�
   assert.equal(request.visual.framesShared, false);
   assert.equal(request.visual.samples[0].preferredPlacement, "bottom");
   assert.equal(request.audio.data, "UklGRg==");
+  assert.throws(
+    () => createCaptionAgentRequest({
+      project: {
+        id: "project-1",
+        name: "새 프로젝트",
+        source: { streamerName: "스트리머" }
+      },
+      clip: {
+        id: "clip-1",
+        note: "첫 장면",
+        sourceStartMs: 10_000,
+        sourceEndMs: 15_500
+      },
+      model: "solar-pro2",
+      audioBase64: "UklGRg==",
+      placementHints: request.visual
+    }),
+    /지원하지 않는 Solar 모델/u
+  );
 });
 
 test("원격 cue는 정렬·경계·4초를 검증하고 동시 발화와 표시 메타를 보존한다", () => {
@@ -388,6 +415,33 @@ test("제공자 API 키는 JSON 본문이 아니라 loopback 요청 헤더로만
     calls[0].options.body.includes("upstage-memory-only"),
     false
   );
+});
+
+test("제공자 설정은 세션 토큰이 없으면 fetch 전에 거부한다", async () => {
+  const request = agentRequest();
+  let fetchCount = 0;
+  const options = {
+    endpoint: "http://127.0.0.1:4319/v1/captions",
+    providerConfig: {
+      upstageApiKey: "upstage-memory-only"
+    },
+    fetchImpl: async () => {
+      fetchCount += 1;
+      return jsonResponse(completedAgentResponse(request));
+    }
+  };
+  await assert.rejects(
+    requestCaptionAgent({
+      ...options,
+      request
+    }),
+    /세션 토큰/u
+  );
+  await assert.rejects(
+    probeCaptionAgent(options),
+    /세션 토큰/u
+  );
+  assert.equal(fetchCount, 0);
 });
 
 test("비동기 상태 URL은 최초 요청과 같은 origin만 허용한다", async () => {

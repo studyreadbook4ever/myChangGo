@@ -333,6 +333,7 @@ async function main() {
         "caption-upstage-api-key",
         "clear-caption-provider-keys",
         "caption-model",
+        "caption-advanced-settings",
         "test-caption-agent",
         "generate-captions",
         "caption-agent-warning",
@@ -348,6 +349,13 @@ async function main() {
         tokenType: document.getElementById("caption-agent-token")?.type,
         sttKeyType: document.getElementById("caption-stt-api-key")?.type,
         upstageKeyType: document.getElementById("caption-upstage-api-key")?.type,
+        modelOptions: [...document.getElementById("caption-model")?.options || []]
+          .map((option) => option.value),
+        advancedOpen: document.getElementById("caption-advanced-settings")?.open,
+        endpointInAdvanced: document.getElementById("caption-advanced-settings")
+          ?.contains(document.getElementById("caption-agent-endpoint")),
+        upstageKeyInAdvanced: document.getElementById("caption-advanced-settings")
+          ?.contains(document.getElementById("caption-upstage-api-key")),
         missingIds: requiredIds.filter((id) => !document.getElementById(id))
       };
     `,
@@ -360,6 +368,13 @@ async function main() {
   assert(editor.tokenType === "password", "자막 에이전트 세션 토큰 입력이 password가 아닙니다.");
   assert(editor.sttKeyType === "password", "STT API 키 입력이 password가 아닙니다.");
   assert(editor.upstageKeyType === "password", "Upstage API 키 입력이 password가 아닙니다.");
+  assert(
+    editor.modelOptions.join(",") === "solar-pro3,solar-mini",
+    `Solar 모델 선택지가 간소화 계약과 다릅니다: ${editor.modelOptions.join(",")}`
+  );
+  assert(editor.advancedOpen === false, "STT·companion 세부설정은 기본으로 접혀 있어야 합니다.");
+  assert(editor.endpointInAdvanced === true, "companion 주소가 세부설정 밖에 노출되어 있습니다.");
+  assert(editor.upstageKeyInAdvanced === false, "Solar API 키는 기본 화면에 보여야 합니다.");
   assert(editor.missingIds.length === 0, `editor 핵심 DOM 누락: ${editor.missingIds.join(", ")}`);
 
   const runtime = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/async`, {

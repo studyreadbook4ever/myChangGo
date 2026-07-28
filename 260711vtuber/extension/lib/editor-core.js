@@ -1407,6 +1407,63 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
   };
 }
 
+export function appendAiSubtitleDrafts(project, drafts = []) {
+  if (!project || !Array.isArray(project.clips) || !Array.isArray(project.subtitles)) {
+    return project;
+  }
+  const clipsById = new Map(project.clips.map((clip) => [clip.id, clip]));
+  const existingById = new Map(project.subtitles.map((cue) => [cue.id, cue]));
+  const acceptedIds = new Set(existingById.keys());
+  const draftsByClip = new Map();
+  for (const draft of Array.isArray(drafts) ? drafts : []) {
+    const clipId = String(draft?.clipId || "");
+    if (!clipsById.has(clipId) || !String(draft?.text || "").trim()) {
+      continue;
+    }
+    const requestedId = String(draft?.id || "").trim();
+    if (requestedId && acceptedIds.has(requestedId)) {
+      continue;
+    }
+    if (requestedId) {
+      acceptedIds.add(requestedId);
+    }
+    const clipDrafts = draftsByClip.get(clipId) || [];
+    clipDrafts.push(draft);
+    draftsByClip.set(clipId, clipDrafts);
+  }
+  if (draftsByClip.size === 0) {
+    return project;
+  }
+
+  const selectedCueId = project.selectedCueId;
+  let next = {
+    ...project,
+    // Mark copies as protected only while assigning lanes. The originals are
+    // restored below so a local first pass can never change user-owned cues.
+    subtitles: project.subtitles.map((cue) => ({
+      ...cue,
+      humanEdited: true
+    }))
+  };
+  for (const clip of project.clips) {
+    const clipDrafts = draftsByClip.get(clip.id);
+    if (clipDrafts?.length) {
+      next = replaceAiSubtitleDraft(next, clip.id, clipDrafts);
+    }
+  }
+  const subtitles = next.subtitles.map((cue) => (
+    existingById.get(cue.id) || cue
+  ));
+  return {
+    ...next,
+    subtitles,
+    selectedCueId: subtitles.some((cue) => cue.id === selectedCueId)
+      ? selectedCueId
+      : next.selectedCueId,
+    updatedAt: nowIso()
+  };
+}
+
 export function transcriptChunksToCueDrafts(chunks = [], clipDuration = 0, {
   maxCharacters = 26,
   maxDurationMs = 4_000,
@@ -1938,6 +1995,68 @@ export function reorderClip(project, clipId, toIndex) {
   const [moved] = clips.splice(fromIndex, 1);
   clips.splice(target, 0, moved);
   return { ...project, clips: reflowClips(clips), updatedAt: nowIso() };
+}
+
+function movableClipIdSet(clips, selectedClipIds) {
+  const requested = selectedClipIds instanceof Set
+    ? selectedClipIds
+    : new Set(Array.isArray(selectedClipIds) ? selectedClipIds : []);
+  return new Set(
+    clips
+      .filter((clip) => requested.has(clip.id))
+      .map((clip) => clip.id)
+  );
+}
+
+export function canReorderClipGroup(clips = [], selectedClipIds = [], direction = 0) {
+  const selected = movableClipIdSet(clips, selectedClipIds);
+  if (selected.size === 0 || (direction !== -1 && direction !== 1)) {
+    return false;
+  }
+  if (direction < 0) {
+    return clips.some((clip, index) => (
+      index > 0 &&
+      selected.has(clip.id) &&
+      !selected.has(clips[index - 1].id)
+    ));
+  }
+  return clips.some((clip, index) => (
+    index < clips.length - 1 &&
+    selected.has(clip.id) &&
+    !selected.has(clips[index + 1].id)
+  ));
+}
+
+export function reorderClipGroup(project, selectedClipIds = [], direction = 0) {
+  const clips = [...(project?.clips || [])];
+  const selected = movableClipIdSet(clips, selectedClipIds);
+  if (!canReorderClipGroup(clips, selected, direction)) {
+    return project;
+  }
+  if (direction < 0) {
+    for (let index = 1; index < clips.length; index += 1) {
+      if (
+        selected.has(clips[index].id) &&
+        !selected.has(clips[index - 1].id)
+      ) {
+        [clips[index - 1], clips[index]] = [clips[index], clips[index - 1]];
+      }
+    }
+  } else {
+    for (let index = clips.length - 2; index >= 0; index -= 1) {
+      if (
+        selected.has(clips[index].id) &&
+        !selected.has(clips[index + 1].id)
+      ) {
+        [clips[index], clips[index + 1]] = [clips[index + 1], clips[index]];
+      }
+    }
+  }
+  return {
+    ...project,
+    clips: reflowClips(clips),
+    updatedAt: nowIso()
+  };
 }
 
 export function applyMediaAlignmentOffset(project, alignmentOffsetMs) {
