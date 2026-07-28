@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "치지직 키리누키 스튜디오",
-  "version": "2.1.0",
-  "description": "치지직 생방송·다시보기의 선택 구간을 컷 편집하고 투명 에셋·구간별 음성·다중 Solar 한글 자막을 검수·렌더합니다.",
+  "name": "치지직·YouTube 키리누키 스튜디오",
+  "version": "2.2.0",
+  "description": "치지직 생방송·다시보기와 YouTube VOD의 선택 구간을 컷 편집하고 에셋·음성·Solar 한글 자막을 검수·렌더합니다.",
   "minimum_chrome_version": "120",
   "permissions": [
     "activeTab",
@@ -16,6 +16,10 @@
   "host_permissions": [
     "https://chzzk.naver.com/*",
     "https://api.chzzk.naver.com/*",
+    "https://youtube.com/*",
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://youtu.be/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -30,7 +34,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "치지직 키리누키 스튜디오 열기"
+    "default_title": "치지직·YouTube 키리누키 스튜디오 열기"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
@@ -38,7 +42,11 @@
   "content_scripts": [
     {
       "matches": [
-        "https://chzzk.naver.com/*"
+        "https://chzzk.naver.com/*",
+        "https://youtube.com/*",
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://youtu.be/*"
       ],
       "js": [
         "content-script.js"

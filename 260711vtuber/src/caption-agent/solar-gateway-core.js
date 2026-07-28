@@ -19,6 +19,9 @@ export const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024 * 1024;
 export const MAX_STT_SEGMENTS = 10_000;
 export const MAX_STT_WORDS = 50_000;
 export const MAX_SOLAR_PROMPT_BYTES = 2 * 1024 * 1024;
+export const MAX_PROVIDER_API_KEY_LENGTH = 4_096;
+export const MAX_STT_ENDPOINT_LENGTH = 2_048;
+export const MAX_STT_MODEL_LENGTH = 160;
 
 export class CaptionGatewayError extends Error {
   constructor(message, {
@@ -34,12 +37,15 @@ export class CaptionGatewayError extends Error {
   }
 }
 
-function requiredEnvironmentValue(value, name) {
+function requiredConfigurationValue(value, name, {
+  required = true,
+  httpStatus = 500
+} = {}) {
   const normalized = String(value || "").trim();
-  if (!normalized) {
-    throw new CaptionGatewayError(`${name} 환경 변수가 필요합니다.`, {
+  if (!normalized && required) {
+    throw new CaptionGatewayError(`${name} 설정이 필요합니다.`, {
       code: "MISSING_CONFIGURATION",
-      httpStatus: 500
+      httpStatus
     });
   }
   return normalized;
@@ -49,23 +55,42 @@ function isLoopbackHostname(hostname) {
   return hostname === "127.0.0.1" || hostname === "localhost";
 }
 
-function externalEndpoint(value, name) {
-  const normalized = requiredEnvironmentValue(value, name);
+function externalEndpoint(value, name, {
+  allowQuery = true,
+  ...options
+} = {}) {
+  const normalized = requiredConfigurationValue(value, name, options);
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length > MAX_STT_ENDPOINT_LENGTH) {
+    throw new CaptionGatewayError(`${name} URL이 너무 깁니다.`, {
+      code: "INVALID_CONFIGURATION",
+      httpStatus: options?.httpStatus ?? 500
+    });
+  }
   let url;
   try {
     url = new URL(normalized);
   } catch {
     throw new CaptionGatewayError(`${name} URL이 올바르지 않습니다.`, {
       code: "INVALID_CONFIGURATION",
-      httpStatus: 500
+      httpStatus: options?.httpStatus ?? 500
     });
   }
-  if (url.username || url.password || url.hash) {
+  if (
+    url.username
+    || url.password
+    || (!allowQuery && url.search)
+    || url.hash
+  ) {
     throw new CaptionGatewayError(
-      `${name}에 사용자 정보나 # 조각을 넣을 수 없습니다.`,
+      allowQuery
+        ? `${name}에 사용자 정보나 # 조각을 넣을 수 없습니다.`
+        : `${name}에 사용자 정보·쿼리 문자열·# 조각을 넣을 수 없습니다.`,
       {
         code: "INVALID_CONFIGURATION",
-        httpStatus: 500
+        httpStatus: options?.httpStatus ?? 500
       }
     );
   }
@@ -76,32 +101,74 @@ function externalEndpoint(value, name) {
       `${name}는 HTTPS 또는 loopback HTTP URL이어야 합니다.`,
       {
         code: "INVALID_CONFIGURATION",
-        httpStatus: 500
+        httpStatus: options?.httpStatus ?? 500
       }
     );
   }
   return url.href;
 }
 
-export function resolveCaptionPipelineConfig(env = process.env) {
+function providerApiKey(value, name, options) {
+  const normalized = requiredConfigurationValue(value, name, options);
+  if (!normalized) {
+    return "";
+  }
+  if (
+    normalized.length > MAX_PROVIDER_API_KEY_LENGTH
+    || /[\r\n]/u.test(normalized)
+  ) {
+    throw new CaptionGatewayError(`${name} 형식이 올바르지 않습니다.`, {
+      code: "INVALID_CONFIGURATION",
+      httpStatus: options?.httpStatus ?? 500
+    });
+  }
+  return normalized;
+}
+
+function sttModelName(value, {
+  fallback = DEFAULT_STT_MODEL,
+  httpStatus = 500
+} = {}) {
+  const normalized = String(value || fallback).trim() || fallback;
+  if (
+    normalized.length > MAX_STT_MODEL_LENGTH
+    || /[\u0000-\u001f\u007f]/u.test(normalized)
+  ) {
+    throw new CaptionGatewayError("STT 모델명이 올바르지 않습니다.", {
+      code: "INVALID_CONFIGURATION",
+      httpStatus
+    });
+  }
+  return normalized;
+}
+
+export function resolveCaptionPipelineConfig(
+  env = process.env,
+  { allowMissingProviderConfig = false } = {}
+) {
   const maxAudioBytes = Number(env.KIRINUKI_MAX_AUDIO_BYTES);
   const maxTokens = Number(env.KIRINUKI_SOLAR_MAX_TOKENS);
   const pipelineTimeoutMs = Number(env.KIRINUKI_PIPELINE_TIMEOUT_MS);
+  const providerOptions = {
+    required: !allowMissingProviderConfig,
+    httpStatus: 500
+  };
   return {
     sttEndpoint: externalEndpoint(
       env.KIRINUKI_STT_ENDPOINT,
-      "KIRINUKI_STT_ENDPOINT"
+      "KIRINUKI_STT_ENDPOINT",
+      providerOptions
     ),
-    sttApiKey: requiredEnvironmentValue(
+    sttApiKey: providerApiKey(
       env.KIRINUKI_STT_API_KEY,
-      "KIRINUKI_STT_API_KEY"
+      "KIRINUKI_STT_API_KEY",
+      providerOptions
     ),
-    sttModel: String(
-      env.KIRINUKI_STT_MODEL || DEFAULT_STT_MODEL
-    ).trim() || DEFAULT_STT_MODEL,
-    upstageApiKey: requiredEnvironmentValue(
+    sttModel: sttModelName(env.KIRINUKI_STT_MODEL),
+    upstageApiKey: providerApiKey(
       env.UPSTAGE_API_KEY,
-      "UPSTAGE_API_KEY"
+      "UPSTAGE_API_KEY",
+      providerOptions
     ),
     solarModel: String(
       env.KIRINUKI_SOLAR_MODEL || DEFAULT_SOLAR_MODEL
@@ -115,6 +182,72 @@ export function resolveCaptionPipelineConfig(env = process.env) {
     pipelineTimeoutMs: Number.isFinite(pipelineTimeoutMs) && pipelineTimeoutMs >= 1_000
       ? Math.min(MAX_PIPELINE_TIMEOUT_MS, Math.floor(pipelineTimeoutMs))
       : DEFAULT_PIPELINE_TIMEOUT_MS
+  };
+}
+
+export function resolveCaptionPipelineRequestConfig(
+  baseConfig = {},
+  overrides = {}
+) {
+  const requestOptions = {
+    required: true,
+    httpStatus: 400
+  };
+  const optionalRequestOptions = {
+    required: false,
+    httpStatus: 400
+  };
+  const overrideSttEndpoint = String(
+    overrides.sttEndpoint || ""
+  ).trim();
+  const baseSttEndpoint = externalEndpoint(
+    baseConfig.sttEndpoint,
+    "STT API 주소",
+    optionalRequestOptions
+  );
+  const sttEndpoint = externalEndpoint(
+    overrideSttEndpoint || baseSttEndpoint,
+    "STT API 주소",
+    {
+      ...requestOptions,
+      allowQuery: !overrideSttEndpoint
+    }
+  );
+  const overrideSttApiKey = providerApiKey(
+    overrides.sttApiKey,
+    "STT API 키",
+    optionalRequestOptions
+  );
+  if (
+    overrideSttEndpoint
+    && sttEndpoint !== baseSttEndpoint
+    && !overrideSttApiKey
+  ) {
+    throw new CaptionGatewayError(
+      "STT API 주소를 바꾸려면 같은 요청의 STT API 키도 함께 입력해야 합니다.",
+      {
+        code: "STT_PROVIDER_PAIR_REQUIRED",
+        httpStatus: 400
+      }
+    );
+  }
+  return {
+    ...baseConfig,
+    sttEndpoint,
+    sttApiKey: providerApiKey(
+      overrideSttApiKey || baseConfig.sttApiKey,
+      "STT API 키",
+      requestOptions
+    ),
+    sttModel: sttModelName(
+      overrides.sttModel || baseConfig.sttModel,
+      { httpStatus: 400 }
+    ),
+    upstageApiKey: providerApiKey(
+      overrides.upstageApiKey || baseConfig.upstageApiKey,
+      "Upstage API 키",
+      requestOptions
+    )
   };
 }
 

@@ -118,6 +118,11 @@ const elements = Object.fromEntries([
   "add-cue-top",
   "caption-agent-endpoint",
   "caption-agent-token",
+  "caption-stt-endpoint",
+  "caption-stt-model",
+  "caption-stt-api-key",
+  "caption-upstage-api-key",
+  "clear-caption-provider-keys",
   "caption-model",
   "test-caption-agent",
   "caption-agent-warning",
@@ -980,16 +985,19 @@ function renderHeader() {
   if (elements.project_name.value !== project.name && document.activeElement !== elements.project_name) {
     elements.project_name.value = project.name;
   }
-  const sourceType = String(project.source?.contentType || "CHZZK").toUpperCase();
-  elements.source_kind.textContent = sourceType === "UNKNOWN" ? "CHZZK" : sourceType;
+  const sourcePlatform = String(project.source?.platform || "CHZZK").toUpperCase();
+  const sourceType = String(project.source?.contentType || "UNKNOWN").toUpperCase();
+  elements.source_kind.textContent = sourceType === "UNKNOWN"
+    ? sourcePlatform
+    : `${sourcePlatform} · ${sourceType}`;
   elements.source_title.textContent = [
     project.source?.streamerName,
     project.source?.broadcastTitle
-  ].filter(Boolean).join(" · ") || "치지직 프로젝트";
+  ].filter(Boolean).join(" · ") || "키리누키 프로젝트";
   elements.source_link_state.classList.toggle("connected", sourceBindingConnected);
   elements.source_link_state.title = sourceBindingConnected
-    ? "원래 치지직 탭과 연결됨"
-    : "원래 치지직 탭을 찾지 못함";
+    ? "원래 영상 탭과 연결됨"
+    : "원래 영상 탭을 찾지 못함";
   elements.undo.disabled = undoStack.length === 0;
   elements.redo.disabled = redoStack.length === 0;
   elements.export_video.disabled = !mediaFile || !project.clips.some((clip) => clip.enabled !== false);
@@ -3162,7 +3170,7 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
     await seekTimeline(project.playheadMs || 0);
     const overrun = clipOutsideMedia(project);
     if (overrun) {
-      showToast("선택 구간 일부가 연결한 원본 길이 밖에 있습니다. 라이브↔VOD 정렬값을 확인해 주세요.", "error", 7000);
+      showToast("선택 구간 일부가 연결한 원본 길이 밖에 있습니다. 페이지↔로컬 정렬값을 확인해 주세요.", "error", 7000);
     } else {
       showToast("원본 영상을 연결했습니다.", "success");
     }
@@ -3189,7 +3197,13 @@ function readCaptionAgentConfig() {
   return {
     endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
     token: elements.caption_agent_token.value,
-    model: elements.caption_model.value
+    model: elements.caption_model.value,
+    providerConfig: {
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value,
+      sttApiKey: elements.caption_stt_api_key.value,
+      upstageApiKey: elements.caption_upstage_api_key.value
+    }
   };
 }
 
@@ -3201,10 +3215,22 @@ async function prepareCaptionAgentConfig() {
   }
   captionAgentSettings = await saveCaptionAgentSettings({
     endpoint: config.endpoint,
-    model: config.model
+    model: config.model,
+    sttEndpoint: config.providerConfig.sttEndpoint,
+    sttModel: config.providerConfig.sttModel
   });
   elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
-  return { ...config, ...captionAgentSettings };
+  elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+  elements.caption_stt_model.value = captionAgentSettings.sttModel;
+  return {
+    ...config,
+    ...captionAgentSettings,
+    providerConfig: {
+      ...config.providerConfig,
+      sttEndpoint: captionAgentSettings.sttEndpoint,
+      sttModel: captionAgentSettings.sttModel
+    }
+  };
 }
 
 async function testCaptionAgentConnection() {
@@ -3222,7 +3248,14 @@ async function testCaptionAgentConnection() {
     });
     const provider = result.provider ? ` · ${result.provider}` : "";
     const model = result.model || result.defaultModel || config.model;
-    showToast(`자막 에이전트 연결 확인 완료${provider} · ${model}`, "success", 5200);
+    const readiness = result.configured?.ready === false
+      ? " · STT/Upstage 설정 미완료"
+      : "";
+    showToast(
+      `자막 에이전트 연결 확인 완료${provider} · ${model}${readiness}`,
+      result.configured?.ready === false ? "error" : "success",
+      result.configured?.ready === false ? 0 : 5200
+    );
   } catch (error) {
     const canceled = error.name === "AbortError";
     showToast(
@@ -3286,7 +3319,7 @@ async function generateCaptions() {
     }
     return;
   }
-  const { endpoint, token, model } = config;
+  const { endpoint, token, model, providerConfig } = config;
   const undoSnapshot = cloneProject(project);
   let undoRecorded = false;
   let reviewRequiredCount = 0;
@@ -3376,6 +3409,7 @@ async function generateCaptions() {
       const result = await requestCaptionAgent({
         endpoint,
         token,
+        providerConfig,
         request,
         signal: controller.signal,
         onProgress: (progress, label) => {
@@ -3808,7 +3842,7 @@ async function focusSourceTab({ seek = false } = {}) {
         : null
     });
     if (!response?.ok) {
-      throw new Error(response?.error || "원래 치지직 탭을 찾지 못했습니다.");
+      throw new Error(response?.error || "원래 영상 탭을 찾지 못했습니다.");
     }
     sourceBindingConnected = true;
     renderHeader();
@@ -4567,7 +4601,9 @@ function bindActions() {
     });
     void saveCaptionAgentSettings({
       endpoint: elements.caption_agent_endpoint.value,
-      model: elements.caption_model.value
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
     }).catch((error) => {
       showToast(`자막 에이전트 설정 저장 실패: ${error.message}`, "error", 0);
     });
@@ -4584,12 +4620,37 @@ function bindActions() {
     }
     void saveCaptionAgentSettings({
       endpoint: elements.caption_agent_endpoint.value,
-      model: elements.caption_model.value
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
     }).then((settings) => {
       captionAgentSettings = settings;
     }).catch((error) => {
       showToast(`자막 에이전트 설정 저장 실패: ${error.message}`, "error", 0);
     });
+  });
+  const persistProviderSettings = () => {
+    void saveCaptionAgentSettings({
+      endpoint: elements.caption_agent_endpoint.value,
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
+    }).then((settings) => {
+      captionAgentSettings = settings;
+      elements.caption_stt_endpoint.value = settings.sttEndpoint;
+      elements.caption_stt_model.value = settings.sttModel;
+    }).catch((error) => {
+      showToast(`STT 설정 저장 실패: ${error.message}`, "error", 0);
+      elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+      elements.caption_stt_model.value = captionAgentSettings.sttModel;
+    });
+  };
+  elements.caption_stt_endpoint.addEventListener("change", persistProviderSettings);
+  elements.caption_stt_model.addEventListener("change", persistProviderSettings);
+  elements.clear_caption_provider_keys.addEventListener("click", () => {
+    elements.caption_stt_api_key.value = "";
+    elements.caption_upstage_api_key.value = "";
+    showToast("현재 편집기 탭에 입력한 API 키를 지웠습니다.", "success");
   });
   elements.cancel_job.addEventListener("click", cancelActiveJob);
   elements.job_dialog.addEventListener("cancel", (event) => {
@@ -4829,6 +4890,8 @@ async function initialize() {
   }
   elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
   elements.caption_model.value = captionAgentSettings.model;
+  elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+  elements.caption_stt_model.value = captionAgentSettings.sttModel;
   const { projectId, captureState } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;

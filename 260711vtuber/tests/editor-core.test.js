@@ -93,6 +93,50 @@ test("생방송과 다시보기는 채널·방송 시작 시각이 같으면 같
   assert.equal(vod, live);
 });
 
+test("YouTube URL 형식은 같은 영상 ID로 연결하고 치지직 ID와는 충돌하지 않는다", () => {
+  const youtubeWatch = {
+    platform: "YOUTUBE",
+    contentType: "vod",
+    contentId: "abcdefghijk",
+    canonicalUrl: "https://www.youtube.com/watch?v=abcdefghijk"
+  };
+  const youtubeShort = {
+    ...youtubeWatch,
+    canonicalUrl: "https://www.youtube.com/shorts/abcdefghijk",
+    channelId: "UC-test-channel",
+    broadcastStartedAt: "2026-07-29T00:00:00Z"
+  };
+  const chzzk = {
+    platform: "CHZZK",
+    contentType: "vod",
+    contentId: "abcdefghijk",
+    canonicalUrl: "https://chzzk.naver.com/video/abcdefghijk"
+  };
+  assert.equal(
+    sourceSessionIdentity(youtubeWatch),
+    "youtube:vod:abcdefghijk"
+  );
+  assert.equal(
+    sourceSessionIdentity(youtubeWatch),
+    sourceSessionIdentity(youtubeShort)
+  );
+  assert.equal(sourceSessionIdentity(chzzk), "vod:abcdefghijk");
+  assert.notEqual(
+    sourceSessionIdentity(youtubeWatch),
+    sourceSessionIdentity(chzzk)
+  );
+
+  const project = createEditorProjectFromCapture({
+    ...captureState,
+    source: youtubeWatch
+  });
+  assert.equal(project.broadcastSession.alignmentConfirmed, true);
+  assert.equal(
+    project.broadcastSession.vodUrl,
+    youtubeWatch.canonicalUrl
+  );
+});
+
 test("저장 전 시작 스탬프도 다른 방송의 끝 스탬프와 섞이지 않는다", () => {
   const withDraftStart = {
     ...captureState,

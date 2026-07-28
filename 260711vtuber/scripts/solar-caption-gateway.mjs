@@ -15,12 +15,19 @@ import {
 import {
   CaptionGatewayError,
   resolveCaptionPipelineConfig,
+  resolveCaptionPipelineRequestConfig,
   runCaptionPipeline
 } from "../src/caption-agent/solar-gateway-core.js";
 
 export const CAPTION_AGENT_CAPABILITY_SCHEMA_ID =
   "chzzk-kirinuki-caption-agent/capability-v1";
 export const DEFAULT_CAPTION_GATEWAY_PORT = 4319;
+export const CAPTION_PROVIDER_REQUEST_HEADERS = Object.freeze({
+  sttEndpoint: "x-kirinuki-stt-endpoint",
+  sttModel: "x-kirinuki-stt-model",
+  sttApiKey: "x-kirinuki-stt-api-key",
+  upstageApiKey: "x-kirinuki-upstage-api-key"
+});
 
 function requiredServerValue(value, name) {
   const normalized = String(value || "").trim();
@@ -34,7 +41,9 @@ function requiredServerValue(value, name) {
 }
 
 export function resolveCaptionGatewayConfig(env = process.env) {
-  const pipeline = resolveCaptionPipelineConfig(env);
+  const pipeline = resolveCaptionPipelineConfig(env, {
+    allowMissingProviderConfig: true
+  });
   const allowedOrigin = requiredServerValue(
     env.KIRINUKI_ALLOWED_ORIGIN,
     "KIRINUKI_ALLOWED_ORIGIN"
@@ -97,7 +106,15 @@ function setCorsHeaders(response, origin, allowedOrigin) {
   response.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
   response.setHeader(
     "access-control-allow-headers",
-    "Authorization, Content-Type, X-Kirinuki-Protocol"
+    [
+      "Authorization",
+      "Content-Type",
+      "X-Kirinuki-Protocol",
+      "X-Kirinuki-STT-Endpoint",
+      "X-Kirinuki-STT-Model",
+      "X-Kirinuki-STT-API-Key",
+      "X-Kirinuki-Upstage-API-Key"
+    ].join(", ")
   );
   response.setHeader("access-control-max-age", "600");
   response.setHeader("vary", "Origin");
@@ -167,23 +184,98 @@ function safeError(error) {
   };
 }
 
-function capabilityResponse(config) {
+function requestHeader(request, name, maxLength) {
+  const distinctValues = request.headersDistinct?.[name];
+  if (Array.isArray(distinctValues) && distinctValues.length > 1) {
+    throw new CaptionGatewayError("중복된 제공자 설정 헤더를 사용할 수 없습니다.", {
+      code: "INVALID_CONFIGURATION",
+      httpStatus: 400
+    });
+  }
+  const raw = request.headers[name];
+  if (Array.isArray(raw)) {
+    throw new CaptionGatewayError("중복된 제공자 설정 헤더를 사용할 수 없습니다.", {
+      code: "INVALID_CONFIGURATION",
+      httpStatus: 400
+    });
+  }
+  const value = String(raw || "").trim();
+  if (
+    value.length > maxLength
+    || /[\r\n]/u.test(value)
+  ) {
+    throw new CaptionGatewayError("제공자 설정 헤더가 올바르지 않습니다.", {
+      code: "INVALID_CONFIGURATION",
+      httpStatus: 400
+    });
+  }
+  return value;
+}
+
+function providerOverrides(request) {
+  return {
+    sttEndpoint: requestHeader(
+      request,
+      CAPTION_PROVIDER_REQUEST_HEADERS.sttEndpoint,
+      2_048
+    ),
+    sttModel: requestHeader(
+      request,
+      CAPTION_PROVIDER_REQUEST_HEADERS.sttModel,
+      160
+    ),
+    sttApiKey: requestHeader(
+      request,
+      CAPTION_PROVIDER_REQUEST_HEADERS.sttApiKey,
+      4_096
+    ),
+    upstageApiKey: requestHeader(
+      request,
+      CAPTION_PROVIDER_REQUEST_HEADERS.upstageApiKey,
+      4_096
+    )
+  };
+}
+
+function providerReadiness(baseConfig, overrides) {
+  const configured = {
+    sttEndpoint: Boolean(overrides.sttEndpoint || baseConfig.sttEndpoint),
+    sttApiKey: Boolean(overrides.sttApiKey || baseConfig.sttApiKey),
+    upstageApiKey: Boolean(
+      overrides.upstageApiKey || baseConfig.upstageApiKey
+    )
+  };
+  return {
+    ...configured,
+    ready: Object.values(configured).every(Boolean)
+  };
+}
+
+function capabilityResponse(config, overrides) {
+  const configured = providerReadiness(config.pipeline, overrides);
+  const effectivePipeline = configured.ready
+    ? resolveCaptionPipelineRequestConfig(config.pipeline, overrides)
+    : {
+      ...config.pipeline,
+      sttModel: overrides.sttModel || config.pipeline.sttModel
+    };
   return {
     schema: CAPTION_AGENT_CAPABILITY_SCHEMA_ID,
     status: "ok",
     provider: "upstage",
     models: {
-      stt: config.pipeline.sttModel,
-      captions: config.pipeline.solarModel
+      stt: effectivePipeline.sttModel,
+      captions: effectivePipeline.solarModel
     },
-    model: config.pipeline.solarModel,
-    defaultModel: config.pipeline.solarModel,
+    model: effectivePipeline.solarModel,
+    defaultModel: effectivePipeline.solarModel,
     requestSchema: CAPTION_AGENT_REQUEST_SCHEMA_ID,
     responseSchema: CAPTION_AGENT_RESPONSE_SCHEMA_ID,
     maxCueDurationMs: MAX_CAPTION_CUE_DURATION_MS,
     maxClipDurationMs: MAX_CLIP_DURATION_MS,
-    maxAudioBytes: config.pipeline.maxAudioBytes,
-    pipelineTimeoutMs: config.pipeline.pipelineTimeoutMs
+    maxAudioBytes: effectivePipeline.maxAudioBytes,
+    pipelineTimeoutMs: effectivePipeline.pipelineTimeoutMs,
+    configured
   };
 }
 
@@ -237,7 +329,18 @@ export function createSolarCaptionGatewayServer({
       return;
     }
     if (request.method === "GET") {
-      sendJson(response, 200, capabilityResponse(config));
+      try {
+        sendJson(
+          response,
+          200,
+          capabilityResponse(config, providerOverrides(request))
+        );
+      } catch (error) {
+        const safe = safeError(error);
+        sendJson(response, safe.status, {
+          error: { code: safe.code, message: safe.message }
+        });
+      }
       return;
     }
 
@@ -256,10 +359,14 @@ export function createSolarCaptionGatewayServer({
       }
     });
     try {
+      const pipelineConfig = resolveCaptionPipelineRequestConfig(
+        config.pipeline,
+        providerOverrides(request)
+      );
       const body = await readJsonRequest(request, config.maxBodyBytes);
       const result = await pipelineRunner(body, {
         fetchImpl,
-        ...config.pipeline,
+        ...pipelineConfig,
         signal: pipelineController.signal
       });
       if (!pipelineController.signal.aborted) {

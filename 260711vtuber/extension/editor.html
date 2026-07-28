@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>CHZZK Kirinuki Studio</title>
+    <title>CHZZK + YouTube Kirinuki Studio</title>
     <link rel="stylesheet" href="editor/editor.css">
   </head>
   <body>
@@ -15,7 +15,7 @@
             <span></span><span></span>
           </div>
           <div>
-            <p>CHZZK KIRINUKI</p>
+            <p>CHZZK + YOUTUBE KIRINUKI</p>
             <h1>Cut & Caption Studio</h1>
           </div>
         </div>
@@ -25,7 +25,7 @@
           <div class="source-status">
             <span id="source-kind" class="pill">CHZZK</span>
             <span id="source-title">소스 불러오는 중</span>
-            <span id="source-link-state" class="connection-dot" title="치지직 탭 연결 상태"></span>
+            <span id="source-link-state" class="connection-dot" title="원본 영상 탭 연결 상태"></span>
           </div>
         </div>
 
@@ -83,21 +83,21 @@
 
           <div class="alignment-card">
             <label for="source-offset">
-              <span>라이브 ↔ 로컬 VOD 정렬</span>
+              <span>페이지 시각 ↔ 로컬 원본 정렬</span>
               <span class="alignment-input">
                 <input id="source-offset" type="number" step="0.001" value="0" inputmode="decimal">
                 <em>초</em>
               </span>
             </label>
             <button id="apply-source-offset" type="button">적용</button>
-            <p>로컬 원본 시각 = 치지직 선택 시각 + 오프셋</p>
+            <p>로컬 원본 시각 = 페이지에서 찍은 시각 + 오프셋</p>
           </div>
 
           <div id="clip-list" class="clip-list"></div>
 
           <button id="focus-source" class="source-jump" type="button">
             <span class="connection-dot"></span>
-            원래 치지직 탭으로 돌아가기
+            원래 영상 탭으로 돌아가기
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
           </button>
         </aside>
@@ -189,6 +189,28 @@
               <span>세션 연결 토큰</span>
               <input id="caption-agent-token" type="password" autocomplete="off" spellcheck="false" placeholder="익스텐션이나 프로젝트에는 저장하지 않음">
             </label>
+            <details class="caption-agent-policy caption-provider-settings">
+              <summary>STT·Upstage API 키 직접 입력 <em>현재 탭에서만</em></summary>
+              <div class="caption-provider-fields">
+                <label class="select-field">
+                  <span>STT API 주소</span>
+                  <input id="caption-stt-endpoint" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://제공자/v1/audio/transcriptions">
+                </label>
+                <label class="select-field">
+                  <span>STT 모델명</span>
+                  <input id="caption-stt-model" type="text" autocomplete="off" spellcheck="false" placeholder="제공자의 타임스탬프 지원 모델">
+                </label>
+                <label class="select-field">
+                  <span>STT API 키</span>
+                  <input id="caption-stt-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="로컬 companion으로만 전달">
+                </label>
+                <label class="select-field">
+                  <span>Upstage API 키</span>
+                  <input id="caption-upstage-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Solar 자막 정리용">
+                </label>
+                <button id="clear-caption-provider-keys" class="small-action caption-provider-clear" type="button">입력한 API 키 지우기</button>
+              </div>
+            </details>
             <div class="caption-agent-row">
               <label class="select-field">
                 <span>Solar 모델</span>
@@ -214,8 +236,9 @@
               음성과 프로젝트 식별자·이름, 스트리머명·각 컷 메모가 companion으로 차례로
               전송됩니다. 대표 프레임은 이 기기 안에서만 분석하고 픽셀 대신 시간별
               top·center·bottom 방해도 점수만 companion과 Upstage에 보냅니다. 음성은 외부
-              STT에, 전사문과 이름·메모 문맥은 Upstage에 전달되며 API 키는 companion만
-              보관합니다.
+              STT에, 전사문과 이름·메모 문맥은 Upstage에 전달됩니다. 위에서 직접 입력한
+              API 키는 프로젝트·임시저장·Chrome 저장소에 기록하지 않고 현재 편집기 탭의
+              메모리에서 인증된 로컬 companion으로만 전달합니다.
             </p>
             <button id="generate-captions" class="button ai-button" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M8 7v10M4 10v4M16 6v12M20 9v6"/></svg>

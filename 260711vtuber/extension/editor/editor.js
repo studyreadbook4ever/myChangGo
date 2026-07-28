@@ -152,18 +152,23 @@ function normalizeMediaAsset(raw) {
   };
 }
 function sourceSessionIdentity(source = {}) {
+  const platform = String(source.platform ?? "CHZZK").trim().toUpperCase() || "CHZZK";
+  const platformPrefix = platform === "CHZZK" ? "" : `${platform.toLowerCase()}:`;
   const channelId = String(source.channelId ?? "").trim();
   const startedAt = String(source.broadcastStartedAt ?? "").trim();
   const contentId = String(source.contentId ?? "").trim();
   const contentType = String(source.contentType ?? "unknown").trim();
+  if (platform !== "CHZZK" && contentId) {
+    return `${platformPrefix}${contentType}:${contentId}`;
+  }
   if (channelId && startedAt) {
-    return `broadcast:${channelId}:${startedAt}`;
+    return `${platformPrefix}broadcast:${channelId}:${startedAt}`;
   }
   if (contentId) {
-    return `${contentType}:${contentId}`;
+    return `${platformPrefix}${contentType}:${contentId}`;
   }
   if (channelId) {
-    return `${contentType}:${channelId}`;
+    return `${platformPrefix}${contentType}:${channelId}`;
   }
   return String(source.canonicalUrl || source.url || "").trim();
 }
@@ -33198,11 +33203,22 @@ var MAX_CAPTION_AGENT_RESPONSE_BYTES = 8 * 1024 * 1024;
 var MAX_CAPTION_AGENT_CLIP_DURATION_MS = 30 * 60 * 1e3;
 var MAX_CAPTION_AGENT_WAV_BYTES = 64 * 1024 * 1024;
 var CAPTION_AGENT_SAMPLE_RATE_HZ = 16e3;
+var MAX_PROVIDER_CREDENTIAL_LENGTH = 4096;
+var MAX_STT_ENDPOINT_LENGTH = 2048;
+var MAX_STT_MODEL_LENGTH = 160;
 var CAPTION_PLACEMENT_ANALYSIS2 = "local-three-band-edge-density-v1";
 var MAX_CAPTION_PLACEMENT_SAMPLES = 9;
+var CAPTION_AGENT_PROVIDER_HEADERS = Object.freeze({
+  sttEndpoint: "X-Kirinuki-STT-Endpoint",
+  sttModel: "X-Kirinuki-STT-Model",
+  sttApiKey: "X-Kirinuki-STT-API-Key",
+  upstageApiKey: "X-Kirinuki-Upstage-API-Key"
+});
 var DEFAULT_CAPTION_AGENT_SETTINGS = Object.freeze({
   endpoint: "http://127.0.0.1:4319/v1/captions",
-  model: "solar-pro3"
+  model: "solar-pro3",
+  sttEndpoint: "",
+  sttModel: ""
 });
 var ALLOWED_SOLAR_MODELS = /* @__PURE__ */ new Set([
   "solar-pro3",
@@ -33223,6 +33239,85 @@ function clamp3(value, minimum, maximum) {
 }
 function isLoopbackHostname(hostname) {
   return hostname === "127.0.0.1" || hostname === "localhost";
+}
+function isLoopbackAgentEndpoint(value) {
+  const url2 = new URL(normalizeCaptionAgentEndpoint(value));
+  return url2.protocol === "http:" && isLoopbackHostname(url2.hostname);
+}
+function normalizeExternalSttEndpoint(value) {
+  const input = String(value || "").trim();
+  if (!input) {
+    return "";
+  }
+  if (input.length > MAX_STT_ENDPOINT_LENGTH) {
+    throw new Error("STT API \uC8FC\uC18C\uAC00 \uD5C8\uC6A9 \uAE38\uC774\uB97C \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
+  }
+  let url2;
+  try {
+    url2 = new URL(input);
+  } catch {
+    throw new Error("STT API \uC8FC\uC18C\uAC00 \uC62C\uBC14\uB978 URL\uC774 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  if (url2.username || url2.password || url2.search || url2.hash) {
+    throw new Error(
+      "STT API \uC8FC\uC18C\uC5D0 \uC778\uC99D \uC815\uBCF4\xB7\uCFFC\uB9AC \uBB38\uC790\uC5F4\xB7# \uC870\uAC01\uC744 \uB123\uC9C0 \uB9C8\uC138\uC694."
+    );
+  }
+  const secureRemote = url2.protocol === "https:";
+  const localHttp = url2.protocol === "http:" && isLoopbackHostname(url2.hostname);
+  if (!secureRemote && !localHttp) {
+    throw new Error("STT API \uC8FC\uC18C\uB294 HTTPS \uB610\uB294 loopback HTTP\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
+  }
+  return url2.toString();
+}
+function normalizeProviderSecret(value, label) {
+  const secret = String(value || "").trim();
+  if (!secret) {
+    return "";
+  }
+  if (secret.length > MAX_PROVIDER_CREDENTIAL_LENGTH || /[\r\n]/u.test(secret)) {
+    throw new Error(`${label} \uD615\uC2DD\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+  }
+  return secret;
+}
+function normalizeSttModel(value) {
+  const model = String(value || "").trim();
+  if (!model) {
+    return "";
+  }
+  if (model.length > MAX_STT_MODEL_LENGTH || /[\u0000-\u001f\u007f]/u.test(model)) {
+    throw new Error("STT \uBAA8\uB378\uBA85\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  return model;
+}
+function normalizeCaptionProviderConfig(raw = {}) {
+  return {
+    sttEndpoint: normalizeExternalSttEndpoint(raw.sttEndpoint),
+    sttModel: normalizeSttModel(raw.sttModel),
+    sttApiKey: normalizeProviderSecret(raw.sttApiKey, "STT API \uD0A4"),
+    upstageApiKey: normalizeProviderSecret(
+      raw.upstageApiKey,
+      "Upstage API \uD0A4"
+    )
+  };
+}
+function captionProviderHeaders(endpoint, raw = {}) {
+  const provider = normalizeCaptionProviderConfig(raw);
+  const supplied = Object.values(provider).some(Boolean);
+  if (!supplied) {
+    return {};
+  }
+  if (!isLoopbackAgentEndpoint(endpoint)) {
+    throw new Error(
+      "STT\xB7Upstage API \uD0A4\uC640 \uC81C\uACF5\uC790 \uC124\uC815\uC740 \uB85C\uCEEC companion \uC8FC\uC18C\uB85C\uB9CC \uC804\uB2EC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(provider).filter(([, value]) => value).map(([field, value]) => [
+      CAPTION_AGENT_PROVIDER_HEADERS[field],
+      value
+    ])
+  );
 }
 function normalizeCaptionAgentEndpoint(value) {
   let url2;
@@ -33257,7 +33352,17 @@ function normalizeCaptionAgentSettings(raw = {}) {
     );
   } catch {
   }
-  return { endpoint, model };
+  let sttEndpoint = "";
+  try {
+    sttEndpoint = normalizeExternalSttEndpoint(raw.sttEndpoint);
+  } catch {
+  }
+  let sttModel = "";
+  try {
+    sttModel = normalizeSttModel(raw.sttModel);
+  } catch {
+  }
+  return { endpoint, model, sttEndpoint, sttModel };
 }
 async function loadCaptionAgentSettings(storageArea = chrome.storage.local) {
   const stored = await storageArea.get(CAPTION_AGENT_SETTINGS_KEY);
@@ -33266,7 +33371,9 @@ async function loadCaptionAgentSettings(storageArea = chrome.storage.local) {
 async function saveCaptionAgentSettings(settings, storageArea = chrome.storage.local) {
   const normalized = normalizeCaptionAgentSettings({
     ...settings,
-    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint)
+    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint),
+    sttEndpoint: normalizeExternalSttEndpoint(settings?.sttEndpoint),
+    sttModel: normalizeSttModel(settings?.sttModel)
   });
   await storageArea.set({ [CAPTION_AGENT_SETTINGS_KEY]: normalized });
   return normalized;
@@ -33718,6 +33825,7 @@ function assertSafeStatusUrl(statusUrl, endpoint) {
 async function requestCaptionAgent({
   endpoint,
   token,
+  providerConfig,
   request,
   signal,
   fetchImpl = fetch,
@@ -33738,7 +33846,8 @@ async function requestCaptionAgent({
     throwIfAborted2(requestSignal);
     const headers = {
       "Content-Type": "application/json",
-      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA
+      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
+      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
     };
     if (String(token || "").trim()) {
       headers.Authorization = `Bearer ${String(token).trim()}`;
@@ -33799,6 +33908,7 @@ async function requestCaptionAgent({
 async function probeCaptionAgent({
   endpoint,
   token,
+  providerConfig,
   signal,
   fetchImpl = fetch,
   timeoutMs = CAPTION_AGENT_PROBE_TIMEOUT_MS
@@ -33808,7 +33918,8 @@ async function probeCaptionAgent({
   const deadline = createDeadlineSignal(signal, timeoutMs);
   try {
     const headers = {
-      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA
+      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
+      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
     };
     if (String(token || "").trim()) {
       headers.Authorization = `Bearer ${String(token).trim()}`;
@@ -33873,6 +33984,11 @@ var elements = Object.fromEntries([
   "add-cue-top",
   "caption-agent-endpoint",
   "caption-agent-token",
+  "caption-stt-endpoint",
+  "caption-stt-model",
+  "caption-stt-api-key",
+  "caption-upstage-api-key",
+  "clear-caption-provider-keys",
   "caption-model",
   "test-caption-agent",
   "caption-agent-warning",
@@ -34627,14 +34743,15 @@ function renderHeader() {
   if (elements.project_name.value !== project.name && document.activeElement !== elements.project_name) {
     elements.project_name.value = project.name;
   }
-  const sourceType = String(project.source?.contentType || "CHZZK").toUpperCase();
-  elements.source_kind.textContent = sourceType === "UNKNOWN" ? "CHZZK" : sourceType;
+  const sourcePlatform = String(project.source?.platform || "CHZZK").toUpperCase();
+  const sourceType = String(project.source?.contentType || "UNKNOWN").toUpperCase();
+  elements.source_kind.textContent = sourceType === "UNKNOWN" ? sourcePlatform : `${sourcePlatform} \xB7 ${sourceType}`;
   elements.source_title.textContent = [
     project.source?.streamerName,
     project.source?.broadcastTitle
-  ].filter(Boolean).join(" \xB7 ") || "\uCE58\uC9C0\uC9C1 \uD504\uB85C\uC81D\uD2B8";
+  ].filter(Boolean).join(" \xB7 ") || "\uD0A4\uB9AC\uB204\uD0A4 \uD504\uB85C\uC81D\uD2B8";
   elements.source_link_state.classList.toggle("connected", sourceBindingConnected);
-  elements.source_link_state.title = sourceBindingConnected ? "\uC6D0\uB798 \uCE58\uC9C0\uC9C1 \uD0ED\uACFC \uC5F0\uACB0\uB428" : "\uC6D0\uB798 \uCE58\uC9C0\uC9C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD568";
+  elements.source_link_state.title = sourceBindingConnected ? "\uC6D0\uB798 \uC601\uC0C1 \uD0ED\uACFC \uC5F0\uACB0\uB428" : "\uC6D0\uB798 \uC601\uC0C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD568";
   elements.undo.disabled = undoStack.length === 0;
   elements.redo.disabled = redoStack.length === 0;
   elements.export_video.disabled = !mediaFile || !project.clips.some((clip) => clip.enabled !== false);
@@ -36576,7 +36693,7 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
     await seekTimeline(project.playheadMs || 0);
     const overrun = clipOutsideMedia(project);
     if (overrun) {
-      showToast("\uC120\uD0DD \uAD6C\uAC04 \uC77C\uBD80\uAC00 \uC5F0\uACB0\uD55C \uC6D0\uBCF8 \uAE38\uC774 \uBC16\uC5D0 \uC788\uC2B5\uB2C8\uB2E4. \uB77C\uC774\uBE0C\u2194VOD \uC815\uB82C\uAC12\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error", 7e3);
+      showToast("\uC120\uD0DD \uAD6C\uAC04 \uC77C\uBD80\uAC00 \uC5F0\uACB0\uD55C \uC6D0\uBCF8 \uAE38\uC774 \uBC16\uC5D0 \uC788\uC2B5\uB2C8\uB2E4. \uD398\uC774\uC9C0\u2194\uB85C\uCEEC \uC815\uB82C\uAC12\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error", 7e3);
     } else {
       showToast("\uC6D0\uBCF8 \uC601\uC0C1\uC744 \uC5F0\uACB0\uD588\uC2B5\uB2C8\uB2E4.", "success");
     }
@@ -36602,7 +36719,13 @@ function readCaptionAgentConfig() {
   return {
     endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
     token: elements.caption_agent_token.value,
-    model: elements.caption_model.value
+    model: elements.caption_model.value,
+    providerConfig: {
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value,
+      sttApiKey: elements.caption_stt_api_key.value,
+      upstageApiKey: elements.caption_upstage_api_key.value
+    }
   };
 }
 async function prepareCaptionAgentConfig() {
@@ -36613,10 +36736,22 @@ async function prepareCaptionAgentConfig() {
   }
   captionAgentSettings = await saveCaptionAgentSettings({
     endpoint: config.endpoint,
-    model: config.model
+    model: config.model,
+    sttEndpoint: config.providerConfig.sttEndpoint,
+    sttModel: config.providerConfig.sttModel
   });
   elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
-  return { ...config, ...captionAgentSettings };
+  elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+  elements.caption_stt_model.value = captionAgentSettings.sttModel;
+  return {
+    ...config,
+    ...captionAgentSettings,
+    providerConfig: {
+      ...config.providerConfig,
+      sttEndpoint: captionAgentSettings.sttEndpoint,
+      sttModel: captionAgentSettings.sttModel
+    }
+  };
 }
 async function testCaptionAgentConnection() {
   if (activeJobController || projectMutationLockCount > 0) {
@@ -36633,7 +36768,12 @@ async function testCaptionAgentConnection() {
     });
     const provider = result.provider ? ` \xB7 ${result.provider}` : "";
     const model = result.model || result.defaultModel || config.model;
-    showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC5F0\uACB0 \uD655\uC778 \uC644\uB8CC${provider} \xB7 ${model}`, "success", 5200);
+    const readiness = result.configured?.ready === false ? " \xB7 STT/Upstage \uC124\uC815 \uBBF8\uC644\uB8CC" : "";
+    showToast(
+      `\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC5F0\uACB0 \uD655\uC778 \uC644\uB8CC${provider} \xB7 ${model}${readiness}`,
+      result.configured?.ready === false ? "error" : "success",
+      result.configured?.ready === false ? 0 : 5200
+    );
   } catch (error) {
     const canceled = error.name === "AbortError";
     showToast(
@@ -36695,7 +36835,7 @@ async function generateCaptions() {
     }
     return;
   }
-  const { endpoint, token, model } = config;
+  const { endpoint, token, model, providerConfig } = config;
   const undoSnapshot = cloneProject(project);
   let undoRecorded = false;
   let reviewRequiredCount = 0;
@@ -36784,6 +36924,7 @@ async function generateCaptions() {
       const result = await requestCaptionAgent({
         endpoint,
         token,
+        providerConfig,
         request,
         signal: controller.signal,
         onProgress: (progress, label) => {
@@ -37174,7 +37315,7 @@ async function focusSourceTab({ seek = false } = {}) {
       sourceSeconds: mapping ? (mapping.sourceMs - (project.broadcastSession?.alignmentOffsetMs || 0)) / 1e3 : null
     });
     if (!response?.ok) {
-      throw new Error(response?.error || "\uC6D0\uB798 \uCE58\uC9C0\uC9C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+      throw new Error(response?.error || "\uC6D0\uB798 \uC601\uC0C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
     }
     sourceBindingConnected = true;
     renderHeader();
@@ -37903,7 +38044,9 @@ function bindActions() {
     });
     void saveCaptionAgentSettings({
       endpoint: elements.caption_agent_endpoint.value,
-      model: elements.caption_model.value
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
     }).catch((error) => {
       showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
     });
@@ -37920,12 +38063,37 @@ function bindActions() {
     }
     void saveCaptionAgentSettings({
       endpoint: elements.caption_agent_endpoint.value,
-      model: elements.caption_model.value
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
     }).then((settings) => {
       captionAgentSettings = settings;
     }).catch((error) => {
       showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
     });
+  });
+  const persistProviderSettings = () => {
+    void saveCaptionAgentSettings({
+      endpoint: elements.caption_agent_endpoint.value,
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
+    }).then((settings) => {
+      captionAgentSettings = settings;
+      elements.caption_stt_endpoint.value = settings.sttEndpoint;
+      elements.caption_stt_model.value = settings.sttModel;
+    }).catch((error) => {
+      showToast(`STT \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
+      elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+      elements.caption_stt_model.value = captionAgentSettings.sttModel;
+    });
+  };
+  elements.caption_stt_endpoint.addEventListener("change", persistProviderSettings);
+  elements.caption_stt_model.addEventListener("change", persistProviderSettings);
+  elements.clear_caption_provider_keys.addEventListener("click", () => {
+    elements.caption_stt_api_key.value = "";
+    elements.caption_upstage_api_key.value = "";
+    showToast("\uD604\uC7AC \uD3B8\uC9D1\uAE30 \uD0ED\uC5D0 \uC785\uB825\uD55C API \uD0A4\uB97C \uC9C0\uC6E0\uC2B5\uB2C8\uB2E4.", "success");
   });
   elements.cancel_job.addEventListener("click", cancelActiveJob);
   elements.job_dialog.addEventListener("cancel", (event) => {
@@ -38157,6 +38325,8 @@ async function initialize() {
   }
   elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
   elements.caption_model.value = captionAgentSettings.model;
+  elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+  elements.caption_stt_model.value = captionAgentSettings.sttModel;
   const { projectId, captureState } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;

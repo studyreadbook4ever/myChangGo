@@ -19,6 +19,11 @@ import {
   captureStateSourceConflict,
   sourceSessionIdentity
 } from "./lib/editor-core.js";
+import {
+  SOURCE_PLATFORM_YOUTUBE,
+  isSupportedSourceUrl,
+  sourcePlatformLabel
+} from "./lib/source-platform.js";
 
 const elements = {
   connectionBadge: document.querySelector("#connection-badge"),
@@ -412,7 +417,7 @@ function sourceIdentity(source) {
 
 function contextAsSource(context) {
   return {
-    platform: "CHZZK",
+    platform: context.platform || "CHZZK",
     url: context.url || "",
     canonicalUrl: context.canonicalUrl || context.url || "",
     channelId: context.channelId || "",
@@ -473,7 +478,8 @@ function renderSource() {
   }
 
   const type = String(currentContext.contentType || "unknown").toUpperCase();
-  elements.sourceType.textContent = type;
+  const platformLabel = sourcePlatformLabel(currentContext.platform);
+  elements.sourceType.textContent = `${platformLabel} · ${type}`;
   elements.sourceType.className = `badge ${type === "LIVE" ? "badge-live" : "badge-vod"}`;
 
   const player = currentContext.player ?? {};
@@ -482,6 +488,8 @@ function renderSource() {
     : "--:--:--";
   if (!player.found) {
     elements.playerStatus.textContent = "영상 플레이어 미검출";
+  } else if (player.adActive) {
+    elements.playerStatus.textContent = "YouTube 광고 재생 중 · 스탬프 일시 중지";
   } else {
     const playback = player.paused ? "일시정지" : "재생 중";
     const liveEdge = Number.isFinite(player.liveEdgeOffsetSeconds)
@@ -494,7 +502,7 @@ function renderSource() {
   }
 
   if (sourceConflict) {
-    setConnectionBadge("다른 방송", "badge-policy");
+    setConnectionBadge("다른 원본", "badge-policy");
     elements.playerStatus.textContent = "저장 구간과 다른 원본 · 초기화 후 기록 가능";
   } else {
     setConnectionBadge("연결됨", "badge-connected");
@@ -504,16 +512,16 @@ function renderSource() {
   elements.sourceLink.title = currentContext.canonicalUrl || currentContext.url;
 }
 
-async function getActiveChzzkTab() {
+async function getActiveSourceTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !tab.url?.startsWith("https://chzzk.naver.com/")) {
-    throw new Error("현재 활성 탭이 치지직 페이지가 아닙니다.");
+  if (!tab?.id || !isSupportedSourceUrl(tab.url)) {
+    throw new Error("현재 탭에서 치지직 또는 YouTube 영상을 열어 주세요.");
   }
   return tab;
 }
 
 async function requestPageContext() {
-  const tab = await getActiveChzzkTab();
+  const tab = await getActiveSourceTab();
   let response;
   try {
     response = await chrome.tabs.sendMessage(tab.id, { type: "KIRINUKI_GET_CONTEXT" });
@@ -524,7 +532,7 @@ async function requestPageContext() {
   }
 
   if (!response?.ok) {
-    throw new Error(response?.error || "치지직 페이지 정보를 읽지 못했습니다.");
+    throw new Error(response?.error || "영상 페이지 정보를 읽지 못했습니다.");
   }
   return {
     ...response.context,
@@ -557,7 +565,7 @@ async function refreshSource({ silent = false } = {}) {
     applyContextToProject(currentContext);
     renderSource();
     if (!silent) {
-      setStatus("현재 치지직 탭과 플레이어 정보를 읽었습니다.", "success");
+      setStatus("현재 영상 탭과 플레이어 정보를 읽었습니다.", "success");
     }
   } catch (error) {
     if (error.name === "AbortError") {
@@ -586,7 +594,16 @@ async function captureCurrentPosition(kind) {
     applyContextToProject(context);
     renderSource();
     if (sourceConflict) {
-      throw new Error("기존 구간과 다른 방송입니다. 모든 로컬 작업을 초기화한 뒤 기록해 주세요.");
+      throw new Error("기존 구간과 다른 원본 영상입니다. 모든 로컬 작업을 초기화한 뒤 기록해 주세요.");
+    }
+    if (
+      context.platform === SOURCE_PLATFORM_YOUTUBE
+      && context.contentType === "live"
+    ) {
+      throw new Error("진행 중인 YouTube 라이브는 지원하지 않습니다. 다시보기 영상에서 스탬프를 찍어 주세요.");
+    }
+    if (context.player?.adActive) {
+      throw new Error("YouTube 광고 재생 중에는 스탬프를 기록하지 않습니다. 본 영상이 시작된 뒤 다시 눌러 주세요.");
     }
 
     const position = context.player?.positionSeconds;
@@ -667,7 +684,7 @@ async function saveSegment() {
   }
   const operationGeneration = stateGeneration;
   if (sourceConflict) {
-    setStatus("기존 구간과 다른 방송입니다. 모든 로컬 작업을 초기화한 뒤 기록해 주세요.", "error", 0);
+    setStatus("기존 구간과 다른 원본 영상입니다. 모든 로컬 작업을 초기화한 뒤 기록해 주세요.", "error", 0);
     return;
   }
   syncDraftFromForm();
@@ -687,7 +704,7 @@ async function saveSegment() {
       expectedSessionId &&
       capturedSessionIds.some((sessionId) => sessionId !== expectedSessionId)
     ) {
-      throw new Error("시작과 끝이 서로 다른 방송에서 기록되었습니다. 구간을 다시 찍어 주세요.");
+      throw new Error("시작과 끝이 서로 다른 원본 영상에서 기록되었습니다. 구간을 다시 찍어 주세요.");
     }
     const editingIndex = state.draft.editingId
       ? state.segments.findIndex((segment) => segment.id === state.draft.editingId)
@@ -1002,7 +1019,7 @@ async function openIntegratedEditor() {
       !activeSessionId ||
       expectedSessionId !== activeSessionId
     ) {
-      throw new Error("저장 구간과 현재 치지직 탭이 다른 방송입니다. 원래 방송 탭에서 다시 열어 주세요.");
+      throw new Error("저장 구간과 현재 영상 탭의 원본이 다릅니다. 원래 영상 탭에서 다시 열어 주세요.");
     }
     if (!state.editorProjectId) {
       state.editorProjectId = `project-${crypto.randomUUID()}`;
@@ -1099,7 +1116,7 @@ async function resetProject() {
       writerId: panelWriterId
     });
     if (!response?.ok) {
-      throw new Error(response?.error || "치지직 탭 연결 정보를 지우지 못했습니다.");
+      throw new Error(response?.error || "영상 탭 연결 정보를 지우지 못했습니다.");
     }
     await loadState();
     sourceConflict = false;

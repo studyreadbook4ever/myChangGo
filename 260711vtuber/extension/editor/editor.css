@@ -1256,6 +1256,27 @@ svg {
   user-select: none;
 }
 
+.caption-agent-policy summary em {
+  margin-left: 4px;
+  color: var(--mint);
+  font-style: normal;
+  font-size: 7px;
+}
+
+.caption-provider-fields {
+  padding: 0 8px 9px;
+}
+
+.caption-provider-fields .select-field {
+  margin-top: 8px;
+}
+
+.caption-provider-clear {
+  width: 100%;
+  margin-top: 9px;
+  border-color: rgba(154, 134, 255, 0.2);
+}
+
 .caption-agent-policy ul {
   display: grid;
   gap: 5px;

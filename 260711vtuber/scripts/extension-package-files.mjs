@@ -12,6 +12,7 @@ export const EXTENSION_PACKAGE_FILES = Object.freeze([
   "knowledge/default-creator-policy.md",
   "lib/core.js",
   "lib/editor-core.js",
+  "lib/source-platform.js",
   "licenses/MEDIABUNNY-MPL-2.0.txt",
   "licenses/PRETENDARD-OFL-1.1.txt",
   "manifest.json",

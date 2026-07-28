@@ -7,7 +7,7 @@ import { build } from "esbuild";
 import { PRETENDARD_FONT } from "./pretendard-font.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const sourceRoot = path.join(root, "src", "editor");
+const editorSourceRoot = path.join(root, "src", "editor");
 const outputRoot = path.join(root, "extension", "editor");
 const fontRoot = path.join(outputRoot, "fonts");
 const extensionRoot = path.join(root, "extension");
@@ -44,11 +44,19 @@ const shared = {
   logLevel: "info"
 };
 
-await build({
-  ...shared,
-  entryPoints: [path.join(sourceRoot, "main.js")],
-  outfile: path.join(outputRoot, "editor.js")
-});
+await Promise.all([
+  build({
+    ...shared,
+    entryPoints: [path.join(editorSourceRoot, "main.js")],
+    outfile: path.join(outputRoot, "editor.js")
+  }),
+  build({
+    ...shared,
+    format: "iife",
+    entryPoints: [path.join(root, "src", "content-script.js")],
+    outfile: path.join(extensionRoot, "content-script.js")
+  })
+]);
 
 await Promise.all([
   copyFile(
@@ -70,6 +78,6 @@ await Promise.all([
 ]);
 
 console.log(
-  `Editor bundle and Pretendard ${PRETENDARD_FONT.version} ` +
-  `written to ${path.relative(root, outputRoot)}`
+  `Editor/content bridge bundles and Pretendard ${PRETENDARD_FONT.version} ` +
+  `written to ${path.relative(root, extensionRoot)}`
 );

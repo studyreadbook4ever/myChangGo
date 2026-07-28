@@ -187,19 +187,28 @@ export function normalizeMediaAsset(raw) {
 }
 
 export function sourceSessionIdentity(source = {}) {
+  const platform = String(source.platform ?? "CHZZK")
+    .trim()
+    .toUpperCase() || "CHZZK";
+  const platformPrefix = platform === "CHZZK"
+    ? ""
+    : `${platform.toLowerCase()}:`;
   const channelId = String(source.channelId ?? "").trim();
   const startedAt = String(source.broadcastStartedAt ?? "").trim();
   const contentId = String(source.contentId ?? "").trim();
   const contentType = String(source.contentType ?? "unknown").trim();
 
+  if (platform !== "CHZZK" && contentId) {
+    return `${platformPrefix}${contentType}:${contentId}`;
+  }
   if (channelId && startedAt) {
-    return `broadcast:${channelId}:${startedAt}`;
+    return `${platformPrefix}broadcast:${channelId}:${startedAt}`;
   }
   if (contentId) {
-    return `${contentType}:${contentId}`;
+    return `${platformPrefix}${contentType}:${contentId}`;
   }
   if (channelId) {
-    return `${contentType}:${channelId}`;
+    return `${platformPrefix}${contentType}:${channelId}`;
   }
   return String(source.canonicalUrl || source.url || "").trim();
 }
@@ -736,7 +745,10 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
       vodUrl: incomingSession.vodUrl || normalized.broadcastSession?.vodUrl || "",
       vodContentId: incomingSession.vodContentId || normalized.broadcastSession?.vodContentId || "",
       alignmentOffsetMs: normalized.broadcastSession?.alignmentOffsetMs || 0,
-      alignmentConfirmed: normalized.broadcastSession?.alignmentConfirmed || source.contentType === "vod"
+      alignmentConfirmed: (
+        normalized.broadcastSession?.alignmentConfirmed
+        || source.contentType === "vod"
+      )
     },
     clips: reflowedClips,
     suppressedSelections,

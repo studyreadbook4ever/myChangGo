@@ -1087,6 +1087,10 @@ async function main() {
       unexpected: []
     };
     document.querySelector("#caption-agent-token").value = "e2e-session-token";
+    document.querySelector("#caption-stt-endpoint").value = "https://stt.e2e.invalid/v1/audio/transcriptions";
+    document.querySelector("#caption-stt-model").value = "e2e-timestamp-stt";
+    document.querySelector("#caption-stt-api-key").value = "e2e-stt-memory-key";
+    document.querySelector("#caption-upstage-api-key").value = "e2e-upstage-memory-key";
     globalThis.fetch = async (input, init = {}) => {
       if (!String(input).startsWith(endpointPrefix)) {
         return globalThis.__kirinukiE2eAiSuccessOriginalFetch(input, init);
@@ -1103,6 +1107,7 @@ async function main() {
         });
       }
       const request = JSON.parse(String(init.body || "{}"));
+      const requestHeaders = new Headers(init.headers);
       const audioBinary = atob(request.audio?.data || "");
       const requestIndex = trace.requests.length;
       trace.requests.push({
@@ -1115,8 +1120,16 @@ async function main() {
         audioMagic: audioBinary.slice(0, 4),
         sampleRateHz: request.audio?.sampleRateHz || null,
         channels: request.audio?.channels || null,
-        protocolHeader: new Headers(init.headers).get("X-Kirinuki-Protocol"),
-        authorization: new Headers(init.headers).get("Authorization"),
+        protocolHeader: requestHeaders.get("X-Kirinuki-Protocol"),
+        authorization: requestHeaders.get("Authorization"),
+        sttEndpoint: requestHeaders.get("X-Kirinuki-STT-Endpoint"),
+        sttModel: requestHeaders.get("X-Kirinuki-STT-Model"),
+        sttApiKey: requestHeaders.get("X-Kirinuki-STT-API-Key"),
+        upstageApiKey: requestHeaders.get("X-Kirinuki-Upstage-API-Key"),
+        bodyContainsProviderSecret: (
+          String(init.body || "").includes("e2e-stt-memory-key")
+          || String(init.body || "").includes("e2e-upstage-memory-key")
+        ),
         policy: request.policy || null,
         visual: request.visual || null
       });
@@ -1151,11 +1164,16 @@ async function main() {
     };
     return {
       wrapped: globalThis.fetch !== globalThis.__kirinukiE2eAiSuccessOriginalFetch,
-      tokenValue: document.querySelector("#caption-agent-token")?.value || ""
+      tokenValue: document.querySelector("#caption-agent-token")?.value || "",
+      sttKeyValue: document.querySelector("#caption-stt-api-key")?.value || "",
+      upstageKeyValue: document.querySelector("#caption-upstage-api-key")?.value || ""
     };
   `);
   assert(
-    aiSuccessSetup.wrapped && aiSuccessSetup.tokenValue === "e2e-session-token",
+    aiSuccessSetup.wrapped &&
+      aiSuccessSetup.tokenValue === "e2e-session-token" &&
+      aiSuccessSetup.sttKeyValue === "e2e-stt-memory-key" &&
+      aiSuccessSetup.upstageKeyValue === "e2e-upstage-memory-key",
     `AI 성공 응답 mock 준비 실패: ${JSON.stringify(aiSuccessSetup)}`
   );
 
@@ -1208,6 +1226,8 @@ async function main() {
         globalThis.fetch = globalThis.__kirinukiE2eAiSuccessOriginalFetch;
       }
       document.querySelector("#caption-agent-token").value = "";
+      document.querySelector("#caption-stt-api-key").value = "";
+      document.querySelector("#caption-upstage-api-key").value = "";
       delete globalThis.__kirinukiE2eAiSuccessOriginalFetch;
       return result;
     `).catch(() => null);
@@ -1228,6 +1248,11 @@ async function main() {
         request.channels === 1 &&
         request.protocolHeader === "chzzk-kirinuki-caption-request/v1" &&
         request.authorization === "Bearer e2e-session-token" &&
+        request.sttEndpoint === "https://stt.e2e.invalid/v1/audio/transcriptions" &&
+        request.sttModel === "e2e-timestamp-stt" &&
+        request.sttApiKey === "e2e-stt-memory-key" &&
+        request.upstageApiKey === "e2e-upstage-memory-key" &&
+        request.bodyContainsProviderSecret === false &&
         request.policy?.includeAllRecognizableSpeech === true &&
         request.policy?.maxCueDurationMs === 4_000 &&
         request.visual?.analysis === "local-three-band-edge-density-v1" &&

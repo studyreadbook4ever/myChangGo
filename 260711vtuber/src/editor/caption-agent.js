@@ -13,13 +13,25 @@ export const MAX_CAPTION_AGENT_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MAX_CAPTION_AGENT_CLIP_DURATION_MS = 30 * 60 * 1_000;
 export const MAX_CAPTION_AGENT_WAV_BYTES = 64 * 1024 * 1024;
 export const CAPTION_AGENT_SAMPLE_RATE_HZ = 16_000;
+export const MAX_PROVIDER_CREDENTIAL_LENGTH = 4_096;
+export const MAX_STT_ENDPOINT_LENGTH = 2_048;
+export const MAX_STT_MODEL_LENGTH = 160;
 export const CAPTION_PLACEMENT_ANALYSIS =
   "local-three-band-edge-density-v1";
 export const MAX_CAPTION_PLACEMENT_SAMPLES = 9;
 
+export const CAPTION_AGENT_PROVIDER_HEADERS = Object.freeze({
+  sttEndpoint: "X-Kirinuki-STT-Endpoint",
+  sttModel: "X-Kirinuki-STT-Model",
+  sttApiKey: "X-Kirinuki-STT-API-Key",
+  upstageApiKey: "X-Kirinuki-Upstage-API-Key"
+});
+
 export const DEFAULT_CAPTION_AGENT_SETTINGS = Object.freeze({
   endpoint: "http://127.0.0.1:4319/v1/captions",
-  model: "solar-pro3"
+  model: "solar-pro3",
+  sttEndpoint: "",
+  sttModel: ""
 });
 
 const ALLOWED_SOLAR_MODELS = new Set([
@@ -46,6 +58,105 @@ function clamp(value, minimum, maximum) {
 function isLoopbackHostname(hostname) {
   return hostname === "127.0.0.1" ||
     hostname === "localhost";
+}
+
+function isLoopbackAgentEndpoint(value) {
+  const url = new URL(normalizeCaptionAgentEndpoint(value));
+  return (
+    url.protocol === "http:"
+    && isLoopbackHostname(url.hostname)
+  );
+}
+
+export function normalizeExternalSttEndpoint(value) {
+  const input = String(value || "").trim();
+  if (!input) {
+    return "";
+  }
+  if (input.length > MAX_STT_ENDPOINT_LENGTH) {
+    throw new Error("STT API 주소가 허용 길이를 넘었습니다.");
+  }
+  let url;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("STT API 주소가 올바른 URL이 아닙니다.");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error(
+      "STT API 주소에 인증 정보·쿼리 문자열·# 조각을 넣지 마세요."
+    );
+  }
+  const secureRemote = url.protocol === "https:";
+  const localHttp = (
+    url.protocol === "http:"
+    && isLoopbackHostname(url.hostname)
+  );
+  if (!secureRemote && !localHttp) {
+    throw new Error("STT API 주소는 HTTPS 또는 loopback HTTP여야 합니다.");
+  }
+  return url.toString();
+}
+
+function normalizeProviderSecret(value, label) {
+  const secret = String(value || "").trim();
+  if (!secret) {
+    return "";
+  }
+  if (
+    secret.length > MAX_PROVIDER_CREDENTIAL_LENGTH
+    || /[\r\n]/u.test(secret)
+  ) {
+    throw new Error(`${label} 형식이 올바르지 않습니다.`);
+  }
+  return secret;
+}
+
+function normalizeSttModel(value) {
+  const model = String(value || "").trim();
+  if (!model) {
+    return "";
+  }
+  if (
+    model.length > MAX_STT_MODEL_LENGTH
+    || /[\u0000-\u001f\u007f]/u.test(model)
+  ) {
+    throw new Error("STT 모델명이 올바르지 않습니다.");
+  }
+  return model;
+}
+
+export function normalizeCaptionProviderConfig(raw = {}) {
+  return {
+    sttEndpoint: normalizeExternalSttEndpoint(raw.sttEndpoint),
+    sttModel: normalizeSttModel(raw.sttModel),
+    sttApiKey: normalizeProviderSecret(raw.sttApiKey, "STT API 키"),
+    upstageApiKey: normalizeProviderSecret(
+      raw.upstageApiKey,
+      "Upstage API 키"
+    )
+  };
+}
+
+export function captionProviderHeaders(endpoint, raw = {}) {
+  const provider = normalizeCaptionProviderConfig(raw);
+  const supplied = Object.values(provider).some(Boolean);
+  if (!supplied) {
+    return {};
+  }
+  if (!isLoopbackAgentEndpoint(endpoint)) {
+    throw new Error(
+      "STT·Upstage API 키와 제공자 설정은 로컬 companion 주소로만 전달할 수 있습니다."
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(provider)
+      .filter(([, value]) => value)
+      .map(([field, value]) => [
+        CAPTION_AGENT_PROVIDER_HEADERS[field],
+        value
+      ])
+  );
 }
 
 export function normalizeCaptionAgentEndpoint(value) {
@@ -86,7 +197,19 @@ export function normalizeCaptionAgentSettings(raw = {}) {
   } catch {
     // A stale or malformed saved setting must not prevent the editor from opening.
   }
-  return { endpoint, model };
+  let sttEndpoint = "";
+  try {
+    sttEndpoint = normalizeExternalSttEndpoint(raw.sttEndpoint);
+  } catch {
+    // Invalid non-secret provider settings are discarded on load.
+  }
+  let sttModel = "";
+  try {
+    sttModel = normalizeSttModel(raw.sttModel);
+  } catch {
+    // Invalid non-secret provider settings are discarded on load.
+  }
+  return { endpoint, model, sttEndpoint, sttModel };
 }
 
 export async function loadCaptionAgentSettings(storageArea = chrome.storage.local) {
@@ -100,7 +223,9 @@ export async function saveCaptionAgentSettings(
 ) {
   const normalized = normalizeCaptionAgentSettings({
     ...settings,
-    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint)
+    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint),
+    sttEndpoint: normalizeExternalSttEndpoint(settings?.sttEndpoint),
+    sttModel: normalizeSttModel(settings?.sttModel)
   });
   await storageArea.set({ [CAPTION_AGENT_SETTINGS_KEY]: normalized });
   return normalized;
@@ -655,6 +780,7 @@ function assertSafeStatusUrl(statusUrl, endpoint) {
 export async function requestCaptionAgent({
   endpoint,
   token,
+  providerConfig,
   request,
   signal,
   fetchImpl = fetch,
@@ -677,7 +803,8 @@ export async function requestCaptionAgent({
     throwIfAborted(requestSignal);
     const headers = {
       "Content-Type": "application/json",
-      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA
+      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
+      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
     };
     if (String(token || "").trim()) {
       headers.Authorization = `Bearer ${String(token).trim()}`;
@@ -748,6 +875,7 @@ export async function requestCaptionAgent({
 export async function probeCaptionAgent({
   endpoint,
   token,
+  providerConfig,
   signal,
   fetchImpl = fetch,
   timeoutMs = CAPTION_AGENT_PROBE_TIMEOUT_MS
@@ -757,7 +885,8 @@ export async function probeCaptionAgent({
   const deadline = createDeadlineSignal(signal, timeoutMs);
   try {
     const headers = {
-      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA
+      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
+      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
     };
     if (String(token || "").trim()) {
       headers.Authorization = `Bearer ${String(token).trim()}`;

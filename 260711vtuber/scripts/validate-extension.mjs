@@ -30,13 +30,19 @@ const read = (relativePath) => readFile(path.join(extensionRoot, relativePath), 
 const manifest = JSON.parse(await read("manifest.json"));
 assert(manifest.manifest_version === 3, "manifest_version은 3이어야 합니다.");
 assert(manifest.side_panel?.default_path === "sidepanel.html", "사이드패널 진입점이 없습니다.");
-assert(manifest.version === "2.1.0", "통합 편집기 manifest 버전이 2.1.0이 아닙니다.");
+assert(manifest.version === "2.2.0", "통합 편집기 manifest 버전이 2.2.0이 아닙니다.");
 assert(manifest.host_permissions?.includes("https://chzzk.naver.com/*"), "치지직 host permission이 없습니다.");
 assert(manifest.host_permissions?.includes("https://api.chzzk.naver.com/*"), "치지직 라이브 상태 메타데이터 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://youtube.com/*"), "YouTube 루트 영상 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://www.youtube.com/*"), "YouTube 영상 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://m.youtube.com/*"), "YouTube 모바일 영상 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://youtu.be/*"), "youtu.be 영상 permission이 없습니다.");
 assert(manifest.host_permissions?.includes("http://127.0.0.1/*"), "로컬 자막 에이전트 permission이 없습니다.");
 assert(manifest.optional_host_permissions?.includes("https://*/*"), "사용자 선택 HTTPS 자막 에이전트 permission이 없습니다.");
 assert(!manifest.host_permissions?.some((permission) => permission.includes("huggingface") || permission.includes("hf.co")), "삭제한 로컬 모델의 Hugging Face permission이 남아 있습니다.");
 assert(manifest.content_scripts?.some((entry) => entry.matches?.includes("https://chzzk.naver.com/*")), "치지직 content script가 없습니다.");
+assert(manifest.content_scripts?.some((entry) => entry.matches?.includes("https://youtube.com/*")), "YouTube 루트 content script가 없습니다.");
+assert(manifest.content_scripts?.some((entry) => entry.matches?.includes("https://www.youtube.com/*")), "YouTube content script가 없습니다.");
 assert(!manifest.content_security_policy?.extension_pages?.includes("'wasm-unsafe-eval'"), "삭제한 로컬 ONNX용 wasm-unsafe-eval CSP가 남아 있습니다.");
 
 const referencedFiles = [
@@ -51,6 +57,7 @@ const referencedFiles = [
   PRETENDARD_FONT.extensionFontPath,
   "lib/core.js",
   "lib/editor-core.js",
+  "lib/source-platform.js",
   "knowledge/base-editing-guidelines.md",
   "knowledge/default-creator-policy.md",
   "knowledge/codex-job-agents.md",
@@ -177,6 +184,9 @@ assert(contentScript.includes("HTMLVideoElement") || contentScript.includes("que
 assert(contentScript.includes("KIRINUKI_PLAYER_COMMAND"), "편집기에서 치지직 플레이어를 제어하는 프로토콜이 없습니다.");
 assert(contentScript.includes("/service/v3/videos/"), "치지직 다시보기 회차 메타데이터 연결 로직이 없습니다.");
 assert(contentScript.includes("liveOpenDate"), "다시보기를 생방송 회차에 연결할 시작 시각 로직이 없습니다.");
+assert(contentScript.includes("youtube-ad-blocked"), "YouTube 광고 시각 캡처 차단이 없습니다.");
+assert(contentScript.includes("youtube-live-in-progress"), "진행 중인 YouTube 라이브 캡처 차단이 없습니다.");
+assert(contentScript.includes("www.youtube.com/watch"), "YouTube 영상 canonical 연결 로직이 없습니다.");
 assert(serviceWorker.includes("KIRINUKI_EDITOR_SOURCE_ACTION"), "서비스 워커에 치지직 source binding 중계가 없습니다.");
 assert(serviceWorker.includes("sourceSessionIdentity"), "서비스 워커가 방송 회차 ID를 검증하지 않습니다.");
 assert(serviceWorker.includes("KIRINUKI_GET_CONTEXT"), "서비스 워커가 현재 치지직 탭 문맥을 재검증하지 않습니다.");
@@ -223,6 +233,11 @@ for (const id of [
   "audio-mute",
   "caption-agent-endpoint",
   "caption-agent-token",
+  "caption-stt-endpoint",
+  "caption-stt-model",
+  "caption-stt-api-key",
+  "caption-upstage-api-key",
+  "clear-caption-provider-keys",
   "caption-model",
   "test-caption-agent",
   "caption-agent-warning",
@@ -246,6 +261,12 @@ assert(editorScript.includes("solar-pro3"), "편집기 번들에 Solar Pro 3 기
 assert(editorScript.includes("MAX_REMOTE_CUE_DURATION_MS = 4e3"), "원격 자막 4초 상한 검증이 없습니다.");
 assert(editorScript.includes("encodePcm16WavBase64"), "선택 구간 PCM을 표준 WAV 요청으로 바꾸지 않습니다.");
 assert(editorScript.includes("ensureCaptionAgentPermission"), "사용자 선택 원격 에이전트 권한 요청 경로가 없습니다.");
+assert(editorScript.includes("captionProviderHeaders"), "로컬 companion 제공자 API 키 전달 경로가 없습니다.");
+assert(
+  editorScript.includes("isLoopbackAgentEndpoint")
+    && editorScript.includes("if (!isLoopbackAgentEndpoint(endpoint))"),
+  "API 키의 원격 에이전트 유출 차단이 없습니다."
+);
 assert(editorScript.includes("showDirectoryPicker"), "영상·JSON·SRT 동일 폴더 저장 경로가 없습니다.");
 assert(editorScript.includes("chooseUniqueExportBaseName"), "내보내기 파일명 충돌 방지가 없습니다.");
 assert(editorScript.includes("navigator.locks"), "여러 편집기 탭의 동시 내보내기 직렬화가 없습니다.");

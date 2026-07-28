@@ -10,12 +10,16 @@ import {
   MAX_REMOTE_WARNINGS,
   captionAgentAudioFootprint,
   captionAgentPermissionOrigin,
+  captionProviderHeaders,
   createCaptionAgentRequest,
   encodePcm16WavBase64,
   normalizeCaptionAgentCues,
   normalizeCaptionAgentEndpoint,
+  normalizeCaptionAgentSettings,
+  normalizeExternalSttEndpoint,
   probeCaptionAgent,
-  requestCaptionAgent
+  requestCaptionAgent,
+  saveCaptionAgentSettings
 } from "../src/editor/caption-agent.js";
 
 function jsonResponse(payload, {
@@ -81,6 +85,98 @@ test("에이전트 주소는 HTTPS 또는 loopback HTTP만 허용하고 인증�
     () => normalizeCaptionAgentEndpoint("https://user:secret@captions.example/v1/captions"),
     /아이디나 비밀번호/u
   );
+});
+
+test("STT·Upstage 설정은 검증 후 로컬 companion으로만 전달한다", () => {
+  const provider = {
+    sttEndpoint: "https://stt.example/v1/audio/transcriptions",
+    sttModel: "timestamp-model",
+    sttApiKey: "stt-secret",
+    upstageApiKey: "upstage-secret"
+  };
+  assert.equal(
+    normalizeExternalSttEndpoint(provider.sttEndpoint),
+    provider.sttEndpoint
+  );
+  assert.deepEqual(
+    captionProviderHeaders(
+      "http://127.0.0.1:4319/v1/captions",
+      provider
+    ),
+    {
+      "X-Kirinuki-STT-Endpoint": provider.sttEndpoint,
+      "X-Kirinuki-STT-Model": provider.sttModel,
+      "X-Kirinuki-STT-API-Key": provider.sttApiKey,
+      "X-Kirinuki-Upstage-API-Key": provider.upstageApiKey
+    }
+  );
+  assert.throws(
+    () => captionProviderHeaders(
+      "https://captions.example/v1/captions",
+      provider
+    ),
+    /로컬 companion/u
+  );
+  assert.throws(
+    () => normalizeExternalSttEndpoint(
+      "http://stt.example/v1/audio/transcriptions"
+    ),
+    /HTTPS/u
+  );
+  assert.throws(
+    () => normalizeExternalSttEndpoint(
+      "https://stt.example/v1/audio/transcriptions?api_key=must-not-persist"
+    ),
+    /쿼리 문자열/u
+  );
+});
+
+test("쿼리가 있는 STT 주소는 Chrome 저장소에 쓰기 전에 거절한다", async () => {
+  let storageWrites = 0;
+  await assert.rejects(
+    saveCaptionAgentSettings({
+      endpoint: "http://127.0.0.1:4319/v1/captions",
+      model: "solar-pro3",
+      sttEndpoint:
+        "https://stt.example/v1/audio/transcriptions?token=must-not-persist",
+      sttModel: "timestamp-model"
+    }, {
+      async set() {
+        storageWrites += 1;
+      }
+    }),
+    /쿼리 문자열/u
+  );
+  assert.equal(storageWrites, 0);
+});
+
+test("비밀 API 키는 자막 에이전트 저장 설정에 포함하지 않는다", async () => {
+  let persisted = null;
+  const storageArea = {
+    async set(value) {
+      persisted = structuredClone(value);
+    }
+  };
+  const settings = await saveCaptionAgentSettings({
+    endpoint: "http://127.0.0.1:4319/v1/captions",
+    model: "solar-pro3",
+    sttEndpoint: "https://stt.example/v1/audio/transcriptions",
+    sttModel: "timestamp-model",
+    sttApiKey: "must-not-persist",
+    upstageApiKey: "must-not-persist"
+  }, storageArea);
+  assert.deepEqual(settings, {
+    endpoint: "http://127.0.0.1:4319/v1/captions",
+    model: "solar-pro3",
+    sttEndpoint: "https://stt.example/v1/audio/transcriptions",
+    sttModel: "timestamp-model"
+  });
+  assert.deepEqual(
+    persisted["chzzk-kirinuki-caption-agent-settings-v1"],
+    settings
+  );
+  assert.equal(JSON.stringify(persisted).includes("must-not-persist"), false);
+  assert.deepEqual(normalizeCaptionAgentSettings(settings), settings);
 });
 
 test("16kHz mono Float32 PCM을 올바른 PCM16 WAV base64로 만든다", () => {
@@ -255,6 +351,43 @@ test("동기 응답은 리다이렉트와 credential을 금지한 요청으로 �
   assert.equal(calls[0].options.credentials, "omit");
   assert.equal(calls[0].options.headers.Authorization, "Bearer session-token");
   assert.equal(calls[0].options.signal.aborted, false);
+});
+
+test("제공자 API 키는 JSON 본문이 아니라 loopback 요청 헤더로만 보낸다", async () => {
+  const request = agentRequest();
+  const calls = [];
+  await requestCaptionAgent({
+    endpoint: "http://127.0.0.1:4319/v1/captions",
+    token: "session-token",
+    providerConfig: {
+      sttEndpoint: "https://stt.example/v1/audio/transcriptions",
+      sttModel: "timestamp-model",
+      sttApiKey: "stt-memory-only",
+      upstageApiKey: "upstage-memory-only"
+    },
+    request,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse(completedAgentResponse(request));
+    }
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].options.headers["X-Kirinuki-STT-API-Key"],
+    "stt-memory-only"
+  );
+  assert.equal(
+    calls[0].options.headers["X-Kirinuki-Upstage-API-Key"],
+    "upstage-memory-only"
+  );
+  assert.equal(
+    calls[0].options.body.includes("stt-memory-only"),
+    false
+  );
+  assert.equal(
+    calls[0].options.body.includes("upstage-memory-only"),
+    false
+  );
 });
 
 test("비동기 상태 URL은 최초 요청과 같은 origin만 허용한다", async () => {

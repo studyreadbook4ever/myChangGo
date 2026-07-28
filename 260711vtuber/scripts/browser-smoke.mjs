@@ -327,6 +327,11 @@ async function main() {
         "restore-local-draft",
         "caption-agent-endpoint",
         "caption-agent-token",
+        "caption-stt-endpoint",
+        "caption-stt-model",
+        "caption-stt-api-key",
+        "caption-upstage-api-key",
+        "clear-caption-provider-keys",
         "caption-model",
         "test-caption-agent",
         "generate-captions",
@@ -341,6 +346,8 @@ async function main() {
         model: document.getElementById("caption-model")?.value,
         fontSize: document.getElementById("font-size")?.value,
         tokenType: document.getElementById("caption-agent-token")?.type,
+        sttKeyType: document.getElementById("caption-stt-api-key")?.type,
+        upstageKeyType: document.getElementById("caption-upstage-api-key")?.type,
         missingIds: requiredIds.filter((id) => !document.getElementById(id))
       };
     `,
@@ -351,6 +358,8 @@ async function main() {
   assert(editor.model === "solar-pro3", `기본 Solar 모델이 올바르지 않습니다: ${editor.model}`);
   assert(editor.fontSize === "6.75", `기본 자막 크기가 30% 확대값이 아닙니다: ${editor.fontSize}`);
   assert(editor.tokenType === "password", "자막 에이전트 세션 토큰 입력이 password가 아닙니다.");
+  assert(editor.sttKeyType === "password", "STT API 키 입력이 password가 아닙니다.");
+  assert(editor.upstageKeyType === "password", "Upstage API 키 입력이 password가 아닙니다.");
   assert(editor.missingIds.length === 0, `editor 핵심 DOM 누락: ${editor.missingIds.join(", ")}`);
 
   const runtime = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/async`, {

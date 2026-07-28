@@ -506,6 +506,10 @@ test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET �
     preflight.headers["access-control-allow-methods"],
     /GET, POST, OPTIONS/u
   );
+  assert.match(
+    preflight.headers["access-control-allow-headers"],
+    /X-Kirinuki-Upstage-API-Key/iu
+  );
 
   const unauthenticated = await localHttpJson({
     port,
@@ -556,8 +560,32 @@ test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET �
     maxCueDurationMs: 4_000,
     maxClipDurationMs: 30 * 60 * 1_000,
     maxAudioBytes: 1_048_576,
-    pipelineTimeoutMs: 15 * 60 * 1_000
+    pipelineTimeoutMs: 15 * 60 * 1_000,
+    configured: {
+      sttEndpoint: true,
+      sttApiKey: true,
+      upstageApiKey: true,
+      ready: true
+    }
   });
+  assert.equal(pipelineCalls.length, 0);
+
+  const endpointOnlyOverride = await localHttpJson({
+    port,
+    method: "POST",
+    headers: {
+      origin: ALLOWED_ORIGIN,
+      authorization: `Bearer ${AGENT_TOKEN}`,
+      "x-kirinuki-stt-endpoint":
+        "https://untrusted-stt.example/v1/audio/transcriptions"
+    },
+    body: captionRequest()
+  });
+  assert.equal(endpointOnlyOverride.status, 400);
+  assert.equal(
+    endpointOnlyOverride.body.error.code,
+    "STT_PROVIDER_PAIR_REQUIRED"
+  );
   assert.equal(pipelineCalls.length, 0);
 
   const post = await localHttpJson({
@@ -571,6 +599,136 @@ test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET �
   });
   assert.equal(post.status, 200);
   assert.equal(post.body.schema, CAPTION_AGENT_RESPONSE_SCHEMA_ID);
+  assert.equal(pipelineCalls.length, 1);
+});
+
+test("브라우저에서 입력한 STT·Upstage 키는 요청 단위로 환경 설정을 안전하게 보완한다", async (t) => {
+  const runtimeEnv = {
+    KIRINUKI_AGENT_TOKEN: AGENT_TOKEN,
+    KIRINUKI_ALLOWED_ORIGIN: ALLOWED_ORIGIN,
+    KIRINUKI_MAX_AUDIO_BYTES: "1048576",
+    KIRINUKI_SOLAR_MODEL: "solar-pro3"
+  };
+  const pipelineCalls = [];
+  const { server } = createSolarCaptionGatewayServer({
+    env: runtimeEnv,
+    pipelineRunner: async (body, options) => {
+      pipelineCalls.push({ body, options });
+      return {
+        schema: CAPTION_AGENT_RESPONSE_SCHEMA_ID,
+        requestId: body.requestId,
+        clipId: body.clip.id,
+        language: "ko",
+        sttModel: options.sttModel,
+        captionModel: "solar-pro3",
+        model: "solar-pro3",
+        resolvedModel: "solar-pro3",
+        provider: "upstage",
+        status: "completed",
+        cues: [],
+        warnings: []
+      };
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const { port } = server.address();
+  const authHeaders = {
+    origin: ALLOWED_ORIGIN,
+    authorization: `Bearer ${AGENT_TOKEN}`
+  };
+
+  const incomplete = await localHttpJson({
+    port,
+    method: "GET",
+    headers: authHeaders
+  });
+  assert.equal(incomplete.status, 200);
+  assert.deepEqual(incomplete.body.configured, {
+    sttEndpoint: false,
+    sttApiKey: false,
+    upstageApiKey: false,
+    ready: false
+  });
+
+  const missingPost = await localHttpJson({
+    port,
+    method: "POST",
+    headers: authHeaders,
+    body: captionRequest()
+  });
+  assert.equal(missingPost.status, 400);
+  assert.equal(missingPost.body.error.code, "MISSING_CONFIGURATION");
+  assert.equal(pipelineCalls.length, 0);
+
+  const providerHeaders = {
+    ...authHeaders,
+    "x-kirinuki-stt-endpoint": "https://stt.runtime.example/v1/audio/transcriptions",
+    "x-kirinuki-stt-model": "runtime-timestamp-model",
+    "x-kirinuki-stt-api-key": "runtime-stt-secret",
+    "x-kirinuki-upstage-api-key": "runtime-upstage-secret"
+  };
+  const ready = await localHttpJson({
+    port,
+    method: "GET",
+    headers: providerHeaders
+  });
+  assert.equal(ready.status, 200);
+  assert.equal(ready.body.configured.ready, true);
+
+  const completed = await localHttpJson({
+    port,
+    method: "POST",
+    headers: providerHeaders,
+    body: captionRequest({ requestId: "runtime-keys-request" })
+  });
+  assert.equal(completed.status, 200);
+  assert.equal(pipelineCalls.length, 1);
+  assert.equal(
+    pipelineCalls[0].options.sttEndpoint,
+    "https://stt.runtime.example/v1/audio/transcriptions"
+  );
+  assert.equal(
+    pipelineCalls[0].options.sttModel,
+    "runtime-timestamp-model"
+  );
+  assert.equal(
+    pipelineCalls[0].options.sttApiKey,
+    "runtime-stt-secret"
+  );
+  assert.equal(
+    pipelineCalls[0].options.upstageApiKey,
+    "runtime-upstage-secret"
+  );
+
+  const invalidEndpoint = await localHttpJson({
+    port,
+    method: "POST",
+    headers: {
+      ...providerHeaders,
+      "x-kirinuki-stt-endpoint": "http://remote.example/transcriptions"
+    },
+    body: captionRequest()
+  });
+  assert.equal(invalidEndpoint.status, 400);
+  assert.equal(invalidEndpoint.body.error.code, "INVALID_CONFIGURATION");
+  assert.equal(pipelineCalls.length, 1);
+
+  const queryEndpoint = await localHttpJson({
+    port,
+    method: "POST",
+    headers: {
+      ...providerHeaders,
+      "x-kirinuki-stt-endpoint":
+        "https://stt.runtime.example/v1/audio/transcriptions?key=secret"
+    },
+    body: captionRequest()
+  });
+  assert.equal(queryEndpoint.status, 400);
+  assert.equal(queryEndpoint.body.error.code, "INVALID_CONFIGURATION");
   assert.equal(pipelineCalls.length, 1);
 });
 

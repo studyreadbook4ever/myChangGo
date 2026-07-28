@@ -9,6 +9,10 @@ import {
   EDITOR_SEED_PREFIX,
   sourceSessionIdentity
 } from "./lib/editor-core.js";
+import {
+  isSupportedSourceUrl,
+  sourcePlatformFromUrl
+} from "./lib/source-platform.js";
 
 const BINDINGS_KEY = "chzzkKirinukiSourceBindingsV1";
 const LEGACY_TRANSFORMERS_CACHE_NAME = "transformers-cache";
@@ -120,13 +124,20 @@ async function sourceTabExists(binding) {
   }
   try {
     const tab = await chrome.tabs.get(binding.sourceTabId);
-    if (!tab?.url?.startsWith("https://chzzk.naver.com/")) {
+    if (!isSupportedSourceUrl(tab?.url)) {
       return false;
     }
     const response = await chrome.tabs.sendMessage(binding.sourceTabId, {
       type: "KIRINUKI_GET_CONTEXT"
     });
     if (!response?.ok) {
+      return false;
+    }
+    const tabPlatform = sourcePlatformFromUrl(tab.url);
+    if (
+      !tabPlatform
+      || response.context?.platform !== tabPlatform
+    ) {
       return false;
     }
     const expectedSessionId = binding.sourceSessionId
@@ -153,7 +164,7 @@ async function openEditor(message) {
     sourceIdentity: captureState.source,
     sourceSessionId: sourceSessionIdentity(captureState.source)
   }))) {
-    throw new Error("저장 구간과 연결할 치지직 탭의 방송 회차가 다릅니다.");
+    throw new Error("저장 구간과 연결할 영상 탭의 원본이 다릅니다.");
   }
   await Promise.all([
     bindProjectToSource(projectId, sourceTabId, captureState),
@@ -226,7 +237,7 @@ async function resetWorkspace(message) {
   try {
     await writeBindings({});
   } catch (error) {
-    cleanupErrors.push(`치지직 탭 연결: ${error.message}`);
+    cleanupErrors.push(`영상 탭 연결: ${error.message}`);
   }
   try {
     const stored = await chrome.storage.local.get(null);
@@ -255,7 +266,7 @@ async function resetWorkspace(message) {
 async function runSourceAction(message) {
   const binding = await sourceBinding(message.projectId);
   if (!(await sourceTabExists(binding))) {
-    throw new Error("연결했던 치지직 탭이 닫혔습니다. 치지직에서 프로젝트를 다시 열어 주세요.");
+    throw new Error("연결했던 영상 탭이 닫혔습니다. 원본 페이지에서 프로젝트를 다시 열어 주세요.");
   }
   if (message.action === "seek-and-focus" && Number.isFinite(message.sourceSeconds)) {
     const response = await chrome.tabs.sendMessage(binding.sourceTabId, {
@@ -264,7 +275,7 @@ async function runSourceAction(message) {
       positionSeconds: message.sourceSeconds
     });
     if (!response?.ok) {
-      throw new Error(response?.error || "치지직 플레이어 위치를 옮기지 못했습니다.");
+      throw new Error(response?.error || "원본 플레이어 위치를 옮기지 못했습니다.");
     }
   }
   const tab = await chrome.tabs.update(binding.sourceTabId, { active: true });
@@ -356,7 +367,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       projectId: binding.projectId,
       connected: false
     }).catch(() => {})));
-  }).catch((error) => console.error("치지직 탭 연결 정리 실패", error));
+  }).catch((error) => console.error("영상 탭 연결 정리 실패", error));
 });
 
 void enableActionSidePanel();

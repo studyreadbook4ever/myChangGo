@@ -402,16 +402,27 @@ export function generateEditPrompt({
 
   const editingGuide = String(editingGuideMarkdown ?? "").trim() || "(내장 편집 지침을 불러오지 못했습니다. 사용자에게 확인한 뒤 진행하세요.)";
   const creatorPolicy = String(creatorPolicyMarkdown ?? "").trim() || "(방송인별 정책이 등록되지 않았습니다. 공개 또는 게시 전에 반드시 권리와 규정을 확인하세요.)";
+  const sourcePlatform = safeInline(source.platform, "CHZZK");
+  const sourcePlatformUpper = sourcePlatform.toUpperCase();
+  const sourceDescription = sourcePlatformUpper === "YOUTUBE"
+    ? "YouTube VOD"
+    : "치지직 방송·다시보기";
+  const platformSpecificMetadata = sourcePlatformUpper === "CHZZK"
+    ? [
+      `- 방송 시작 시각(CHZZK): ${safeInline(source.broadcastStartedAt)}`,
+      `- 치지직 클립 설정: ${typeof source.clipActive === "boolean" ? (source.clipActive ? "허용" : "미허용") : "미확인"}`
+    ].join("\n")
+    : `- 게시·방송 시작 시각: ${safeInline(source.broadcastStartedAt)}`;
 
   return `# Codex 영상 전처리 작업 요청서
 
 > 스키마: \`${SCHEMA_VERSION}\`
 > 생성 시각: ${generatedAt}
-> 이 문서는 치지직 키리누키 프롬프트 확장 프로그램이 동일한 규격으로 생성했습니다.
+> 이 문서는 키리누키 스튜디오 Extension이 동일한 규격으로 생성했습니다.
 
 ## 1. 실행 목표
 
-함께 제공된 치지직 풀영상 파일을 실제로 분석하고 편집하여, 아래 사용자가 확정한 구간들을 그대로 연결한 한국어 자막 포함 검수용 영상을 생성하세요. 설명만 답하지 말고, 가능한 로컬 미디어 도구를 사용해 결과 파일을 만드세요.
+함께 제공된 ${sourceDescription} 로컬 원본 파일을 실제로 분석하고 편집하여, 아래 사용자가 확정한 구간들을 그대로 연결한 한국어 자막 포함 검수용 영상을 생성하세요. 설명만 답하지 말고, 가능한 로컬 미디어 도구를 사용해 결과 파일을 만드세요.
 
 각 시작·종료 타임스탬프는 사용자가 선택한 **권위 있는 최종 컷 경계**입니다. AI나 후속 에이전트는 이를 자동으로 확장·축소·병합·재정렬하지 마세요. 음성 인식에 문맥이 필요하면 경계 밖 데이터를 임시 분석할 수 있지만 결과 영상과 자막 cue는 반드시 선택 범위 안으로 제한하세요. 경계가 어색해 보여도 조용히 고치지 말고 검수 메모에 제안만 남기세요.
 
@@ -420,11 +431,10 @@ export function generateEditPrompt({
 ## 2. 프로젝트와 원본
 
 - 프로젝트명: ${safeInline(projectName, "미지정")}
-- 플랫폼: ${safeInline(source.platform, "CHZZK")}
+- 플랫폼: ${sourcePlatform}
 - 방송인/채널명: ${safeInline(source.streamerName)}
 - 방송 제목: ${safeInline(source.broadcastTitle)}
-- 방송 시작 시각(CHZZK): ${safeInline(source.broadcastStartedAt)}
-- 치지직 클립 설정: ${typeof source.clipActive === "boolean" ? (source.clipActive ? "허용" : "미허용") : "미확인"}
+${platformSpecificMetadata}
 - 카테고리: ${safeInline(source.category)}
 - 콘텐츠 유형: ${safeInline(source.contentType)}
 - 채널 ID: ${safeInline(source.channelId)}
@@ -559,6 +569,10 @@ export function generateCodexStartHere({
 } = {}) {
   const title = safeInline(projectName, "이름 없는 키리누키 작업");
   const streamer = safeInline(source.streamerName);
+  const platform = safeInline(source.platform, "CHZZK").toUpperCase();
+  const sourceExample = platform === "YOUTUBE"
+    ? "본인이 소유하거나 사용 허가를 받은 YouTube 원본"
+    : "치지직 공식 다시보기 등 적법하게 준비한 원본";
   const command = "이 폴더의 AGENTS.md, START_HERE.md, edit-brief.md, creator-policy.md, creator-policy-index.json과 job-manifest.json을 읽고 작업을 끝까지 실행해줘. 공식 정책 링크의 최신 원문을 먼저 확인해 정책 프리플라이트를 수행하고, 수익·음원·제3자 확인이 필요한 부분은 policy-check.md에 보류 상태로 남긴 뒤 비공개 검수용 영상까지만 만들어줘. 원본 영상은 변경하지 마.";
 
   return `# Codex 작업 시작 안내
@@ -571,7 +585,7 @@ export function generateCodexStartHere({
 
 ## 1. 풀영상 넣기
 
-치지직 공식 다시보기 등 적법하게 준비한 풀영상 파일 **하나만** 이 폴더의 최상위에 넣으세요. 지원 대상은 MP4, MKV, MOV, WEBM, M4V입니다. 원본 영상은 이름을 바꾸지 않아도 됩니다.
+${sourceExample} 풀영상 파일 **하나만** 이 폴더의 최상위에 넣으세요. 지원 대상은 MP4, MKV, MOV, WEBM, M4V입니다. 원본 영상은 이름을 바꾸지 않아도 됩니다.
 
 ## 2. Codex에서 폴더 열기
 
