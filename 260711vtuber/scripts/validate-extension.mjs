@@ -30,14 +30,20 @@ const read = (relativePath) => readFile(path.join(extensionRoot, relativePath), 
 const manifest = JSON.parse(await read("manifest.json"));
 assert(manifest.manifest_version === 3, "manifest_version은 3이어야 합니다.");
 assert(manifest.side_panel?.default_path === "sidepanel.html", "사이드패널 진입점이 없습니다.");
-assert(manifest.version === "2.0.0", "통합 편집기 manifest 버전이 2.0.0이 아닙니다.");
+assert(manifest.version === "2.2.0", "통합 편집기 manifest 버전이 2.2.0이 아닙니다.");
 assert(manifest.host_permissions?.includes("https://chzzk.naver.com/*"), "치지직 host permission이 없습니다.");
 assert(manifest.host_permissions?.includes("https://api.chzzk.naver.com/*"), "치지직 라이브 상태 메타데이터 permission이 없습니다.");
-assert(manifest.host_permissions?.includes("https://huggingface.co/*"), "로컬 AI 모델 데이터 host permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://youtube.com/*"), "YouTube 루트 영상 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://www.youtube.com/*"), "YouTube 영상 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://m.youtube.com/*"), "YouTube 모바일 영상 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("https://youtu.be/*"), "youtu.be 영상 permission이 없습니다.");
+assert(manifest.host_permissions?.includes("http://127.0.0.1/*"), "로컬 자막 에이전트 permission이 없습니다.");
+assert(manifest.optional_host_permissions?.includes("https://*/*"), "사용자 선택 HTTPS 자막 에이전트 permission이 없습니다.");
+assert(!manifest.host_permissions?.some((permission) => permission.includes("huggingface") || permission.includes("hf.co")), "삭제한 로컬 모델의 Hugging Face permission이 남아 있습니다.");
 assert(manifest.content_scripts?.some((entry) => entry.matches?.includes("https://chzzk.naver.com/*")), "치지직 content script가 없습니다.");
-assert(manifest.content_security_policy?.extension_pages?.includes("'wasm-unsafe-eval'"), "Extension WASM CSP가 없습니다.");
-assert(manifest.cross_origin_embedder_policy?.value === "require-corp", "WASM thread용 COEP가 없습니다.");
-assert(manifest.cross_origin_opener_policy?.value === "same-origin", "WASM thread용 COOP가 없습니다.");
+assert(manifest.content_scripts?.some((entry) => entry.matches?.includes("https://youtube.com/*")), "YouTube 루트 content script가 없습니다.");
+assert(manifest.content_scripts?.some((entry) => entry.matches?.includes("https://www.youtube.com/*")), "YouTube content script가 없습니다.");
+assert(!manifest.content_security_policy?.extension_pages?.includes("'wasm-unsafe-eval'"), "삭제한 로컬 ONNX용 wasm-unsafe-eval CSP가 남아 있습니다.");
 
 const referencedFiles = [
   manifest.background?.service_worker,
@@ -49,11 +55,9 @@ const referencedFiles = [
   "editor/editor.css",
   "editor/editor.js",
   PRETENDARD_FONT.extensionFontPath,
-  "editor/asr-worker.js",
-  "editor/vendor/ort-wasm-simd-threaded.jsep.mjs",
-  "editor/vendor/ort-wasm-simd-threaded.jsep.wasm",
   "lib/core.js",
   "lib/editor-core.js",
+  "lib/source-platform.js",
   "knowledge/base-editing-guidelines.md",
   "knowledge/default-creator-policy.md",
   "knowledge/codex-job-agents.md",
@@ -61,8 +65,6 @@ const referencedFiles = [
   "knowledge/creator-policies/charon-universe-w.md",
   "THIRD_PARTY_NOTICES.md",
   "licenses/MEDIABUNNY-MPL-2.0.txt",
-  "licenses/TRANSFORMERS-APACHE-2.0.txt",
-  "licenses/ONNXRUNTIME-MIT.txt",
   PRETENDARD_FONT.extensionLicensePath,
   ...EXTENSION_PACKAGE_FILES
 ].filter(Boolean);
@@ -73,6 +75,23 @@ for (const relativePath of uniqueReferencedFiles) {
     await access(path.join(extensionRoot, relativePath));
   } catch {
     errors.push(`필수 파일이 없습니다: ${relativePath}`);
+  }
+}
+
+for (const relativePath of [
+  "editor/asr-worker.js",
+  "editor/vendor/ort-wasm-simd-threaded.jsep.mjs",
+  "editor/vendor/ort-wasm-simd-threaded.jsep.wasm",
+  "licenses/ONNXRUNTIME-MIT.txt",
+  "licenses/TRANSFORMERS-APACHE-2.0.txt"
+]) {
+  try {
+    await access(path.join(extensionRoot, relativePath));
+    errors.push(`삭제한 로컬 음성인식 파일이 남아 있습니다: ${relativePath}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      errors.push(`삭제 파일 확인 실패: ${relativePath} (${error.message})`);
+    }
   }
 }
 
@@ -96,13 +115,12 @@ for (const [relativePath, expectedSha256] of [
   );
 }
 
-const [html, panelScript, contentScript, editorHtml, editorScript, asrWorker, serviceWorker, editingGuide, policyGuide, codexAgentGuide, policyIndexText, charonSnapshot] = await Promise.all([
+const [html, panelScript, contentScript, editorHtml, editorScript, serviceWorker, editingGuide, policyGuide, codexAgentGuide, policyIndexText, charonSnapshot] = await Promise.all([
   read("sidepanel.html"),
   read("sidepanel.js"),
   read("content-script.js"),
   read("editor.html"),
   read("editor/editor.js"),
-  read("editor/asr-worker.js"),
   read("service-worker.js"),
   read("knowledge/base-editing-guidelines.md"),
   read("knowledge/default-creator-policy.md"),
@@ -166,6 +184,9 @@ assert(contentScript.includes("HTMLVideoElement") || contentScript.includes("que
 assert(contentScript.includes("KIRINUKI_PLAYER_COMMAND"), "편집기에서 치지직 플레이어를 제어하는 프로토콜이 없습니다.");
 assert(contentScript.includes("/service/v3/videos/"), "치지직 다시보기 회차 메타데이터 연결 로직이 없습니다.");
 assert(contentScript.includes("liveOpenDate"), "다시보기를 생방송 회차에 연결할 시작 시각 로직이 없습니다.");
+assert(contentScript.includes("youtube-ad-blocked"), "YouTube 광고 시각 캡처 차단이 없습니다.");
+assert(contentScript.includes("youtube-live-in-progress"), "진행 중인 YouTube 라이브 캡처 차단이 없습니다.");
+assert(contentScript.includes("www.youtube.com/watch"), "YouTube 영상 canonical 연결 로직이 없습니다.");
 assert(serviceWorker.includes("KIRINUKI_EDITOR_SOURCE_ACTION"), "서비스 워커에 치지직 source binding 중계가 없습니다.");
 assert(serviceWorker.includes("sourceSessionIdentity"), "서비스 워커가 방송 회차 ID를 검증하지 않습니다.");
 assert(serviceWorker.includes("KIRINUKI_GET_CONTEXT"), "서비스 워커가 현재 치지직 탭 문맥을 재검증하지 않습니다.");
@@ -176,6 +197,10 @@ assert(serviceWorker.includes("indexedDB.deleteDatabase"), "편집 프로젝트 
 assert(
   serviceWorker.includes("expectedResetEpoch") && serviceWorker.includes("expectedRevision"),
   "서비스 워커가 오래된 창의 프로젝트 요청을 거부하지 않습니다."
+);
+assert(
+  serviceWorker.includes('caches.delete(LEGACY_TRANSFORMERS_CACHE_NAME)'),
+  "이전 로컬 Whisper 모델 캐시의 제한적 삭제 경로가 없습니다."
 );
 for (const id of [
   "preview-video",
@@ -189,6 +214,7 @@ for (const id of [
   "add-subtitle-lane",
   "timeline-context-menu",
   "cue-text",
+  "cue-review-note",
   "cue-start",
   "cue-end",
   "cue-x",
@@ -205,6 +231,16 @@ for (const id of [
   "asset-opacity",
   "audio-volume",
   "audio-mute",
+  "caption-agent-endpoint",
+  "caption-agent-token",
+  "caption-stt-endpoint",
+  "caption-stt-model",
+  "caption-stt-api-key",
+  "caption-upstage-api-key",
+  "clear-caption-provider-keys",
+  "caption-model",
+  "test-caption-agent",
+  "caption-agent-warning",
   "generate-captions",
   "create-local-draft",
   "open-local-drafts",
@@ -220,6 +256,17 @@ for (const id of [
 }
 assert(editorScript.includes("renderProjectVideo"), "편집기 번들에 영상 렌더 경로가 없습니다.");
 assert(editorScript.includes("extractClipPcm16k"), "편집기 번들에 선택 구간 음성 추출 경로가 없습니다.");
+assert(editorScript.includes("requestCaptionAgent"), "편집기 번들에 외부 자막 에이전트 요청 경로가 없습니다.");
+assert(editorScript.includes("solar-pro3"), "편집기 번들에 Solar Pro 3 기본 모델이 없습니다.");
+assert(editorScript.includes("MAX_REMOTE_CUE_DURATION_MS = 4e3"), "원격 자막 4초 상한 검증이 없습니다.");
+assert(editorScript.includes("encodePcm16WavBase64"), "선택 구간 PCM을 표준 WAV 요청으로 바꾸지 않습니다.");
+assert(editorScript.includes("ensureCaptionAgentPermission"), "사용자 선택 원격 에이전트 권한 요청 경로가 없습니다.");
+assert(editorScript.includes("captionProviderHeaders"), "로컬 companion 제공자 API 키 전달 경로가 없습니다.");
+assert(
+  editorScript.includes("isLoopbackAgentEndpoint")
+    && editorScript.includes("if (!isLoopbackAgentEndpoint(endpoint))"),
+  "API 키의 원격 에이전트 유출 차단이 없습니다."
+);
 assert(editorScript.includes("showDirectoryPicker"), "영상·JSON·SRT 동일 폴더 저장 경로가 없습니다.");
 assert(editorScript.includes("chooseUniqueExportBaseName"), "내보내기 파일명 충돌 방지가 없습니다.");
 assert(editorScript.includes("navigator.locks"), "여러 편집기 탭의 동시 내보내기 직렬화가 없습니다.");
@@ -267,11 +314,9 @@ assert(
     editorScript.includes('onProgress(0.995, "finalize")'),
   "파일 commit 단계의 취소 불가 전환이 없습니다."
 );
-assert(editorHtml.includes('value="Xenova/whisper-tiny" selected'), "Whisper Tiny가 안전한 기본값으로 선택되지 않았습니다.");
-assert(asrWorker.includes("Xenova/whisper-tiny"), "ASR worker에 Whisper Tiny 모델 경로가 없습니다.");
-assert(asrWorker.includes("Xenova/whisper-small"), "ASR worker에 Whisper Small 선택 경로가 없습니다.");
-assert(asrWorker.includes("revision"), "ASR worker가 모델 revision을 고정하지 않습니다.");
-assert(!asrWorker.includes("cdn.jsdelivr.net"), "ASR worker에 원격 WASM 실행 코드 fallback이 남아 있습니다.");
+assert(editorHtml.includes('value="solar-pro3" selected'), "Solar Pro 3가 자막 기본 모델로 선택되지 않았습니다.");
+assert(editorHtml.includes("자막 하나는 최대 4초"), "편집기 UI에 4초 자막 원칙이 없습니다.");
+assert(!editorScript.toLowerCase().includes("xenova/whisper"), "편집기 번들에 로컬 Whisper 모델 경로가 남아 있습니다.");
 assert(editingGuide.includes("authority: USER"), "사용자 확정 컷 권한 지침이 누락되었습니다.");
 assert(editingGuide.includes("자동으로 확장·축소·병합·삭제하지 않는다"), "AI의 컷 경계 보존 지침이 누락되었습니다.");
 assert(policyGuide.includes("특정 방송인의 허락을 대신하지 않는다"), "기본 정책의 비허가 고지가 없습니다.");
@@ -288,7 +333,8 @@ for (const policyLink of [
   assert(policyGuide.includes(policyLink), `아티스트 정책 링크가 없습니다: ${policyLink}`);
 }
 assert(codexAgentGuide.includes("authority: USER"), "Codex 작업 규칙에 사용자 확정 컷 권한이 없습니다.");
-assert(codexAgentGuide.includes("외부 서비스에 업로드하지 않는다"), "Codex 작업 규칙에 미디어 외부 업로드 금지가 없습니다.");
+assert(codexAgentGuide.includes("사용자 확정 컷의 16kHz 음성"), "Codex 작업 규칙에 자막 에이전트 전송 범위가 없습니다.");
+assert(codexAgentGuide.includes("전체 원본 영상"), "Codex 작업 규칙에 전체 원본 외부 업로드 금지가 없습니다.");
 assert(Array.isArray(policyIndex.policies) && policyIndex.policies.length === 5, "방송인 정책 인덱스가 5개 그룹을 포함하지 않습니다.");
 const arisaPolicies = resolveCreatorPolicies({ streamerName: "아리사" }, policyIndex);
 assert(arisaPolicies.length === 1 && arisaPolicies[0].id === "charon-universe-w", "아리사를 카론유니버스W 정책에 매칭하지 못합니다.");

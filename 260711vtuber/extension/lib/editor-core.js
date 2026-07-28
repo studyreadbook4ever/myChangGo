@@ -4,6 +4,7 @@ export const EDITOR_SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 export const EDITOR_DATABASE_NAME = "chzzk-kirinuki-studio";
 export const MIN_SUBTITLE_LANES = 2;
 export const MAX_SUBTITLE_LANES = 8;
+export const MAX_AI_WARNINGS = 4_000;
 export const SUPPORTED_IMAGE_ASSET_MIME_TYPES = Object.freeze([
   "image/png",
   "image/jpeg",
@@ -32,6 +33,75 @@ const finiteNumber = (value, fallback = 0) => {
 export const secondsToMilliseconds = (seconds) => Math.max(0, Math.round(finiteNumber(seconds) * 1000));
 export const millisecondsToSeconds = (milliseconds) => Math.max(0, finiteNumber(milliseconds) / 1000);
 export const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+function normalizeAiWarning(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const code = String(value.code || "").trim().slice(0, 128);
+  const cueIndex = Number(value.cueIndex);
+  if (!code || !Number.isInteger(cueIndex) || cueIndex < 0) {
+    return null;
+  }
+  const clipId = String(value.clipId || "").trim().slice(0, 256);
+  return {
+    ...(clipId ? { clipId } : {}),
+    code,
+    cueIndex
+  };
+}
+
+export function normalizeAiWarnings(value) {
+  const source = Array.isArray(value) ? value : [];
+  const warnings = [];
+  let truncated = source.length > MAX_AI_WARNINGS;
+  for (
+    let index = 0;
+    index < Math.min(source.length, MAX_AI_WARNINGS + 1);
+    index += 1
+  ) {
+    const warning = normalizeAiWarning(source[index]);
+    if (!warning) {
+      continue;
+    }
+    if (warnings.length >= MAX_AI_WARNINGS) {
+      truncated = true;
+      break;
+    }
+    warnings.push(warning);
+  }
+  if (truncated) {
+    const marker = {
+      code: "TRIMMED_WARNING_COUNT",
+      cueIndex: 0
+    };
+    if (warnings.length >= MAX_AI_WARNINGS) {
+      warnings[MAX_AI_WARNINGS - 1] = marker;
+    } else {
+      warnings.push(marker);
+    }
+  }
+  return warnings;
+}
+
+export function mergeAiWarnings(existing, incoming, clipId) {
+  const normalizedExisting = normalizeAiWarnings(existing);
+  if (
+    normalizedExisting.at(-1)?.code === "TRIMMED_WARNING_COUNT"
+  ) {
+    return normalizedExisting;
+  }
+  const boundedIncoming = (Array.isArray(incoming) ? incoming : [])
+    .slice(0, MAX_AI_WARNINGS + 1)
+    .map((warning) => ({
+      ...warning,
+      clipId: String(clipId || warning?.clipId || "")
+    }));
+  return normalizeAiWarnings([
+    ...normalizedExisting,
+    ...boundedIncoming
+  ]);
+}
 
 export function normalizeHexColor(value, fallback = "#ffffff") {
   const candidate = String(value || "").trim().toLowerCase();
@@ -117,19 +187,28 @@ export function normalizeMediaAsset(raw) {
 }
 
 export function sourceSessionIdentity(source = {}) {
+  const platform = String(source.platform ?? "CHZZK")
+    .trim()
+    .toUpperCase() || "CHZZK";
+  const platformPrefix = platform === "CHZZK"
+    ? ""
+    : `${platform.toLowerCase()}:`;
   const channelId = String(source.channelId ?? "").trim();
   const startedAt = String(source.broadcastStartedAt ?? "").trim();
   const contentId = String(source.contentId ?? "").trim();
   const contentType = String(source.contentType ?? "unknown").trim();
 
+  if (platform !== "CHZZK" && contentId) {
+    return `${platformPrefix}${contentType}:${contentId}`;
+  }
   if (channelId && startedAt) {
-    return `broadcast:${channelId}:${startedAt}`;
+    return `${platformPrefix}broadcast:${channelId}:${startedAt}`;
   }
   if (contentId) {
-    return `${contentType}:${contentId}`;
+    return `${platformPrefix}${contentType}:${contentId}`;
   }
   if (channelId) {
-    return `${contentType}:${channelId}`;
+    return `${platformPrefix}${contentType}:${channelId}`;
   }
   return String(source.canonicalUrl || source.url || "").trim();
 }
@@ -285,7 +364,7 @@ export function createEditorProjectFromCapture(captureState = {}, {
       x: 0.5,
       y: 0.84,
       maxWidth: 0.86,
-      fontScale: 0.052,
+      fontScale: 0.0675,
       fontFamily: "Pretendard",
       fontWeight: 800,
       color: "#ffffff",
@@ -295,13 +374,14 @@ export function createEditorProjectFromCapture(captureState = {}, {
       align: "center"
     },
     ai: {
-      provider: "transformers.js",
-      model: "Xenova/whisper-tiny",
+      provider: "caption-agent",
+      model: "solar-pro3",
       language: "korean",
       status: "idle",
       progress: 0,
       lastRunAt: null,
-      error: null
+      error: null,
+      warnings: []
     },
     history: {
       undo: [],
@@ -394,6 +474,25 @@ export function normalizeEditorProject(raw) {
       ? "transparent"
       : String(raw.subtitleDefaults?.backgroundColor || defaults.subtitleDefaults.backgroundColor)
   };
+  const rawAi = raw.ai || {};
+  const localWhisperMetadata = (
+    rawAi.provider === "transformers.js" ||
+    String(rawAi.model || "").toLowerCase().includes("whisper")
+  );
+  const ai = {
+    ...defaults.ai,
+    ...rawAi,
+    ...(localWhisperMetadata
+      ? {
+        provider: defaults.ai.provider,
+        model: defaults.ai.model,
+        status: "idle",
+        progress: 0,
+        error: null
+      }
+      : {}),
+    warnings: normalizeAiWarnings(rawAi.warnings)
+  };
 
   return {
     ...defaults,
@@ -403,7 +502,7 @@ export function normalizeEditorProject(raw) {
     broadcastSession: { ...defaults.broadcastSession, ...(raw.broadcastSession || {}) },
     mediaAsset: normalizeMediaAsset(raw.mediaAsset),
     subtitleDefaults,
-    ai: { ...defaults.ai, ...(raw.ai || {}) },
+    ai,
     history: {
       undo: Array.isArray(raw.history?.undo) ? raw.history.undo : [],
       redo: Array.isArray(raw.history?.redo) ? raw.history.redo : []
@@ -646,7 +745,10 @@ export function mergeCaptureIntoEditorProject(project, captureState = {}) {
       vodUrl: incomingSession.vodUrl || normalized.broadcastSession?.vodUrl || "",
       vodContentId: incomingSession.vodContentId || normalized.broadcastSession?.vodContentId || "",
       alignmentOffsetMs: normalized.broadcastSession?.alignmentOffsetMs || 0,
-      alignmentConfirmed: normalized.broadcastSession?.alignmentConfirmed || source.contentType === "vod"
+      alignmentConfirmed: (
+        normalized.broadcastSession?.alignmentConfirmed
+        || source.contentType === "vod"
+      )
     },
     clips: reflowedClips,
     suppressedSelections,
@@ -722,6 +824,21 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
     startOffsetMs + MIN_CUE_DURATION_MS,
     duration
   );
+  const remotePlacement = String(cue.remoteMeta?.placement || "")
+    .trim()
+    .toLowerCase();
+  const remoteMeta = cue.remoteMeta && typeof cue.remoteMeta === "object"
+    ? {
+      speakerId: String(cue.remoteMeta.speakerId || "unknown")
+        .replace(/\s+/gu, " ")
+        .trim()
+        .slice(0, 80) || "unknown",
+      reviewRequired: Boolean(cue.remoteMeta.reviewRequired),
+      placement: ["top", "center", "bottom"].includes(remotePlacement)
+        ? remotePlacement
+        : "bottom"
+    }
+    : null;
   return {
     id: cue.id || makeId("cue"),
     clipId: clip.id,
@@ -739,6 +856,7 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
     origin: cue.origin === "ai" ? "ai" : "human",
     humanEdited: Boolean(cue.humanEdited),
     confidence: Number.isFinite(cue.confidence) ? cue.confidence : null,
+    ...(remoteMeta ? { remoteMeta } : {}),
     createdAt: cue.createdAt || nowIso(),
     updatedAt: cue.updatedAt || cue.createdAt || nowIso()
   };
@@ -756,6 +874,7 @@ export function createSubtitleCue(project, {
   y,
   origin = "human",
   confidence = null,
+  remoteMeta = null,
   createdAt = nowIso()
 } = {}) {
   const clip = project?.clips?.find((candidate) => candidate.id === clipId) || project?.clips?.[0];
@@ -774,6 +893,7 @@ export function createSubtitleCue(project, {
     y: y ?? project.subtitleDefaults?.y,
     origin,
     confidence,
+    remoteMeta,
     createdAt,
     updatedAt: createdAt
   }, clip, project.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
@@ -1210,13 +1330,7 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
   const preserved = project.subtitles.filter((cue) => (
     cue.clipId !== clipId || cue.origin !== "ai" || cue.humanEdited
   ));
-  const protectedInClip = preserved.filter((cue) => (
-    cue.clipId === clipId && cue.lane === 0
-  ));
-  const overlapsProtectedCue = (draft) => protectedInClip.some((cue) => (
-    Math.max(finiteNumber(draft.startOffsetMs), cue.startOffsetMs) <
-    Math.min(finiteNumber(draft.endOffsetMs), cue.endOffsetMs)
-  ));
+  const protectedInClip = preserved.filter((cue) => cue.clipId === clipId);
   const normalizedDrafts = drafts
     .filter((draft) => String(draft?.text || "").trim())
     .map((draft) => createSubtitleCue(project, {
@@ -1229,27 +1343,53 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
       a.startOffsetMs - b.startOffsetMs ||
       a.endOffsetMs - b.endOffsetMs
     ));
+  const overlaps = (first, second) => (
+    Math.max(first.startOffsetMs, second.startOffsetMs) <
+    Math.min(first.endOffsetMs, second.endOffsetMs)
+  );
+  let subtitleLaneCount = clamp(
+    Math.round(finiteNumber(project.subtitleLaneCount, MIN_SUBTITLE_LANES)),
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  const laneCues = Array.from(
+    { length: MAX_SUBTITLE_LANES },
+    () => []
+  );
+  const speakerLanes = new Map();
+  for (const cue of protectedInClip) {
+    laneCues[cue.lane]?.push(cue);
+    const speakerId = String(cue.remoteMeta?.speakerId || "").trim();
+    if (speakerId && speakerId !== "unknown" && !speakerLanes.has(speakerId)) {
+      speakerLanes.set(speakerId, cue.lane);
+    }
+  }
   const aiCues = [];
   for (const candidate of normalizedDrafts) {
-    if (overlapsProtectedCue(candidate)) {
-      continue;
+    const speakerId = String(candidate.remoteMeta?.speakerId || "").trim();
+    const preferredLane = speakerLanes.get(speakerId);
+    const candidateLanes = [
+      ...(Number.isInteger(preferredLane) ? [preferredLane] : []),
+      ...Array.from({ length: subtitleLaneCount }, (_, lane) => lane)
+    ].filter((lane, index, lanes) => lanes.indexOf(lane) === index);
+    let lane = candidateLanes.find((candidateLane) => (
+      !laneCues[candidateLane].some((cue) => overlaps(cue, candidate))
+    ));
+    if (lane === undefined && subtitleLaneCount < MAX_SUBTITLE_LANES) {
+      lane = subtitleLaneCount;
+      subtitleLaneCount += 1;
     }
-    const previous = aiCues.at(-1);
-    if (!previous || candidate.startOffsetMs >= previous.endOffsetMs) {
-      aiCues.push(candidate);
-      continue;
+    if (lane === undefined) {
+      throw new Error(
+        `동시에 표시할 자막이 ${MAX_SUBTITLE_LANES}개 레인을 넘었습니다. 해당 구간을 먼저 검수해 주세요.`
+      );
     }
-    const availableDuration = candidate.endOffsetMs - previous.endOffsetMs;
-    if (availableDuration >= MIN_CUE_DURATION_MS) {
-      aiCues.push({
-        ...candidate,
-        startOffsetMs: previous.endOffsetMs
-      });
-      continue;
+    const assigned = { ...candidate, lane };
+    aiCues.push(assigned);
+    laneCues[lane].push(assigned);
+    if (speakerId && speakerId !== "unknown" && !speakerLanes.has(speakerId)) {
+      speakerLanes.set(speakerId, lane);
     }
-    previous.text = `${previous.text} ${candidate.text}`.trim();
-    previous.endOffsetMs = Math.max(previous.endOffsetMs, candidate.endOffsetMs);
-    previous.updatedAt = nowIso();
   }
   const subtitles = [...preserved, ...aiCues].sort((a, b) => {
     const clipA = project.clips.find((candidate) => candidate.id === a.clipId);
@@ -1258,6 +1398,7 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
   });
   return {
     ...project,
+    subtitleLaneCount,
     subtitles,
     selectedCueId: subtitles.some((cue) => cue.id === project.selectedCueId)
       ? project.selectedCueId
@@ -1268,11 +1409,15 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
 
 export function transcriptChunksToCueDrafts(chunks = [], clipDuration = 0, {
   maxCharacters = 26,
-  maxDurationMs = 4_500,
+  maxDurationMs = 4_000,
   gapBreakMs = 800,
   minimumDurationMs = 650
 } = {}) {
   const clipDurationMs = Math.max(MIN_CUE_DURATION_MS, Math.round(finiteNumber(clipDuration)));
+  const boundedMaxDurationMs = Math.max(
+    MIN_CUE_DURATION_MS,
+    Math.round(finiteNumber(maxDurationMs, 4_000))
+  );
   const words = chunks.flatMap((chunk) => {
     const text = String(chunk?.text || "").trim();
     if (!text) {
@@ -1339,7 +1484,7 @@ export function transcriptChunksToCueDrafts(chunks = [], clipDuration = 0, {
     const proposedText = `${group.map((item) => item.text).join(" ")} ${word.text}`.trim();
     const shouldBreak = (
       word.startMs - previous.endMs >= gapBreakMs ||
-      word.endMs - first.startMs > maxDurationMs ||
+      word.endMs - first.startMs > boundedMaxDurationMs ||
       proposedText.length > maxCharacters ||
       /[.!?。！？…]$/u.test(previous.text)
     );
@@ -1349,8 +1494,57 @@ export function transcriptChunksToCueDrafts(chunks = [], clipDuration = 0, {
     group.push(word);
   });
   flush();
+  const splitTextIntoParts = (text, requestedParts) => {
+    if (requestedParts <= 1) {
+      return [text];
+    }
+    const wordsInText = text.split(/\s+/u).filter(Boolean);
+    const units = wordsInText.length >= requestedParts
+      ? wordsInText
+      : Array.from(text);
+    const separator = wordsInText.length >= requestedParts ? " " : "";
+    const partCount = Math.max(1, Math.min(requestedParts, units.length));
+    return Array.from({ length: partCount }, (_, index) => {
+      const from = Math.floor(index * units.length / partCount);
+      const to = Math.floor((index + 1) * units.length / partCount);
+      return units.slice(from, to).join(separator).trim();
+    }).filter(Boolean);
+  };
+  const durationBoundedDrafts = drafts.flatMap((draft) => {
+    const durationMs = draft.endOffsetMs - draft.startOffsetMs;
+    if (durationMs <= boundedMaxDurationMs) {
+      return [draft];
+    }
+    const requestedParts = Math.ceil(durationMs / boundedMaxDurationMs);
+    const textParts = splitTextIntoParts(draft.text, requestedParts);
+    const slotDurationMs = Math.min(
+      boundedMaxDurationMs,
+      durationMs / textParts.length
+    );
+    const availableGapMs = Math.max(
+      0,
+      durationMs - slotDurationMs * textParts.length
+    );
+    return textParts.map((text, index) => {
+      const gapBeforeMs = textParts.length <= 1
+        ? 0
+        : availableGapMs * index / (textParts.length - 1);
+      const startOffsetMs = Math.round(
+        draft.startOffsetMs + index * slotDurationMs + gapBeforeMs
+      );
+      return {
+        ...draft,
+        startOffsetMs,
+        endOffsetMs: Math.min(
+          draft.endOffsetMs,
+          startOffsetMs + boundedMaxDurationMs
+        ),
+        text
+      };
+    });
+  });
   const nonOverlapping = [];
-  for (const draft of drafts) {
+  for (const draft of durationBoundedDrafts) {
     const previous = nonOverlapping.at(-1);
     if (!previous || draft.startOffsetMs >= previous.endOffsetMs) {
       nonOverlapping.push(draft);
@@ -1365,7 +1559,10 @@ export function transcriptChunksToCueDrafts(chunks = [], clipDuration = 0, {
       continue;
     }
     previous.text = `${previous.text} ${draft.text}`.trim();
-    previous.endOffsetMs = Math.max(previous.endOffsetMs, draft.endOffsetMs);
+    previous.endOffsetMs = Math.min(
+      previous.startOffsetMs + boundedMaxDurationMs,
+      Math.max(previous.endOffsetMs, draft.endOffsetMs)
+    );
   }
   return nonOverlapping;
 }

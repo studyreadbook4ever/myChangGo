@@ -6,6 +6,7 @@ import { AudioSample } from "mediabunny";
 import {
   activeCuesAt,
   activeImageAssetsAt,
+  analyzeCaptionPlacementFrame,
   applyAudioAutomationToSample,
   audioAutomationGainAt,
   audioTrimFrameRange,
@@ -18,6 +19,7 @@ import {
   createFileWriteTransaction,
   createImageAssetRenderCache,
   drawImageAsset,
+  fallbackCaptionPlacementHints,
   imageAssetDrawRect,
   MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES,
   normalizeMediaTimeline,
@@ -25,6 +27,84 @@ import {
   validateRenderClips,
   wrapCaption
 } from "../src/editor/media-engine.js";
+
+function placementFrame(width, height, busyBand = null) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  const ranges = {
+    top: [0.06, 0.34],
+    center: [0.36, 0.64],
+    bottom: [0.66, 0.94]
+  };
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      const inBusyBand = busyBand && (
+        y >= Math.floor(height * ranges[busyBand][0])
+        && y < Math.ceil(height * ranges[busyBand][1])
+      );
+      const value = inBusyBand && (x + y) % 2 === 0 ? 255 : 80;
+      data[offset] = value;
+      data[offset + 1] = value;
+      data[offset + 2] = value;
+      data[offset + 3] = 255;
+    }
+  }
+  return data;
+}
+
+test("로컬 대표 프레임 방해도는 복잡한 밴드를 피하고 평탄하면 bottom을 택한다", () => {
+  const width = 32;
+  const height = 30;
+  const topBusy = analyzeCaptionPlacementFrame(
+    placementFrame(width, height, "top"),
+    width,
+    height
+  );
+  assert(topBusy.topScore > topBusy.bottomScore);
+  assert.equal(topBusy.preferredPlacement, "bottom");
+
+  const bottomBusy = analyzeCaptionPlacementFrame(
+    placementFrame(width, height, "bottom"),
+    width,
+    height
+  );
+  assert(bottomBusy.bottomScore > bottomBusy.topScore);
+  assert.equal(bottomBusy.preferredPlacement, "top");
+
+  const flat = analyzeCaptionPlacementFrame(
+    placementFrame(width, height),
+    width,
+    height
+  );
+  assert.deepEqual(
+    {
+      top: flat.topScore,
+      center: flat.centerScore,
+      bottom: flat.bottomScore,
+      preferred: flat.preferredPlacement
+    },
+    {
+      top: 0,
+      center: 0,
+      bottom: 0,
+      preferred: "bottom"
+    }
+  );
+  assert.deepEqual(
+    fallbackCaptionPlacementHints(1),
+    {
+      analysis: "local-three-band-edge-density-v1",
+      framesShared: false,
+      samples: [{
+        atMs: 0,
+        topScore: 500,
+        centerScore: 500,
+        bottomScore: 500,
+        preferredPlacement: "bottom"
+      }]
+    }
+  );
+});
 
 test("컨테이너 PTS 원점을 프로젝트 0초와 분리해 실제 재생 길이를 계산한다", () => {
   assert.deepEqual(normalizeMediaTimeline(120.25, 180.75), {

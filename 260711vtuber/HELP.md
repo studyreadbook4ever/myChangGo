@@ -1,8 +1,8 @@
-# 치지직 키리누키 스튜디오 도움말
+# 치지직·YouTube 키리누키 스튜디오 도움말
 
-기본 사용 경로는 **치지직 사이드패널 → 브라우저 통합 편집기 → 로컬 파일 내보내기**입니다. 자막 초안과 영상 렌더링은 Chrome 안에서 실행됩니다.
+기본 사용 경로는 **치지직 또는 YouTube 소스 페이지 → 사이드패널 → 브라우저 통합 편집기 → 로컬 파일 내보내기**입니다. 편집과 영상 렌더링은 Chrome에서 로컬로 실행하고, 사용자가 명시적으로 선택한 컷의 자막 초안만 설정한 companion 자막 에이전트를 통해 만듭니다.
 
-일반 사용에는 Python, FFmpeg, CUDA, NVIDIA GPU가 필요하지 않습니다. 이 문서 뒤쪽의 faster-whisper·OpenReel·Codex 안내는 고급 후반작업을 위한 선택 사항입니다.
+일반 사용에는 Python, FFmpeg, CUDA, NVIDIA GPU나 로컬 음성 모델이 필요하지 않습니다. 저장소의 reference gateway를 직접 실행할 때는 Node.js가 필요합니다. 이 문서 뒤쪽의 OpenReel·Codex 안내는 고급 후반작업을 위한 선택 사항입니다.
 
 ## 빠른 시작
 
@@ -10,17 +10,18 @@
 
 - Chrome 또는 Chromium 120 이상
 - 본인이 소유하거나 사용 허가를 받은 로컬 원본 영상
-- 최초 Whisper 모델 다운로드를 위한 인터넷 연결
+- 실행 중인 호환 자막 에이전트와 그 endpoint·세션 토큰
+- 외부 STT와 Upstage API에 연결할 수 있는 네트워크 및 각 API 키
 
 소스에서 Extension을 빌드할 때만 Node.js 20.9 이상이 필요합니다. 설치와 빌드 방법은 [README](README.md)를 참고하세요.
 
-1. 치지직 LIVE 또는 공식 다시보기를 엽니다.
+1. 치지직 LIVE·공식 다시보기 또는 지원되는 YouTube VOD 페이지를 엽니다.
 2. 사이드패널에서 재미있는 구간의 **시작 스탬프 → 지금**, **끝 스탬프 → 지금**을 누릅니다.
 3. **구간 저장**을 누르고 필요한 구간을 반복해서 저장합니다.
 4. **통합 편집기에서 열기**를 누릅니다.
 5. **원본 연결**에서 로컬 원본 영상을 선택합니다.
-6. 필요하면 **라이브 ↔ 로컬 VOD 정렬** 오프셋을 맞춥니다.
-7. **선택 구간만 자막 초안 만들기**를 실행하고 다중 자막 레인과 필요한 음성 설정 구간을 직접 검수합니다.
+6. 필요하면 **페이지 시각 ↔ 로컬 원본 정렬** 오프셋을 맞춥니다.
+7. **Solar 자막 에이전트**에서 companion 주소·세션 토큰과 STT·Upstage 설정을 입력하고 **연결 확인**을 누른 뒤 **활성 컷 전체 Solar 자막 초안 만들기**를 실행합니다. 다중 자막 레인과 필요한 음성 설정 구간을 직접 검수합니다.
 8. **영상 내보내기**에서 저장 폴더를 고릅니다.
 
 정상적인 폴더 저장 경로에서는 다음 파일이 같은 폴더에 생성됩니다.
@@ -30,6 +31,21 @@
 프로젝트명.kirinuki.json
 프로젝트명.ko.srt             # 텍스트가 있는 자막 cue가 있을 때만
 ```
+
+## 지원 소스
+
+치지직 LIVE·공식 다시보기와 다음 YouTube VOD 주소에서 페이지 플레이어의 현재 시각을 같은 방식으로 찍을 수 있습니다.
+
+- `https://www.youtube.com/watch?v=<video-id>`
+- `https://youtu.be/<video-id>` 리디렉션 주소
+- `https://www.youtube.com/shorts/<video-id>`
+- 브라우저 최상위 탭에서 직접 연 `https://www.youtube.com/embed/<video-id>`
+
+`www.youtube.com`, `youtube.com`, `m.youtube.com`의 같은 video ID는 URL 모양이 달라도 같은 YouTube VOD로 식별합니다. 다른 웹사이트 안에 iframe으로 삽입된 YouTube 플레이어는 지원하지 않습니다.
+
+YouTube 생방송 진행 중 페이지와 광고 재생 중에는 타임스탬프 캡처를 차단합니다. 광고가 끝난 뒤 본편에서 다시 찍으세요. 끝난 라이브가 유한한 길이의 VOD 플레이어로 제공되면 일반 YouTube VOD와 같은 흐름을 사용할 수 있습니다.
+
+Extension은 치지직·YouTube 영상을 다운로드하지 않고 DRM, 로그인, 지역 또는 접근 제한을 우회하지 않습니다. 편집과 내보내기에는 본인이 소유하거나 사용 허가를 받아 별도로 준비한 로컬 원본 파일이 반드시 필요합니다.
 
 ## 사용자 확정 컷
 
@@ -63,7 +79,7 @@
 
 삭제 시작·끝이나 잘린 뒤 남는 영상 조각은 각각 최소 0.1초여야 합니다. 더 짧은 조각이 생기면 삭제하지 않고 범위를 다시 지정하라는 안내가 표시됩니다.
 
-## LIVE·다시보기·로컬 원본 시간 맞추기
+## 소스 페이지·로컬 원본 시간 맞추기
 
 ### 같은 방송 회차 연결
 
@@ -77,44 +93,131 @@
 
 같은 채널이라도 방송 시작 시각이 다르면 서로 다른 회차입니다. 저장된 구간과 다른 방송이 감지되면 원본 혼합을 막기 위해 새 기록이 차단됩니다.
 
+YouTube는 URL 형식이 아니라 video ID를 VOD 식별자로 사용합니다. 같은 ID의 `watch`, `youtu.be`, `shorts`, 최상위 `embed` 주소는 같은 프로젝트에 연결되며, 서로 다른 ID의 구간은 섞지 않습니다.
+
 ### 로컬 원본 오프셋
 
 편집기의 정렬 공식은 다음과 같습니다.
 
 ```text
-로컬 원본 시각 = 치지직 선택 시각 + 오프셋
+로컬 원본 시각 = 소스 페이지에서 찍은 시각 + 오프셋
 ```
 
 예:
 
-- 치지직 100초 장면이 로컬 파일 100초에 있으면 `0`
-- 치지직 100초 장면이 로컬 파일 90초에 있으면 `-10`
-- 치지직 100초 장면이 로컬 파일 115초에 있으면 `+15`
+- 페이지의 100초 장면이 로컬 파일 100초에 있으면 `0`
+- 페이지의 100초 장면이 로컬 파일 90초에 있으면 `-10`
+- 페이지의 100초 장면이 로컬 파일 115초에 있으면 `+15`
 
 오프셋을 초 단위로 입력하고 **적용**을 누르세요. 첫 컷의 화면·음성이 맞는지 확인한 뒤 자막을 생성하는 편이 안전합니다.
 
-오프셋은 사용자 치지직 선택 자체를 바꾸지 않고 로컬 파일에서 읽을 위치만 옮깁니다. 적용 결과가 파일 0초보다 앞서면 거부되며, 파일 끝을 넘어가면 경고가 표시됩니다.
+오프셋은 사용자가 소스 페이지에서 찍은 선택 자체를 바꾸지 않고 로컬 파일에서 읽을 위치만 옮깁니다. 적용 결과가 파일 0초보다 앞서면 거부되며, 파일 끝을 넘어가면 경고가 표시됩니다.
 
 ## 로컬 원본 연결
 
-**원본 연결**은 파일을 Extension 안으로 복사하거나 외부 서버로 업로드하지 않습니다. 사용자가 선택한 로컬 파일을 브라우저가 직접 읽습니다.
+**원본 연결** 자체는 파일을 Extension 안으로 복사하거나 외부 서버로 업로드하지 않습니다. 사용자가 선택한 로컬 파일을 브라우저가 직접 읽습니다. 다만 사용자가 **활성 컷 전체 Solar 자막**을 실행하면 활성화된 모든 선택 컷의 16kHz 오디오와 제한된 프로젝트 문맥(식별자·프로젝트명·스트리머명·각 컷 메모), 로컬 대표 프레임에서 계산한 시간별 top·center·bottom 방해도 점수가 설정한 자막 에이전트로 차례로 전송됩니다. 대표 프레임의 픽셀 자체는 전송하지 않습니다.
 
 파일 선택기에 MP4, MKV, WebM, MOV, M4V, TS 등이 표시되지만 실제 사용 가능 여부는 컨테이너 안의 영상·오디오 코덱과 Chrome의 WebCodecs 지원에 따라 달라집니다. 영상 트랙이 없는 오디오 전용 파일은 편집 원본으로 연결할 수 없습니다.
 
 Chrome이 파일 핸들을 지원하면 선택한 핸들을 IndexedDB에 보관합니다. 다시 열 때 읽기 권한이 계속 허용되어 있으면 원본을 자동 복구합니다. 권한이 만료되었거나 파일이 이동·삭제되었다면 **원본 연결**을 눌러 다시 선택하세요.
 
-## 브라우저 AI 자막
+## Solar 자막 에이전트
 
-통합 편집기는 선택된 활성 컷의 오디오만 16kHz PCM으로 읽고, 브라우저 안의 ONNX/WASM Whisper로 한국어 자막 초안을 만듭니다. 오디오와 영상 바이트는 Hugging Face나 다른 외부 서비스로 전송하지 않습니다.
+자막 생성 흐름은 다음과 같습니다.
 
-### 모델 선택
+```text
+활성화된 모든 선택 컷 → 브라우저에서 컷별 16kHz WAV 추출
+→ 대표 프레임 7장의 top·center·bottom 방해도를 로컬에서 숫자로 요약
+→ companion 자막 에이전트 → 외부 STT가 timed transcript 생성
+→ timed transcript + 프로젝트명·스트리머명·컷 메모 + 숫자형 위치 요약을 Upstage Solar Pro 3가 의미 단위 cue로 정리
+→ 편집기로 검수용 초안 반환
+```
 
-- **Whisper Tiny**: 기본값입니다. 다운로드·메모리·처리 시간이 상대적으로 작아 빠른 초안에 적합합니다.
-- **Whisper Small**: 정확도를 우선하지만 다운로드 크기, 메모리 사용량과 처리 시간이 더 큽니다.
+Solar Pro 3는 텍스트 모델이며 오디오나 영상을 직접 전사하지 못합니다. 따라서 먼저 음성을 타임코드가 있는 텍스트로 바꾸는 외부 STT가 반드시 필요합니다. 화면 위치 판단에는 영상 대신 로컬에서 계산한 숫자형 방해도만 사용합니다. 원본 전체, 대표 프레임 픽셀, 선택하지 않은 구간, 이미지 에셋과 최종 렌더는 이 흐름으로 보내지 않습니다.
 
-선택한 모델은 최초 실행 때 Hugging Face에서 내려받아 Extension의 Cache Storage `transformers-cache`에 저장됩니다. Tiny와 Small을 각각 사용하면 두 모델 데이터가 모두 캐시될 수 있습니다.
+대표 프레임을 디코딩하지 못하면 자막 생성 자체는 계속하고 위치 점수를 동일하게 둔 `bottom` 기본값을 사용합니다. 이 경우 편집기 상단에 위치 분석 실패 경고가 남으므로 사람 검수에서 위치를 확인하세요.
 
-둘 다 완성 자막이 아니라 검수용 초안입니다. 방송인·게임 고유명사, 빠른 발화, 겹친 목소리, 노래와 잡음은 반드시 원음을 들으며 확인하세요. 무음으로 판정된 구간에는 자막이 생기지 않을 수 있습니다.
+### 연결과 모델
+
+- **에이전트 주소**: 기본값 `http://127.0.0.1:4319/v1/captions`
+- **세션 토큰**: companion의 `KIRINUKI_AGENT_TOKEN`과 같은 값
+- **STT API 주소·모델명·API 키**: 타임스탬프를 반환하는 별도 외부 STT의 설정
+- **Upstage API 키**: Solar가 timed transcript를 자막 cue로 정리할 때 사용하는 키
+- **Solar 모델**: 기본값 `solar-pro3`
+- **연결 확인**: companion 접근 권한, origin·토큰과 STT·Upstage 설정 완성 여부를 실제 자막 생성 전에 확인
+
+에이전트 주소·Solar 모델과 STT API 주소·모델명은 이 기기의 `chrome.storage.local`에 저장될 수 있습니다. 세션 토큰, STT API 키와 Upstage API 키는 프로젝트·IndexedDB·`chrome.storage` 어디에도 저장하지 않고 현재 편집기 탭의 메모리에만 둡니다. **입력한 API 키 지우기**를 누르면 현재 탭에 입력한 두 provider 키가 즉시 비워지며, 탭을 닫아도 사라집니다.
+
+편집기에서 직접 입력한 provider API 키는 정확한 세션 토큰으로 인증된 `127.0.0.1` 또는 `localhost` companion에만 전달합니다. 원격 HTTPS 자막 에이전트에는 provider 비밀 헤더를 보내지 않으므로, 원격 companion을 쓸 때는 해당 서버의 비밀 저장소나 아래 환경 변수 방식으로 provider 키를 설정하세요.
+
+### Reference gateway 실행
+
+Extension ID를 `chrome://extensions`에서 확인한 다음 저장소 최상위에서 최소한 다음 두 값을 설정해 실행합니다.
+
+```bash
+export KIRINUKI_ALLOWED_ORIGIN='chrome-extension://<확장프로그램-ID>'
+export KIRINUKI_AGENT_TOKEN='<충분히 긴 임의 토큰>'
+npm run caption-gateway
+```
+
+gateway가 실행되면 편집기의 **STT·Upstage API 키 직접 입력 · 현재 탭에서만**을 열어 STT API 주소·모델명·API 키와 Upstage API 키를 입력합니다. companion은 자체 환경 변수에 provider 설정이 없어도 시작되며, 현재 요청의 메모리 입력과 환경 변수 설정을 합쳐 파이프라인을 실행합니다.
+
+포트와 처리 제한시간은 선택 사항입니다.
+
+```bash
+export KIRINUKI_AGENT_PORT='4319'
+# 선택: 전체 파이프라인 제한시간(ms), 최대 20분
+export KIRINUKI_PIPELINE_TIMEOUT_MS='900000'
+npm run caption-gateway
+```
+
+API 키를 편집기에 매번 입력하지 않으려면 provider 설정을 companion 환경에 두는 기존 방식도 사용할 수 있습니다.
+
+```bash
+export KIRINUKI_ALLOWED_ORIGIN='chrome-extension://<확장프로그램-ID>'
+export KIRINUKI_AGENT_TOKEN='<충분히 긴 임의 토큰>'
+export KIRINUKI_STT_ENDPOINT='https://<STT-제공자>/v1/audio/transcriptions'
+export KIRINUKI_STT_API_KEY='<STT-API-키>'
+export KIRINUKI_STT_MODEL='<STT-모델-이름>'
+export UPSTAGE_API_KEY='<Upstage-API-키>'
+export KIRINUKI_SOLAR_MODEL='solar-pro3'
+export KIRINUKI_AGENT_PORT='4319'
+# 선택: 전체 파이프라인 제한시간(ms), 최대 20분
+export KIRINUKI_PIPELINE_TIMEOUT_MS='900000'
+npm run caption-gateway
+```
+
+gateway는 `127.0.0.1`에만 바인딩됩니다. `KIRINUKI_ALLOWED_ORIGIN`은 와일드카드가 아니라 현재 Extension의 정확한 origin 하나여야 하며, 편집기에 입력한 세션 토큰이 `KIRINUKI_AGENT_TOKEN`과 일치해야 합니다.
+
+Upstage가 공개한 API에는 STT가 없습니다. 이 프로젝트에서 Upstage Solar는 오디오 전사가 아니라 외부 STT의 timed transcript를 읽기 좋은 자막 cue로 정리하는 텍스트 단계만 담당합니다. 따라서 다음 요청·응답 형식과 호환되는 별도 STT가 반드시 필요합니다.
+
+reference gateway는 STT endpoint에 Bearer API 키와 함께 다음 multipart 필드를 보냅니다. 편집기에서 입력한 endpoint는 비밀이 아닌 설정으로 저장되므로 사용자 정보·API 키·쿼리 문자열을 URL에 넣을 수 없고, 키는 반드시 별도 API 키 필드에 입력해야 합니다.
+
+```text
+file: clip.wav
+model: 사용자가 지정한 STT 모델
+language: ko
+response_format: verbose_json
+timestamp_granularities[]: segment
+timestamp_granularities[]: word
+```
+
+응답은 JSON 객체여야 하며 시간 정보가 있는 `segments`, `chunks` 또는 `words` 배열을 반환해야 합니다. 각 항목은 초 단위 `start`·`end`, `[start, end]` 형태의 `timestamp`, 또는 밀리초 단위 `startMs`·`endMs` 중 하나와 `text` 또는 `word`를 제공해야 합니다. provider마다 endpoint·모델 이름·호환 필드·데이터 보존·요금이 다르므로 선택한 서비스 문서를 확인하세요.
+
+Upstage의 계약과 모델 동작은 다음 공식 문서를 기준으로 확인할 수 있습니다.
+
+- [Models](https://console.upstage.ai/docs/models)
+- [Chat API Reference](https://console.upstage.ai/api/chat)
+- [Structured outputs](https://console.upstage.ai/docs/capabilities/generate/structured-outputs)
+- [Solar Pro 3](https://console.upstage.ai/docs/models/solar-pro-3)
+
+### 자막 초안 규칙
+
+- STT가 인식한 발화를 임의로 요약하거나 빼지 않습니다.
+- cue 하나는 최대 4초입니다.
+- 문장 끝 마침표는 넣지 않고 물음표처럼 의미 있는 문장부호는 유지합니다.
+- 방송인·게임 고유명사, 빠른 발화, 겹친 목소리, 노래와 잡음은 원음을 들으며 반드시 사람이 확인합니다.
+- 외부 STT가 무음으로 판단했거나 인식하지 못한 발화는 자동으로 복원할 수 없습니다.
 
 ### 자막 직접 검수
 
@@ -133,7 +236,7 @@ Chrome이 파일 핸들을 지원하면 선택한 핸들을 IndexedDB에 보관�
 
 빈 자막 레인을 우클릭하면 그 위치에 자막을 추가할 수 있습니다. 자막 블록을 우클릭하면 같은 시각의 빈 레인에 자막을 더하거나 해당 자막을 삭제할 수 있습니다. 상단의 **현재 위치에 자막**과 선택 패널의 삭제 버튼도 계속 사용할 수 있습니다.
 
-기본 자막은 배경 없는 흰색 `Pretendard ExtraBold`와 검정 외곽선을 사용합니다. 각 cue의 색은 **선택 자막 색상**에서 독립적으로 바꿀 수 있습니다. 저장소에는 수정하지 않은 Pretendard 1.3.9 공식 WOFF2와 SIL Open Font License 1.1 원문이 함께 들어 있습니다.
+새 프로젝트의 기본 자막은 이전 5.2% 기준보다 약 30% 큰 화면 높이 6.75%의 배경 없는 흰색 `Pretendard ExtraBold`와 검정 외곽선을 사용합니다. 기존 저장 프로젝트에서 이미 정한 크기는 유지됩니다. 각 cue의 색은 **선택 자막 색상**에서 독립적으로 바꿀 수 있습니다. 저장소에는 수정하지 않은 Pretendard 1.3.9 공식 WOFF2와 SIL Open Font License 1.1 원문이 함께 들어 있습니다.
 
 사람이 직접 만든 자막과 사람이 수정한 AI 자막은 AI 초안을 다시 실행해도 보존됩니다. 새 AI 초안이 보호된 자막과 겹치면 그 부분의 새 초안은 추가하지 않습니다.
 
@@ -224,7 +327,10 @@ JSON과 SRT에도 같은 접미사가 붙습니다. 이름 후보는 최대 ` (9
 | 최근 로컬 임시저장 | 같은 IndexedDB의 `local-drafts` | 프로젝트별 최근 5개, 5분 자동·수동·복원 직전 |
 | 붙여넣은 이미지 에셋 | 같은 IndexedDB의 `image-assets` | Blob 원본과 투명도 보존 |
 | 로컬 원본 파일 핸들 | 같은 IndexedDB의 `media-handles` | 지원 브라우저에서만 저장 |
-| Whisper 모델 | Cache Storage `transformers-cache` | Tiny/Small 모델 데이터 |
+| 에이전트 주소·Solar 모델·STT 주소·모델명 | `chrome.storage.local` | 비밀이 아닌 설정만 다음 편집 세션에도 사용 |
+| 자막 세션 토큰 | 편집기 탭 메모리 | 프로젝트·IndexedDB·Chrome 저장소에 넣지 않으며 탭을 닫으면 사라짐 |
+| 편집기에 입력한 Upstage·STT API 키 | 편집기 탭 메모리 | 저장하지 않으며 **입력한 API 키 지우기** 또는 탭 닫기로 제거 |
+| 환경 변수 방식의 Upstage·STT API 키 | companion 프로세스 환경 | Extension 데이터에 넣지 않으며 companion 측에서 별도 관리 |
 | 원본·내보낸 결과 | 사용자가 고른 로컬 디스크 | Extension 초기화로 삭제하지 않음 |
 
 열려 있던 편집기를 다시 열면 같은 방송 회차의 저장 프로젝트를 불러오고, 사이드패널의 최신 사용자 선택을 병합합니다. 기존 편집 순서와 사람이 조정한 범위·자막을 가능한 한 보존합니다. 새 선택이 현재 원본 길이 밖이면 프로젝트는 유지하고 경고합니다.
@@ -236,69 +342,77 @@ JSON과 SRT에도 같은 접미사가 붙습니다. 이름 후보는 최대 ` (9
 - 모든 Chrome 창에 열려 있는 통합 편집기 탭 닫기
 - 저장된 구간과 초안 지우기
 - IndexedDB의 편집 프로젝트, 최근 임시저장, 이미지 에셋과 저장된 원본 파일 핸들 지우기
-- 치지직 탭 연결 정보 지우기
+- 치지직·YouTube 소스 탭 연결 정보 지우기
 
-현재 구현은 편집기 IndexedDB 전체를 삭제하므로 저장된 다른 편집 프로젝트도 함께 지워집니다. 디스크의 원본 영상과 이미 내보낸 파일은 삭제하지 않으며 Whisper 모델 캐시는 유지합니다.
+현재 구현은 편집기 IndexedDB 전체를 삭제하므로 저장된 다른 편집 프로젝트도 함께 지워집니다. 디스크의 원본 영상과 이미 내보낸 파일은 삭제하지 않습니다.
 
 사이드패널을 여러 창에 열어 둔 경우에도 초기화 상태가 함께 동기화되며, 초기화 전에 대기하던 오래된 저장·편집기 열기 요청은 거절됩니다.
 
-### 모델 캐시 지우기
+### 자막 에이전트 연결 정보와 자격증명
 
-모델만 다시 받으려면 편집기 DevTools에서 다음 항목을 삭제하세요.
+에이전트 주소나 모델을 바꾸려면 편집기의 **Solar 자막 에이전트**에서 새 값을 입력하고 **연결 확인**을 누르세요. 세션 토큰과 편집기에 직접 입력한 provider API 키는 저장되지 않으므로 편집기 탭을 새로 열 때 다시 입력해야 합니다.
 
-```text
-Application → Cache Storage → transformers-cache
-```
-
-다음 자막 실행 때 선택한 모델을 다시 다운로드합니다. Extension 데이터 전체를 지우거나 Extension을 제거하면 프로젝트·파일 핸들·모델 캐시도 함께 사라질 수 있으므로 필요한 결과 파일을 먼저 백업하세요.
+Extension 데이터 전체를 지우거나 Extension을 제거하면 프로젝트·파일 핸들과 저장된 endpoint·모델 설정이 사라질 수 있으므로 필요한 결과 파일을 먼저 백업하세요. 환경 변수 방식의 companion API 키와 세션 토큰은 Extension 데이터 초기화 대상이 아니며, 해당 프로세스의 환경과 비밀 저장소에서 별도로 교체하거나 폐기해야 합니다.
 
 ### Extension 권한
 
-- `activeTab`, `scripting`, `tabs`: 치지직 탭과 통신하고 원래 소스 탭·편집기 탭을 찾고 포커스합니다.
+- `activeTab`, `scripting`, `tabs`: 지원되는 치지직·YouTube 소스 탭과 통신하고 원래 소스 탭·편집기 탭을 찾고 포커스합니다.
 - `clipboardRead`: 사용자가 **클립보드 이미지 붙여넣기**를 누를 때 이미지 형식을 읽습니다. 일반 텍스트와 클립보드 기록은 보관하지 않습니다.
-- `storage`, `unlimitedStorage`: 구간, 프로젝트와 큰 모델 캐시를 로컬에 보존합니다.
+- `storage`, `unlimitedStorage`: 구간, 프로젝트, 자막, 에셋, 임시저장과 endpoint·모델 설정을 로컬에 보존합니다.
 - 치지직 host 권한: LIVE/VOD 메타데이터와 플레이어 시각을 읽습니다.
-- Hugging Face host 권한: 고정된 Whisper Tiny/Small revision의 모델 데이터만 다운로드합니다.
+- YouTube host 권한: 지원되는 VOD 주소, video ID, 제목과 플레이어 시각을 읽고 광고·진행 중인 라이브 상태를 판별합니다.
+- loopback host 권한: 기본 reference gateway인 `127.0.0.1` 또는 `localhost`에 연결합니다.
+- 선택적 HTTPS host 권한: 사용자가 다른 자막 에이전트 endpoint를 설정하고 연결할 때 Chrome이 그 origin에 대한 권한을 요청합니다. 일반 `http` endpoint는 loopback만 허용합니다.
 
-실행용 JavaScript와 ONNX Runtime WASM은 Extension 패키지 안에 있으며 CDN에서 실행 코드를 가져오지 않습니다.
+Extension은 현재 탭에서 입력한 외부 STT·Upstage API 키를 보관하지 않으며, 인증된 loopback companion으로만 전달합니다. 원격 자막 에이전트에는 provider 키를 직접 보내지 말고 서버 측 비밀 저장소를 사용하세요. companion 연결에는 provider 키와 별도의 충분히 긴 세션 토큰을 사용합니다.
 
 ## 알려진 제한
 
-- 치지직 영상을 다운로드하거나 DRM·접근 제한을 우회하지 않습니다. 로컬 원본은 사용자가 준비해야 합니다.
+- 치지직·YouTube 영상을 다운로드하거나 DRM·로그인·지역·접근 제한을 우회하지 않습니다. 로컬 원본은 사용자가 권리를 확인해 직접 준비해야 합니다.
+- YouTube는 유한한 길이의 VOD만 지원합니다. 진행 중인 라이브, 광고 재생 중, 다른 사이트의 iframe 안에 삽입된 플레이어에서는 타임스탬프를 찍지 않습니다.
 - Chrome/Chromium 120 이상을 대상으로 합니다. 실제 코덱 지원은 운영체제와 브라우저 빌드에 따라 다릅니다.
 - 주 영상 트랙과 주 오디오 트랙만 사용합니다. 다중 카메라·다중 음성 트랙을 보존하지 않습니다.
 - 출력은 최대 1920×1080, 최대 60fps입니다. VFR 입력은 컷 경계를 보존하는 CFR 출력으로 바뀝니다.
 - 출력 오디오는 지원되는 경우 스테레오 48kHz로 인코딩됩니다.
 - 이미지 에셋은 PNG·JPEG·WebP·GIF 정지 프레임을 지원합니다. SVG, 원격 URL 자동 수집, 애니메이션 재생과 에셋 파일을 포함한 이동식 프로젝트 패키지는 아직 제공하지 않습니다. 내보내기는 현재 표시 구간의 이미지만 순차 디코드하며, 동시에 표시되는 이미지의 실제 RGBA 메모리가 256MiB를 넘으면 크기나 겹침 수를 줄이라는 오류를 냅니다.
 - 긴 자막은 줄을 버리지 않고 화면 안에 들어오도록 글자 크기를 줄여 렌더합니다. 다른 레인의 동시 cue는 허용하지만 같은 레인 안의 겹침은 허용하지 않습니다.
-- 긴 단일 선택은 오디오 PCM과 AI 추론 메모리를 많이 사용할 수 있습니다. 키리누키 단위의 짧은 선택을 권장합니다.
+- 자막 에이전트는 한 컷당 최대 30분까지만 처리합니다. 긴 단일 선택은 오디오 추출·전송과 외부 처리 시간이 길어지므로 키리누키 단위의 짧은 선택을 권장합니다.
 - 폴더 저장 폴백에서는 완성 영상 전체가 메모리에 머물 수 있습니다.
 - 현재 편집기는 컷 순서·경계, 이미지 오버레이, 다중 자막 레인과 기본 음성 자동화에 집중합니다. 전환, 다중 영상·오디오 트랙, 음원 분리, 고급 색보정과 플러그인 믹싱은 제공하지 않습니다.
 - `.kirinuki.json` 직접 가져오기와 OpenReel 프로젝트 자동 변환은 아직 제공하지 않습니다.
-- AI 자막은 한국어 고정 초안이며 화자 분리나 번역 기능이 없습니다.
+- Upstage의 공개 API는 STT를 제공하지 않고 Solar Pro 3도 오디오를 직접 전사하지 않으므로, 호환되는 별도 외부 STT가 항상 필요합니다. 인식 정확도, 화자 정보와 타임코드 정밀도는 STT 제공자 결과에 좌우됩니다.
+- 한 번의 자막 실행은 활성 컷 최대 500개, 새 AI cue 최대 10,000개까지 처리합니다. 그보다 큰 프로젝트는 활성 컷을 나눠 실행해 브라우저 메모리와 외부 API 비용을 통제하세요.
+- 자막 생성에는 네트워크가 필요하고 STT·Upstage 사용량에 따른 비용·rate limit이 적용될 수 있습니다. 선택 컷 오디오와 timed transcript가 각 제공자에게 전송되므로 데이터 보존·학습·지역 정책을 확인하세요.
 - 자동 게시·업로드·수익화 기능은 없습니다.
 
 ## 문제 해결
 
-### 사이드패널이 치지직 탭을 찾지 못함
+### 사이드패널이 소스 탭을 찾지 못함
 
-- 주소가 `https://chzzk.naver.com/` 아래인지 확인합니다.
+- 주소가 `https://chzzk.naver.com/` 아래이거나 지원되는 YouTube `watch`, `youtu.be`, `shorts`, 최상위 `embed` VOD 주소인지 확인합니다.
 - 기존에 열려 있던 탭이면 한 번 새로고침합니다.
 - `chrome://extensions`에서 Extension이 켜져 있는지 확인합니다.
 
-### 원래 치지직 탭 연결이 끊김
+### YouTube에서 현재 시각을 찍을 수 없음
 
-원래 탭을 닫았거나 브라우저 세션이 바뀌면 포커스·시각 이동 연결이 끊길 수 있습니다. 올바른 LIVE/VOD 탭에서 사이드패널을 열고 **통합 편집기에서 열기**를 다시 누르세요. 저장된 편집 프로젝트는 로컬에 남아 있습니다.
+- 진행 중인 라이브라면 현재 지원 대상이 아닙니다. 방송 종료 뒤 유한한 길이의 VOD로 제공될 때 다시 시도합니다.
+- 광고 재생 중이면 본편이 시작된 뒤 다시 누릅니다.
+- 다른 사이트에 삽입된 iframe이 아니라 YouTube 주소를 브라우저 최상위 탭으로 직접 엽니다.
+- Shorts 전환 뒤 다른 영상이 보인다면 현재 영상의 URL과 video ID가 안정된 다음 다시 찍습니다.
+
+### 원래 소스 탭 연결이 끊김
+
+원래 탭을 닫았거나 브라우저 세션이 바뀌면 포커스·시각 이동 연결이 끊길 수 있습니다. 올바른 치지직 LIVE·VOD 또는 YouTube VOD 탭에서 사이드패널을 열고 **통합 편집기에서 열기**를 다시 누르세요. 저장된 편집 프로젝트는 로컬에 남아 있습니다.
 
 ### 화면·음성 싱크가 맞지 않음
 
-첫 컷에서 같은 장면을 찾아 **라이브 ↔ 로컬 VOD 정렬**을 조정합니다.
+첫 컷에서 같은 장면을 찾아 **페이지 시각 ↔ 로컬 원본 정렬**을 조정합니다.
 
 ```text
-오프셋 = 로컬 원본 시각 - 치지직 선택 시각
+오프셋 = 로컬 원본 시각 - 소스 페이지에서 찍은 시각
 ```
 
-치지직 100초 장면이 로컬 90초라면 `-10`입니다.
+페이지의 100초 장면이 로컬 90초라면 `-10`입니다.
 
 ### 선택 구간이 원본 길이 밖이라는 경고
 
@@ -312,11 +426,16 @@ Application → Cache Storage → transformers-cache
 - 파일을 이동하거나 이름을 바꿨다면 새 위치에서 다시 선택합니다.
 - 브라우저가 파일 핸들을 지원하지 않는 환경에서는 편집기를 열 때마다 다시 선택해야 할 수 있습니다.
 
-### 모델 다운로드 또는 AI 자막이 실패함
+### 자막 에이전트 연결 또는 Solar 자막이 실패함
 
-- 최초 실행이면 인터넷 연결과 Hugging Face 접근 가능 여부를 확인합니다.
-- Small에서 메모리 부족이 나면 페이지를 다시 열고 Tiny로 실행합니다.
-- 캐시가 손상된 것 같으면 `transformers-cache`를 삭제하고 Tiny부터 다시 받습니다.
+- companion 프로세스가 실행 중인지 확인합니다.
+- 편집기 endpoint가 기본값 `http://127.0.0.1:4319/v1/captions` 또는 실제 배포 주소와 일치하는지 확인합니다.
+- 편집기의 세션 토큰과 companion의 `KIRINUKI_AGENT_TOKEN`이 같은지 확인합니다.
+- **연결 확인**을 눌러 endpoint 접근 권한, origin 허용과 인증 오류를 먼저 확인합니다.
+- 직접 입력 방식을 쓴다면 STT API 주소·모델·키와 Upstage 키가 현재 편집기 탭에 모두 입력되어 있는지 확인합니다. 키를 비운 뒤에는 다시 입력해야 합니다.
+- 환경 변수 방식을 쓴다면 companion의 `KIRINUKI_STT_ENDPOINT`, `KIRINUKI_STT_MODEL`, `KIRINUKI_STT_API_KEY`, `UPSTAGE_API_KEY`와 외부 네트워크 연결을 확인합니다.
+- 원격 HTTPS companion에 provider 키를 직접 입력한 경우 loopback 전용 보안 제한으로 거절됩니다. 원격 서버 환경에 키를 설정하세요.
+- STT 서비스가 `file`, `model`, `language`, `response_format`, `timestamp_granularities[]` multipart 요청과 timed JSON 응답을 지원하는지 확인합니다.
 - AI 작업 중에는 원본 교체·컷 변경·내보내기가 잠기므로 작업을 완료하거나 취소한 뒤 다시 시도합니다.
 
 ### 자막이 없거나 오인식이 많음
@@ -338,7 +457,6 @@ Application → Cache Storage → transformers-cache
 
 ### 내보내기가 느리거나 메모리가 부족함
 
-- Small 대신 Tiny를 사용합니다.
 - 아주 긴 선택을 여러 키리누키 프로젝트로 나눕니다.
 - 다른 무거운 탭을 닫습니다.
 - 개별 다운로드 폴백 대신 폴더 저장 API가 있는 Chrome을 사용합니다.
@@ -357,54 +475,7 @@ Application → Cache Storage → transformers-cache
 
 ## 선택적 외부 흐름
 
-아래 도구는 브라우저 통합 편집기의 필수 구성요소가 아닙니다. 별도 설치·캐시·프로젝트 형식을 사용하며 현재 통합 편집기와 자동 동기화되지 않습니다.
-
-### faster-whisper CLI
-
-전체 원본 전사나 별도 자동화가 필요할 때만 사용합니다.
-
-준비:
-
-```bash
-python -m venv .beta-tools/venv
-source .beta-tools/venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install "faster-whisper==1.2.1"
-```
-
-CPU `base` 모델을 별도 캐시에 내려받는 예:
-
-```bash
-mkdir -p .beta-tools/models
-.beta-tools/venv/bin/python - <<'PY'
-from faster_whisper import WhisperModel
-
-WhisperModel(
-    "base",
-    device="cpu",
-    compute_type="int8",
-    download_root=".beta-tools/models",
-)
-print("base model is ready")
-PY
-```
-
-저장소의 보조 스크립트는 CPU `int8`, 한국어, VAD와 단어 시각을 사용합니다.
-
-```bash
-mkdir -p beta-runs/manual-transcript
-HF_HUB_OFFLINE=1 \
-  .beta-tools/venv/bin/python scripts/transcribe-beta.py \
-  "/절대경로/full-video.mp4" \
-  --model base \
-  --model-dir .beta-tools/models \
-  --json beta-runs/manual-transcript/raw-transcript.json \
-  --srt beta-runs/manual-transcript/raw-transcript.srt
-```
-
-이 결과는 원본 전체 타임라인의 외부 전사 파일입니다. 통합 편집기의 `.kirinuki.json`이나 최종 `.ko.srt`와 다른 파일이며 편집기로 자동 가져오지 않습니다. 사용자 확정 컷에 맞추려면 별도 스크립트나 사람이 범위를 제한하고 최종 컷 연결 타임라인으로 시각을 다시 계산해야 합니다.
-
-`.beta-tools/`와 `beta-runs/`는 Git에서 제외됩니다. 실제 방송 원본·전사문·렌더 결과를 저장소에 커밋하지 마세요.
+아래 도구는 브라우저 통합 편집기의 필수 구성요소가 아닙니다. 별도 프로젝트 형식을 사용하며 현재 통합 편집기와 자동 동기화되지 않습니다.
 
 ### OpenReel
 
@@ -417,8 +488,6 @@ HF_HUB_OFFLINE=1 \
 - 통합 편집기의 렌더 영상에는 자막이 이미 입혀져 있으므로 같은 SRT를 다시 얹으면 자막이 중복됩니다.
 
 OpenReel에서 자막 스타일을 다시 만들려면 로컬 원본을 불러오고 `.kirinuki.json`을 참고해 같은 컷 순서·길이를 수동으로 재현한 뒤 `.ko.srt`를 가져오세요. 컷 타임라인이 다르면 SRT 싱크도 맞지 않습니다.
-
-OpenReel의 faster-whisper 전사 서버도 별도 서비스입니다. 현재 Extension은 그 API를 호출하지 않으며 설치·모델·GPU 설정은 OpenReel 문서를 따릅니다.
 
 ### Codex 작업폴더
 
@@ -454,9 +523,11 @@ Codex 흐름에서도 사용자 확정 컷은 `authority: USER`입니다. 정책
 
 ## 최종 확인
 
-- [ ] 올바른 방송 회차의 로컬 원본을 연결함
-- [ ] 첫 컷으로 LIVE/VOD 오프셋을 확인함
+- [ ] 올바른 치지직 방송 회차 또는 YouTube video ID의 로컬 원본을 연결함
+- [ ] 첫 컷으로 소스 페이지·로컬 원본 오프셋을 확인함
 - [ ] 컷 순서와 양끝을 사람이 검수함
-- [ ] AI 자막 텍스트·시각·위치를 사람이 검수함
+- [ ] 자막 에이전트 주소·세션 토큰과 STT·Upstage 설정을 확인하고 선택 컷만 전송함
+- [ ] 편집기에 직접 입력한 provider API 키를 작업 뒤 지우거나 탭을 닫음
+- [ ] 자막 초안의 텍스트·시각·위치를 원음과 대조해 사람이 검수함
 - [ ] 영상과 `.kirinuki.json`, 필요한 경우 `.ko.srt`가 같은 이름으로 저장됨
 - [ ] 공개 전 방송인·음원·제3자 정책을 다시 확인함

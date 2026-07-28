@@ -4,6 +4,7 @@ var EDITOR_SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 var EDITOR_DATABASE_NAME = "chzzk-kirinuki-studio";
 var MIN_SUBTITLE_LANES = 2;
 var MAX_SUBTITLE_LANES = 8;
+var MAX_AI_WARNINGS = 4e3;
 var SUPPORTED_IMAGE_ASSET_MIME_TYPES = Object.freeze([
   "image/png",
   "image/jpeg",
@@ -27,6 +28,64 @@ var finiteNumber = (value, fallback = 0) => {
 };
 var secondsToMilliseconds = (seconds) => Math.max(0, Math.round(finiteNumber(seconds) * 1e3));
 var clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+function normalizeAiWarning(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const code = String(value.code || "").trim().slice(0, 128);
+  const cueIndex = Number(value.cueIndex);
+  if (!code || !Number.isInteger(cueIndex) || cueIndex < 0) {
+    return null;
+  }
+  const clipId = String(value.clipId || "").trim().slice(0, 256);
+  return {
+    ...clipId ? { clipId } : {},
+    code,
+    cueIndex
+  };
+}
+function normalizeAiWarnings(value) {
+  const source = Array.isArray(value) ? value : [];
+  const warnings = [];
+  let truncated = source.length > MAX_AI_WARNINGS;
+  for (let index = 0; index < Math.min(source.length, MAX_AI_WARNINGS + 1); index += 1) {
+    const warning = normalizeAiWarning(source[index]);
+    if (!warning) {
+      continue;
+    }
+    if (warnings.length >= MAX_AI_WARNINGS) {
+      truncated = true;
+      break;
+    }
+    warnings.push(warning);
+  }
+  if (truncated) {
+    const marker = {
+      code: "TRIMMED_WARNING_COUNT",
+      cueIndex: 0
+    };
+    if (warnings.length >= MAX_AI_WARNINGS) {
+      warnings[MAX_AI_WARNINGS - 1] = marker;
+    } else {
+      warnings.push(marker);
+    }
+  }
+  return warnings;
+}
+function mergeAiWarnings(existing, incoming, clipId) {
+  const normalizedExisting = normalizeAiWarnings(existing);
+  if (normalizedExisting.at(-1)?.code === "TRIMMED_WARNING_COUNT") {
+    return normalizedExisting;
+  }
+  const boundedIncoming = (Array.isArray(incoming) ? incoming : []).slice(0, MAX_AI_WARNINGS + 1).map((warning) => ({
+    ...warning,
+    clipId: String(clipId || warning?.clipId || "")
+  }));
+  return normalizeAiWarnings([
+    ...normalizedExisting,
+    ...boundedIncoming
+  ]);
+}
 function normalizeHexColor(value, fallback = "#ffffff") {
   const candidate = String(value || "").trim().toLowerCase();
   if (/^#[0-9a-f]{6}$/u.test(candidate)) {
@@ -93,18 +152,23 @@ function normalizeMediaAsset(raw) {
   };
 }
 function sourceSessionIdentity(source = {}) {
+  const platform = String(source.platform ?? "CHZZK").trim().toUpperCase() || "CHZZK";
+  const platformPrefix = platform === "CHZZK" ? "" : `${platform.toLowerCase()}:`;
   const channelId = String(source.channelId ?? "").trim();
   const startedAt = String(source.broadcastStartedAt ?? "").trim();
   const contentId = String(source.contentId ?? "").trim();
   const contentType = String(source.contentType ?? "unknown").trim();
+  if (platform !== "CHZZK" && contentId) {
+    return `${platformPrefix}${contentType}:${contentId}`;
+  }
   if (channelId && startedAt) {
-    return `broadcast:${channelId}:${startedAt}`;
+    return `${platformPrefix}broadcast:${channelId}:${startedAt}`;
   }
   if (contentId) {
-    return `${contentType}:${contentId}`;
+    return `${platformPrefix}${contentType}:${contentId}`;
   }
   if (channelId) {
-    return `${contentType}:${channelId}`;
+    return `${platformPrefix}${contentType}:${channelId}`;
   }
   return String(source.canonicalUrl || source.url || "").trim();
 }
@@ -231,7 +295,7 @@ function createEditorProjectFromCapture(captureState = {}, {
       x: 0.5,
       y: 0.84,
       maxWidth: 0.86,
-      fontScale: 0.052,
+      fontScale: 0.0675,
       fontFamily: "Pretendard",
       fontWeight: 800,
       color: "#ffffff",
@@ -241,13 +305,14 @@ function createEditorProjectFromCapture(captureState = {}, {
       align: "center"
     },
     ai: {
-      provider: "transformers.js",
-      model: "Xenova/whisper-tiny",
+      provider: "caption-agent",
+      model: "solar-pro3",
       language: "korean",
       status: "idle",
       progress: 0,
       lastRunAt: null,
-      error: null
+      error: null,
+      warnings: []
     },
     history: {
       undo: [],
@@ -331,6 +396,20 @@ function normalizeEditorProject(raw) {
     ),
     backgroundColor: migratingLegacyProject ? "transparent" : String(raw.subtitleDefaults?.backgroundColor || defaults.subtitleDefaults.backgroundColor)
   };
+  const rawAi = raw.ai || {};
+  const localWhisperMetadata = rawAi.provider === "transformers.js" || String(rawAi.model || "").toLowerCase().includes("whisper");
+  const ai = {
+    ...defaults.ai,
+    ...rawAi,
+    ...localWhisperMetadata ? {
+      provider: defaults.ai.provider,
+      model: defaults.ai.model,
+      status: "idle",
+      progress: 0,
+      error: null
+    } : {},
+    warnings: normalizeAiWarnings(rawAi.warnings)
+  };
   return {
     ...defaults,
     ...raw,
@@ -339,7 +418,7 @@ function normalizeEditorProject(raw) {
     broadcastSession: { ...defaults.broadcastSession, ...raw.broadcastSession || {} },
     mediaAsset: normalizeMediaAsset(raw.mediaAsset),
     subtitleDefaults,
-    ai: { ...defaults.ai, ...raw.ai || {} },
+    ai,
     history: {
       undo: Array.isArray(raw.history?.undo) ? raw.history.undo : [],
       redo: Array.isArray(raw.history?.redo) ? raw.history.redo : []
@@ -600,6 +679,12 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
     startOffsetMs + MIN_CUE_DURATION_MS,
     duration
   );
+  const remotePlacement = String(cue.remoteMeta?.placement || "").trim().toLowerCase();
+  const remoteMeta = cue.remoteMeta && typeof cue.remoteMeta === "object" ? {
+    speakerId: String(cue.remoteMeta.speakerId || "unknown").replace(/\s+/gu, " ").trim().slice(0, 80) || "unknown",
+    reviewRequired: Boolean(cue.remoteMeta.reviewRequired),
+    placement: ["top", "center", "bottom"].includes(remotePlacement) ? remotePlacement : "bottom"
+  } : null;
   return {
     id: cue.id || makeId("cue"),
     clipId: clip.id,
@@ -617,6 +702,7 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
     origin: cue.origin === "ai" ? "ai" : "human",
     humanEdited: Boolean(cue.humanEdited),
     confidence: Number.isFinite(cue.confidence) ? cue.confidence : null,
+    ...remoteMeta ? { remoteMeta } : {},
     createdAt: cue.createdAt || nowIso(),
     updatedAt: cue.updatedAt || cue.createdAt || nowIso()
   };
@@ -633,6 +719,7 @@ function createSubtitleCue(project2, {
   y,
   origin = "human",
   confidence = null,
+  remoteMeta = null,
   createdAt = nowIso()
 } = {}) {
   const clip = project2?.clips?.find((candidate) => candidate.id === clipId) || project2?.clips?.[0];
@@ -651,6 +738,7 @@ function createSubtitleCue(project2, {
     y: y ?? project2.subtitleDefaults?.y,
     origin,
     confidence,
+    remoteMeta,
     createdAt,
     updatedAt: createdAt
   }, clip, project2.subtitleLaneCount ?? MIN_SUBTITLE_LANES);
@@ -997,35 +1085,55 @@ function replaceAiSubtitleDraft(project2, clipId, drafts = []) {
     return project2;
   }
   const preserved = project2.subtitles.filter((cue) => cue.clipId !== clipId || cue.origin !== "ai" || cue.humanEdited);
-  const protectedInClip = preserved.filter((cue) => cue.clipId === clipId && cue.lane === 0);
-  const overlapsProtectedCue = (draft) => protectedInClip.some((cue) => Math.max(finiteNumber(draft.startOffsetMs), cue.startOffsetMs) < Math.min(finiteNumber(draft.endOffsetMs), cue.endOffsetMs));
+  const protectedInClip = preserved.filter((cue) => cue.clipId === clipId);
   const normalizedDrafts = drafts.filter((draft) => String(draft?.text || "").trim()).map((draft) => createSubtitleCue(project2, {
     ...draft,
     clipId,
     lane: 0,
     origin: "ai"
   })).sort((a, b) => a.startOffsetMs - b.startOffsetMs || a.endOffsetMs - b.endOffsetMs);
+  const overlaps = (first, second) => Math.max(first.startOffsetMs, second.startOffsetMs) < Math.min(first.endOffsetMs, second.endOffsetMs);
+  let subtitleLaneCount = clamp(
+    Math.round(finiteNumber(project2.subtitleLaneCount, MIN_SUBTITLE_LANES)),
+    MIN_SUBTITLE_LANES,
+    MAX_SUBTITLE_LANES
+  );
+  const laneCues = Array.from(
+    { length: MAX_SUBTITLE_LANES },
+    () => []
+  );
+  const speakerLanes = /* @__PURE__ */ new Map();
+  for (const cue of protectedInClip) {
+    laneCues[cue.lane]?.push(cue);
+    const speakerId = String(cue.remoteMeta?.speakerId || "").trim();
+    if (speakerId && speakerId !== "unknown" && !speakerLanes.has(speakerId)) {
+      speakerLanes.set(speakerId, cue.lane);
+    }
+  }
   const aiCues = [];
   for (const candidate of normalizedDrafts) {
-    if (overlapsProtectedCue(candidate)) {
-      continue;
+    const speakerId = String(candidate.remoteMeta?.speakerId || "").trim();
+    const preferredLane = speakerLanes.get(speakerId);
+    const candidateLanes = [
+      ...Number.isInteger(preferredLane) ? [preferredLane] : [],
+      ...Array.from({ length: subtitleLaneCount }, (_, lane2) => lane2)
+    ].filter((lane2, index, lanes) => lanes.indexOf(lane2) === index);
+    let lane = candidateLanes.find((candidateLane) => !laneCues[candidateLane].some((cue) => overlaps(cue, candidate)));
+    if (lane === void 0 && subtitleLaneCount < MAX_SUBTITLE_LANES) {
+      lane = subtitleLaneCount;
+      subtitleLaneCount += 1;
     }
-    const previous = aiCues.at(-1);
-    if (!previous || candidate.startOffsetMs >= previous.endOffsetMs) {
-      aiCues.push(candidate);
-      continue;
+    if (lane === void 0) {
+      throw new Error(
+        `\uB3D9\uC2DC\uC5D0 \uD45C\uC2DC\uD560 \uC790\uB9C9\uC774 ${MAX_SUBTITLE_LANES}\uAC1C \uB808\uC778\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4. \uD574\uB2F9 \uAD6C\uAC04\uC744 \uBA3C\uC800 \uAC80\uC218\uD574 \uC8FC\uC138\uC694.`
+      );
     }
-    const availableDuration = candidate.endOffsetMs - previous.endOffsetMs;
-    if (availableDuration >= MIN_CUE_DURATION_MS) {
-      aiCues.push({
-        ...candidate,
-        startOffsetMs: previous.endOffsetMs
-      });
-      continue;
+    const assigned = { ...candidate, lane };
+    aiCues.push(assigned);
+    laneCues[lane].push(assigned);
+    if (speakerId && speakerId !== "unknown" && !speakerLanes.has(speakerId)) {
+      speakerLanes.set(speakerId, lane);
     }
-    previous.text = `${previous.text} ${candidate.text}`.trim();
-    previous.endOffsetMs = Math.max(previous.endOffsetMs, candidate.endOffsetMs);
-    previous.updatedAt = nowIso();
   }
   const subtitles = [...preserved, ...aiCues].sort((a, b) => {
     const clipA = project2.clips.find((candidate) => candidate.id === a.clipId);
@@ -1034,104 +1142,11 @@ function replaceAiSubtitleDraft(project2, clipId, drafts = []) {
   });
   return {
     ...project2,
+    subtitleLaneCount,
     subtitles,
     selectedCueId: subtitles.some((cue) => cue.id === project2.selectedCueId) ? project2.selectedCueId : aiCues[0]?.id || protectedInClip[0]?.id || null,
     updatedAt: nowIso()
   };
-}
-function transcriptChunksToCueDrafts(chunks = [], clipDuration = 0, {
-  maxCharacters = 26,
-  maxDurationMs = 4500,
-  gapBreakMs = 800,
-  minimumDurationMs = 650
-} = {}) {
-  const clipDurationMs2 = Math.max(MIN_CUE_DURATION_MS, Math.round(finiteNumber(clipDuration)));
-  const words = chunks.flatMap((chunk) => {
-    const text = String(chunk?.text || "").trim();
-    if (!text) {
-      return [];
-    }
-    const start = secondsToMilliseconds(chunk?.timestamp?.[0]);
-    const rawEnd = chunk?.timestamp?.[1];
-    const end = rawEnd === null || rawEnd === void 0 ? Math.min(clipDurationMs2, start + minimumDurationMs) : secondsToMilliseconds(rawEnd);
-    const startMs = clamp(
-      start,
-      0,
-      Math.max(0, clipDurationMs2 - MIN_CUE_DURATION_MS)
-    );
-    return [{
-      text,
-      startMs,
-      endMs: clamp(
-        Math.max(startMs + MIN_CUE_DURATION_MS, end),
-        startMs + MIN_CUE_DURATION_MS,
-        clipDurationMs2
-      )
-    }];
-  }).sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
-  const drafts = [];
-  let group = [];
-  const flush = () => {
-    if (group.length === 0) {
-      return;
-    }
-    const startOffsetMs = group[0].startMs;
-    const naturalEnd = group.at(-1).endMs;
-    const nextStart = words[words.indexOf(group.at(-1)) + 1]?.startMs;
-    const paddedEnd = Math.min(
-      clipDurationMs2,
-      Math.max(naturalEnd, startOffsetMs + minimumDurationMs),
-      nextStart === void 0 ? clipDurationMs2 : Math.max(naturalEnd, nextStart - 40)
-    );
-    drafts.push({
-      startOffsetMs,
-      endOffsetMs: Math.max(startOffsetMs + MIN_CUE_DURATION_MS, paddedEnd),
-      text: group.map((word, index) => {
-        if (index === 0) {
-          return word.text;
-        }
-        const previous = group[index - 1].text;
-        const noLeadingSpace = /^[,.:;!?%)\]}〉》」』…]/u.test(word.text);
-        const noTrailingSpace = /[(\[{〈《「『]$/u.test(previous);
-        return `${noLeadingSpace || noTrailingSpace ? "" : " "}${word.text}`;
-      }).join("")
-    });
-    group = [];
-  };
-  words.forEach((word) => {
-    if (group.length === 0) {
-      group.push(word);
-      return;
-    }
-    const first = group[0];
-    const previous = group.at(-1);
-    const proposedText = `${group.map((item) => item.text).join(" ")} ${word.text}`.trim();
-    const shouldBreak = word.startMs - previous.endMs >= gapBreakMs || word.endMs - first.startMs > maxDurationMs || proposedText.length > maxCharacters || /[.!?。！？…]$/u.test(previous.text);
-    if (shouldBreak) {
-      flush();
-    }
-    group.push(word);
-  });
-  flush();
-  const nonOverlapping = [];
-  for (const draft of drafts) {
-    const previous = nonOverlapping.at(-1);
-    if (!previous || draft.startOffsetMs >= previous.endOffsetMs) {
-      nonOverlapping.push(draft);
-      continue;
-    }
-    const availableDuration = draft.endOffsetMs - previous.endOffsetMs;
-    if (availableDuration >= MIN_CUE_DURATION_MS) {
-      nonOverlapping.push({
-        ...draft,
-        startOffsetMs: previous.endOffsetMs
-      });
-      continue;
-    }
-    previous.text = `${previous.text} ${draft.text}`.trim();
-    previous.endOffsetMs = Math.max(previous.endOffsetMs, draft.endOffsetMs);
-  }
-  return nonOverlapping;
 }
 function updateClipTrim(project2, clipId, {
   sourceStartMs,
@@ -31419,6 +31434,18 @@ var OUTPUT_AUDIO_SAMPLE_RATE = 48e3;
 var OUTPUT_AUDIO_BITRATE = 16e4;
 var FRAME_INDEX_EPSILON = 1e-7;
 var MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES = 256 * 1024 * 1024;
+var CAPTION_PLACEMENT_ANALYSIS = "local-three-band-edge-density-v1";
+var CAPTION_PLACEMENT_SAMPLE_COUNT = 7;
+var CAPTION_PLACEMENT_BANDS = Object.freeze([
+  Object.freeze({ placement: "top", start: 0.06, end: 0.34 }),
+  Object.freeze({ placement: "center", start: 0.36, end: 0.64 }),
+  Object.freeze({ placement: "bottom", start: 0.66, end: 0.94 })
+]);
+var CAPTION_PLACEMENT_TIE_ORDER = Object.freeze({
+  bottom: 0,
+  top: 1,
+  center: 2
+});
 function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw new DOMException("\uC791\uC5C5\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError");
@@ -31676,6 +31703,191 @@ async function extractClipPcm16k(file, clip, {
     }
     onProgress(1);
     return pcm;
+  } finally {
+    input.dispose();
+  }
+}
+function pixelLuminance(data, offset) {
+  return data[offset] * 0.2126 + data[offset + 1] * 0.7152 + data[offset + 2] * 0.0722;
+}
+function captionBandObstructionScore(data, width, height, band) {
+  const startX = Math.max(0, Math.floor(width * 0.04));
+  const endX = Math.min(width, Math.ceil(width * 0.96));
+  const startY = Math.max(0, Math.floor(height * band.start));
+  const endY = Math.min(height, Math.ceil(height * band.end));
+  let luminanceTotal = 0;
+  let luminanceSquaredTotal = 0;
+  let edgeTotal = 0;
+  let edgeCount = 0;
+  let pixelCount = 0;
+  for (let y = startY; y < endY; y += 1) {
+    for (let x = startX; x < endX; x += 1) {
+      const offset = (y * width + x) * 4;
+      const luminance = pixelLuminance(data, offset);
+      luminanceTotal += luminance;
+      luminanceSquaredTotal += luminance * luminance;
+      pixelCount += 1;
+      if (x > startX) {
+        edgeTotal += Math.abs(
+          luminance - pixelLuminance(data, offset - 4)
+        );
+        edgeCount += 1;
+      }
+      if (y > startY) {
+        edgeTotal += Math.abs(
+          luminance - pixelLuminance(data, offset - width * 4)
+        );
+        edgeCount += 1;
+      }
+    }
+  }
+  if (pixelCount === 0) {
+    return 1e3;
+  }
+  const mean = luminanceTotal / pixelCount;
+  const variance = Math.max(
+    0,
+    luminanceSquaredTotal / pixelCount - mean * mean
+  );
+  const contrast = Math.sqrt(variance);
+  const edgeDensity = edgeCount > 0 ? edgeTotal / edgeCount : 0;
+  return Math.round(
+    clamp((contrast * 1.8 + edgeDensity * 2.2) / 255, 0, 1) * 1e3
+  );
+}
+function analyzeCaptionPlacementFrame(rgba, width, height) {
+  const normalizedWidth = Number(width);
+  const normalizedHeight = Number(height);
+  if (!rgba || !Number.isInteger(normalizedWidth) || !Number.isInteger(normalizedHeight) || normalizedWidth < 2 || normalizedHeight < 3 || rgba.length < normalizedWidth * normalizedHeight * 4) {
+    throw new TypeError("\uC790\uB9C9 \uC548\uC804 \uC601\uC5ED\uC744 \uBD84\uC11D\uD560 RGBA \uD504\uB808\uC784\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const scores = Object.fromEntries(
+    CAPTION_PLACEMENT_BANDS.map((band) => [
+      `${band.placement}Score`,
+      captionBandObstructionScore(
+        rgba,
+        normalizedWidth,
+        normalizedHeight,
+        band
+      )
+    ])
+  );
+  const preferredPlacement = CAPTION_PLACEMENT_BANDS.map((band) => band.placement).sort((first, second) => scores[`${first}Score`] - scores[`${second}Score`] || CAPTION_PLACEMENT_TIE_ORDER[first] - CAPTION_PLACEMENT_TIE_ORDER[second])[0];
+  return {
+    ...scores,
+    preferredPlacement
+  };
+}
+function fallbackCaptionPlacementHints(durationMs) {
+  const duration = Math.max(1, Math.round(Number(durationMs) || 1));
+  return {
+    analysis: CAPTION_PLACEMENT_ANALYSIS,
+    framesShared: false,
+    samples: [{
+      atMs: Math.min(duration - 1, Math.floor(duration / 2)),
+      topScore: 500,
+      centerScore: 500,
+      bottomScore: 500,
+      preferredPlacement: "bottom"
+    }]
+  };
+}
+async function extractClipCaptionPlacementHints(file, clip, {
+  onProgress = () => {
+  },
+  sampleCount = CAPTION_PLACEMENT_SAMPLE_COUNT,
+  signal
+} = {}) {
+  const input = createInput(file);
+  try {
+    const [videoTrack, audioTrack] = await Promise.all([
+      input.getPrimaryVideoTrack(),
+      input.getPrimaryAudioTrack()
+    ]);
+    if (!videoTrack) {
+      throw new Error("\uC790\uB9C9 \uC704\uCE58\uB97C \uBD84\uC11D\uD560 \uC601\uC0C1 \uD2B8\uB799\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+    }
+    if (!await videoTrack.canDecode()) {
+      throw new Error("\uC790\uB9C9 \uC704\uCE58 \uBD84\uC11D\uC744 \uC704\uD574 \uC601\uC0C1 \uD504\uB808\uC784\uC744 \uB514\uCF54\uB529\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+    }
+    const timeline = await readMediaTimeline(input, [videoTrack, audioTrack]);
+    validateRenderClips({
+      clips: [{ ...clip, enabled: true, timelineStartMs: 0 }]
+    }, timeline.durationSeconds * 1e3);
+    const sourceWidth = await videoTrack.getDisplayWidth();
+    const sourceHeight = await videoTrack.getDisplayHeight();
+    if (!(sourceWidth > 0) || !(sourceHeight > 0)) {
+      throw new Error("\uC790\uB9C9 \uC704\uCE58 \uBD84\uC11D\uC6A9 \uC601\uC0C1 \uD06C\uAE30\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+    }
+    const aspectRatio = sourceWidth / sourceHeight;
+    const analysisWidth = aspectRatio >= 1 ? 160 : Math.max(64, Math.round(160 * aspectRatio));
+    const analysisHeight = aspectRatio >= 1 ? Math.max(64, Math.round(160 / aspectRatio)) : 160;
+    const canvas = new OffscreenCanvas(analysisWidth, analysisHeight);
+    const context = canvas.getContext("2d", {
+      alpha: false,
+      willReadFrequently: true
+    });
+    if (!context) {
+      throw new Error("\uC790\uB9C9 \uC704\uCE58 \uBD84\uC11D\uC6A9 \uCE94\uBC84\uC2A4\uB97C \uC900\uBE44\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+    }
+    const durationMs = Math.round(clip.sourceEndMs - clip.sourceStartMs);
+    const count = Math.max(
+      1,
+      Math.min(
+        CAPTION_PLACEMENT_SAMPLE_COUNT,
+        durationMs,
+        Math.floor(Number(sampleCount)) || CAPTION_PLACEMENT_SAMPLE_COUNT
+      )
+    );
+    const localTimestampsMs = Array.from({ length: count }, (_, index) => Math.max(
+      0,
+      Math.min(
+        durationMs - 1,
+        Math.round(durationMs * (index + 0.5) / count)
+      )
+    ));
+    const sourceTimestamps = localTimestampsMs.map((timestampMs) => timeline.originSeconds + (clip.sourceStartMs + timestampMs) / 1e3);
+    const sink = new VideoSampleSink(videoTrack);
+    const samples = [];
+    let sampleIndex = 0;
+    for await (const sample of sink.samplesAtTimestamps(sourceTimestamps)) {
+      try {
+        throwIfAborted(signal);
+        if (!sample) {
+          throw new Error("\uC790\uB9C9 \uC704\uCE58\uB97C \uBD84\uC11D\uD560 \uB300\uD45C \uD504\uB808\uC784\uC744 \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+        }
+        context.fillStyle = "#000";
+        context.fillRect(0, 0, analysisWidth, analysisHeight);
+        sample.drawWithFit(context, { fit: "cover" });
+        const analysis = analyzeCaptionPlacementFrame(
+          context.getImageData(
+            0,
+            0,
+            analysisWidth,
+            analysisHeight
+          ).data,
+          analysisWidth,
+          analysisHeight
+        );
+        samples.push({
+          atMs: localTimestampsMs[sampleIndex],
+          ...analysis
+        });
+      } finally {
+        sample?.close();
+      }
+      sampleIndex += 1;
+      onProgress(sampleIndex / count);
+    }
+    if (samples.length !== count) {
+      throw new Error("\uC790\uB9C9 \uC704\uCE58 \uBD84\uC11D\uC6A9 \uB300\uD45C \uD504\uB808\uC784\uC744 \uBAA8\uB450 \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+    }
+    onProgress(1);
+    return {
+      analysis: CAPTION_PLACEMENT_ANALYSIS,
+      framesShared: false,
+      samples
+    };
   } finally {
     input.dispose();
   }
@@ -31939,7 +32151,7 @@ function drawCaption(context, canvas, project2, cue) {
     return;
   }
   const defaults = project2.subtitleDefaults;
-  let fontSize = Math.max(18, Math.round(canvas.height * (defaults.fontScale || 0.052)));
+  let fontSize = Math.max(18, Math.round(canvas.height * (defaults.fontScale || 0.0675)));
   const fontFamily = String(defaults.fontFamily || "Pretendard").replace(/["\\]/gu, "");
   const fontWeight = clamp(Math.round(Number(defaults.fontWeight) || 800), 100, 900);
   const requestedX = canvas.width * cue.x;
@@ -32975,6 +33187,757 @@ async function pruneImageAssetBlobs(projectId, keepAssetIds = []) {
   return Number(deletedCount) || 0;
 }
 
+// src/editor/caption-agent.js
+var CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v1";
+var CAPTION_AGENT_REQUEST_SCHEMA = "chzzk-kirinuki-caption-request/v1";
+var CAPTION_AGENT_RESPONSE_SCHEMA = "chzzk-kirinuki-caption-response/v1";
+var MAX_REMOTE_CUE_DURATION_MS = 4e3;
+var MAX_REMOTE_CUES = 4e3;
+var MAX_REMOTE_WARNINGS = 4e3;
+var MAX_CAPTION_AGENT_CLIPS_PER_RUN = 500;
+var MAX_CAPTION_AGENT_CUES_PER_RUN = 1e4;
+var MAX_CAPTION_AGENT_POLL_ATTEMPTS = 240;
+var CAPTION_AGENT_REQUEST_TIMEOUT_MS = 20 * 60 * 1e3;
+var CAPTION_AGENT_PROBE_TIMEOUT_MS = 1e4;
+var MAX_CAPTION_AGENT_RESPONSE_BYTES = 8 * 1024 * 1024;
+var MAX_CAPTION_AGENT_CLIP_DURATION_MS = 30 * 60 * 1e3;
+var MAX_CAPTION_AGENT_WAV_BYTES = 64 * 1024 * 1024;
+var CAPTION_AGENT_SAMPLE_RATE_HZ = 16e3;
+var MAX_PROVIDER_CREDENTIAL_LENGTH = 4096;
+var MAX_STT_ENDPOINT_LENGTH = 2048;
+var MAX_STT_MODEL_LENGTH = 160;
+var CAPTION_PLACEMENT_ANALYSIS2 = "local-three-band-edge-density-v1";
+var MAX_CAPTION_PLACEMENT_SAMPLES = 9;
+var CAPTION_AGENT_PROVIDER_HEADERS = Object.freeze({
+  sttEndpoint: "X-Kirinuki-STT-Endpoint",
+  sttModel: "X-Kirinuki-STT-Model",
+  sttApiKey: "X-Kirinuki-STT-API-Key",
+  upstageApiKey: "X-Kirinuki-Upstage-API-Key"
+});
+var DEFAULT_CAPTION_AGENT_SETTINGS = Object.freeze({
+  endpoint: "http://127.0.0.1:4319/v1/captions",
+  model: "solar-pro3",
+  sttEndpoint: "",
+  sttModel: ""
+});
+var ALLOWED_SOLAR_MODELS = /* @__PURE__ */ new Set([
+  "solar-pro3",
+  "solar-pro2",
+  "solar-mini"
+]);
+var PLACEMENT_Y = Object.freeze({
+  top: 0.18,
+  center: 0.5,
+  bottom: 0.84
+});
+function finiteNumber2(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+function clamp3(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+function isLoopbackHostname(hostname) {
+  return hostname === "127.0.0.1" || hostname === "localhost";
+}
+function isLoopbackAgentEndpoint(value) {
+  const url2 = new URL(normalizeCaptionAgentEndpoint(value));
+  return url2.protocol === "http:" && isLoopbackHostname(url2.hostname);
+}
+function normalizeExternalSttEndpoint(value) {
+  const input = String(value || "").trim();
+  if (!input) {
+    return "";
+  }
+  if (input.length > MAX_STT_ENDPOINT_LENGTH) {
+    throw new Error("STT API \uC8FC\uC18C\uAC00 \uD5C8\uC6A9 \uAE38\uC774\uB97C \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
+  }
+  let url2;
+  try {
+    url2 = new URL(input);
+  } catch {
+    throw new Error("STT API \uC8FC\uC18C\uAC00 \uC62C\uBC14\uB978 URL\uC774 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  if (url2.username || url2.password || url2.search || url2.hash) {
+    throw new Error(
+      "STT API \uC8FC\uC18C\uC5D0 \uC778\uC99D \uC815\uBCF4\xB7\uCFFC\uB9AC \uBB38\uC790\uC5F4\xB7# \uC870\uAC01\uC744 \uB123\uC9C0 \uB9C8\uC138\uC694."
+    );
+  }
+  const secureRemote = url2.protocol === "https:";
+  const localHttp = url2.protocol === "http:" && isLoopbackHostname(url2.hostname);
+  if (!secureRemote && !localHttp) {
+    throw new Error("STT API \uC8FC\uC18C\uB294 HTTPS \uB610\uB294 loopback HTTP\uC5EC\uC57C \uD569\uB2C8\uB2E4.");
+  }
+  return url2.toString();
+}
+function normalizeProviderSecret(value, label) {
+  const secret = String(value || "").trim();
+  if (!secret) {
+    return "";
+  }
+  if (secret.length > MAX_PROVIDER_CREDENTIAL_LENGTH || /[\r\n]/u.test(secret)) {
+    throw new Error(`${label} \uD615\uC2DD\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+  }
+  return secret;
+}
+function normalizeSttModel(value) {
+  const model = String(value || "").trim();
+  if (!model) {
+    return "";
+  }
+  if (model.length > MAX_STT_MODEL_LENGTH || /[\u0000-\u001f\u007f]/u.test(model)) {
+    throw new Error("STT \uBAA8\uB378\uBA85\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  return model;
+}
+function normalizeCaptionProviderConfig(raw = {}) {
+  return {
+    sttEndpoint: normalizeExternalSttEndpoint(raw.sttEndpoint),
+    sttModel: normalizeSttModel(raw.sttModel),
+    sttApiKey: normalizeProviderSecret(raw.sttApiKey, "STT API \uD0A4"),
+    upstageApiKey: normalizeProviderSecret(
+      raw.upstageApiKey,
+      "Upstage API \uD0A4"
+    )
+  };
+}
+function captionProviderHeaders(endpoint, raw = {}) {
+  const provider = normalizeCaptionProviderConfig(raw);
+  const supplied = Object.values(provider).some(Boolean);
+  if (!supplied) {
+    return {};
+  }
+  if (!isLoopbackAgentEndpoint(endpoint)) {
+    throw new Error(
+      "STT\xB7Upstage API \uD0A4\uC640 \uC81C\uACF5\uC790 \uC124\uC815\uC740 \uB85C\uCEEC companion \uC8FC\uC18C\uB85C\uB9CC \uC804\uB2EC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(provider).filter(([, value]) => value).map(([field, value]) => [
+      CAPTION_AGENT_PROVIDER_HEADERS[field],
+      value
+    ])
+  );
+}
+function normalizeCaptionAgentEndpoint(value) {
+  let url2;
+  try {
+    url2 = new URL(String(value || "").trim());
+  } catch {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC8FC\uC18C\uAC00 \uC62C\uBC14\uB978 URL\uC774 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  if (url2.username || url2.password) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC8FC\uC18C\uC5D0 \uC544\uC774\uB514\uB098 \uBE44\uBC00\uBC88\uD638\uB97C \uB123\uC9C0 \uB9C8\uC138\uC694.");
+  }
+  if (url2.hash) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC8FC\uC18C\uC5D0\uB294 # \uC870\uAC01\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  const secureRemote = url2.protocol === "https:";
+  const localHttp = url2.protocol === "http:" && isLoopbackHostname(url2.hostname);
+  if (!secureRemote && !localHttp) {
+    throw new Error("\uC678\uBD80 \uC5D0\uC774\uC804\uD2B8\uB294 HTTPS, \uB85C\uCEEC \uC5D0\uC774\uC804\uD2B8\uB294 127.0.0.1\xB7localhost\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
+  }
+  return url2.toString();
+}
+function captionAgentPermissionOrigin(endpoint) {
+  const url2 = new URL(normalizeCaptionAgentEndpoint(endpoint));
+  return `${url2.protocol}//${url2.hostname}/*`;
+}
+function normalizeCaptionAgentSettings(raw = {}) {
+  const model = ALLOWED_SOLAR_MODELS.has(raw.model) ? raw.model : DEFAULT_CAPTION_AGENT_SETTINGS.model;
+  let endpoint = DEFAULT_CAPTION_AGENT_SETTINGS.endpoint;
+  try {
+    endpoint = normalizeCaptionAgentEndpoint(
+      raw.endpoint || DEFAULT_CAPTION_AGENT_SETTINGS.endpoint
+    );
+  } catch {
+  }
+  let sttEndpoint = "";
+  try {
+    sttEndpoint = normalizeExternalSttEndpoint(raw.sttEndpoint);
+  } catch {
+  }
+  let sttModel = "";
+  try {
+    sttModel = normalizeSttModel(raw.sttModel);
+  } catch {
+  }
+  return { endpoint, model, sttEndpoint, sttModel };
+}
+async function loadCaptionAgentSettings(storageArea = chrome.storage.local) {
+  const stored = await storageArea.get(CAPTION_AGENT_SETTINGS_KEY);
+  return normalizeCaptionAgentSettings(stored[CAPTION_AGENT_SETTINGS_KEY]);
+}
+async function saveCaptionAgentSettings(settings, storageArea = chrome.storage.local) {
+  const normalized = normalizeCaptionAgentSettings({
+    ...settings,
+    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint),
+    sttEndpoint: normalizeExternalSttEndpoint(settings?.sttEndpoint),
+    sttModel: normalizeSttModel(settings?.sttModel)
+  });
+  await storageArea.set({ [CAPTION_AGENT_SETTINGS_KEY]: normalized });
+  return normalized;
+}
+async function ensureCaptionAgentPermission(endpoint, permissionsApi = chrome.permissions) {
+  const origin = captionAgentPermissionOrigin(endpoint);
+  if (await permissionsApi.contains({ origins: [origin] })) {
+    return true;
+  }
+  return permissionsApi.request({ origins: [origin] });
+}
+function captionAgentAudioFootprint(durationMs) {
+  const duration = Math.round(finiteNumber2(durationMs));
+  if (duration <= 0 || duration > MAX_CAPTION_AGENT_CLIP_DURATION_MS) {
+    throw new RangeError("Solar \uC790\uB9C9\uC740 \uD55C \uCEF7\uB2F9 30\uBD84 \uC774\uD558\uB9CC \uCC98\uB9AC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
+  }
+  const sampleCount = Math.ceil(
+    duration * CAPTION_AGENT_SAMPLE_RATE_HZ / 1e3
+  );
+  const floatPcmBytes = sampleCount * Float32Array.BYTES_PER_ELEMENT;
+  const wavBytes = 44 + sampleCount * Int16Array.BYTES_PER_ELEMENT;
+  if (wavBytes > MAX_CAPTION_AGENT_WAV_BYTES) {
+    throw new RangeError("Solar \uC790\uB9C9\uC6A9 WAV\uAC00 64MiB \uC0C1\uD55C\uC744 \uB118\uC2B5\uB2C8\uB2E4.");
+  }
+  return {
+    durationMs: duration,
+    sampleCount,
+    floatPcmBytes,
+    wavBytes,
+    base64Bytes: 4 * Math.ceil(wavBytes / 3)
+  };
+}
+function encodePcm16WavBase64(audio, sampleRateHz = CAPTION_AGENT_SAMPLE_RATE_HZ) {
+  if (!(audio instanceof Float32Array)) {
+    throw new TypeError("16kHz Float32 PCM \uC624\uB514\uC624\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.");
+  }
+  const sampleRate = Math.round(finiteNumber2(sampleRateHz));
+  if (sampleRate !== CAPTION_AGENT_SAMPLE_RATE_HZ) {
+    throw new RangeError("Solar \uC790\uB9C9\uC740 16kHz PCM \uC624\uB514\uC624\uB9CC \uCC98\uB9AC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
+  }
+  const wavByteLength = 44 + audio.length * 2;
+  if (wavByteLength > MAX_CAPTION_AGENT_WAV_BYTES) {
+    throw new RangeError("Solar \uC790\uB9C9\uC6A9 WAV\uAC00 64MiB \uC0C1\uD55C\uC744 \uB118\uC2B5\uB2C8\uB2E4.");
+  }
+  const bytes2 = new Uint8Array(wavByteLength);
+  const view2 = new DataView(bytes2.buffer);
+  const writeAscii = (offset, text) => {
+    for (let index = 0; index < text.length; index += 1) {
+      bytes2[offset + index] = text.charCodeAt(index);
+    }
+  };
+  writeAscii(0, "RIFF");
+  view2.setUint32(4, bytes2.length - 8, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view2.setUint32(16, 16, true);
+  view2.setUint16(20, 1, true);
+  view2.setUint16(22, 1, true);
+  view2.setUint32(24, sampleRate, true);
+  view2.setUint32(28, sampleRate * 2, true);
+  view2.setUint16(32, 2, true);
+  view2.setUint16(34, 16, true);
+  writeAscii(36, "data");
+  view2.setUint32(40, audio.length * 2, true);
+  for (let index = 0; index < audio.length; index += 1) {
+    const sample = clamp3(finiteNumber2(audio[index]), -1, 1);
+    view2.setInt16(
+      44 + index * 2,
+      Math.round(sample < 0 ? sample * 32768 : sample * 32767),
+      true
+    );
+  }
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+  for (let index = 0; index < bytes2.length; index += 3) {
+    const first = bytes2[index];
+    const second = bytes2[index + 1];
+    const third = bytes2[index + 2];
+    const packed = first << 16 | (second || 0) << 8 | (third || 0);
+    output += alphabet[packed >>> 18 & 63];
+    output += alphabet[packed >>> 12 & 63];
+    output += index + 1 < bytes2.length ? alphabet[packed >>> 6 & 63] : "=";
+    output += index + 2 < bytes2.length ? alphabet[packed & 63] : "=";
+  }
+  return output;
+}
+function createCaptionAgentRequest({
+  project: project2,
+  clip,
+  model,
+  audioBase64,
+  placementHints
+}) {
+  const durationMs = Math.max(0, Math.round(
+    finiteNumber2(clip?.sourceEndMs) - finiteNumber2(clip?.sourceStartMs)
+  ));
+  if (!clip?.id || durationMs <= 0) {
+    throw new Error("\uC790\uB9C9\uC744 \uB9CC\uB4E4 \uCEF7 \uAD6C\uAC04\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  captionAgentAudioFootprint(durationMs);
+  if (!ALLOWED_SOLAR_MODELS.has(model)) {
+    throw new Error("\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 Solar \uBAA8\uB378\uC785\uB2C8\uB2E4.");
+  }
+  if (!audioBase64) {
+    throw new Error("\uC5D0\uC774\uC804\uD2B8\uC5D0 \uBCF4\uB0BC \uC74C\uC131\uC774 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.");
+  }
+  if (!placementHints || placementHints.analysis !== CAPTION_PLACEMENT_ANALYSIS2 || placementHints.framesShared !== false || !Array.isArray(placementHints.samples) || placementHints.samples.length < 1 || placementHints.samples.length > MAX_CAPTION_PLACEMENT_SAMPLES) {
+    throw new Error("\uC790\uB9C9 \uC704\uCE58\uC6A9 \uB85C\uCEEC \uD654\uBA74 \uBD84\uC11D\uAC12\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const visualSamples = placementHints.samples.map((sample, sampleIndex) => {
+    const atMs = Number(sample?.atMs);
+    const topScore = Number(sample?.topScore);
+    const centerScore = Number(sample?.centerScore);
+    const bottomScore = Number(sample?.bottomScore);
+    if (!Number.isInteger(atMs) || atMs < 0 || atMs >= durationMs || [topScore, centerScore, bottomScore].some(
+      (score) => !Number.isInteger(score) || score < 0 || score > 1e3
+    ) || !["top", "center", "bottom"].includes(
+      sample?.preferredPlacement
+    ) || sampleIndex > 0 && atMs <= Number(placementHints.samples[sampleIndex - 1]?.atMs)) {
+      throw new Error("\uC790\uB9C9 \uC704\uCE58\uC6A9 \uD654\uBA74 \uBD84\uC11D \uD45C\uBCF8\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+    }
+    return {
+      atMs,
+      topScore,
+      centerScore,
+      bottomScore,
+      preferredPlacement: sample.preferredPlacement
+    };
+  });
+  return {
+    schema: CAPTION_AGENT_REQUEST_SCHEMA,
+    requestId: globalThis.crypto.randomUUID(),
+    model,
+    locale: "ko-KR",
+    clip: {
+      id: clip.id,
+      title: String(clip.note ?? clip.title ?? "").slice(0, 1e3),
+      durationMs
+    },
+    source: {
+      projectId: String(project2?.id || ""),
+      projectName: String(project2?.name || ""),
+      streamerName: String(project2?.source?.streamerName || "")
+    },
+    policy: {
+      audience: "korean-vtuber-kirinuki",
+      includeAllRecognizableSpeech: true,
+      uncertainSpeech: "keep-and-mark-for-review",
+      maxCueDurationMs: MAX_REMOTE_CUE_DURATION_MS,
+      terminalPeriod: "omit",
+      questionAndExclamationMarks: "keep",
+      placement: "choose-readable-safe-area"
+    },
+    visual: {
+      analysis: CAPTION_PLACEMENT_ANALYSIS2,
+      framesShared: false,
+      samples: visualSamples
+    },
+    audio: {
+      encoding: "base64",
+      mimeType: "audio/wav",
+      sampleRateHz: CAPTION_AGENT_SAMPLE_RATE_HZ,
+      channels: 1,
+      data: audioBase64
+    }
+  };
+}
+function stripTerminalPeriod(text) {
+  return String(text || "").replace(/\s+/gu, " ").trim().replace(/[.\u3002\uff0e]+(?=(?:["'”’)\]}\u3009\u300b\u300d\u300f\u3011]*)$)/gu, "").trim();
+}
+function normalizedColor(value) {
+  const color = String(value || "").trim();
+  return /^#[0-9a-f]{6}$/iu.test(color) ? color.toLowerCase() : void 0;
+}
+function normalizedRemoteMeta(raw, placement) {
+  return {
+    speakerId: String(raw?.speakerId ?? raw?.speaker_id ?? "unknown").replace(/\s+/gu, " ").trim().slice(0, 80) || "unknown",
+    reviewRequired: Boolean(raw?.reviewRequired ?? raw?.review_required),
+    placement
+  };
+}
+function normalizeCaptionAgentCues(cues, clipDurationMs2) {
+  const durationMs = Math.max(0, Math.round(finiteNumber2(clipDurationMs2)));
+  if (!Array.isArray(cues)) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC5D0 cues \uBC30\uC5F4\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  if (cues.length > MAX_REMOTE_CUES) {
+    throw new Error(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC774 ${MAX_REMOTE_CUES}\uAC1C cue \uC0C1\uD55C\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.`);
+  }
+  const normalized = cues.map((raw, index) => {
+    const text = stripTerminalPeriod(raw?.text);
+    const rawStartMs = Number(raw?.startMs ?? raw?.start_ms);
+    const rawEndMs = Number(raw?.endMs ?? raw?.end_ms);
+    if (!text) {
+      throw new Error(`${index + 1}\uBC88\uC9F8 \uC6D0\uACA9 \uC790\uB9C9\uC758 \uD14D\uC2A4\uD2B8\uAC00 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.`);
+    }
+    if (!Number.isFinite(rawStartMs) || !Number.isFinite(rawEndMs) || rawStartMs < 0 || rawEndMs > durationMs || rawEndMs - rawStartMs < 100) {
+      throw new Error(`${index + 1}\uBC88\uC9F8 \uC6D0\uACA9 \uC790\uB9C9\uC758 \uC2DC\uAC04 \uBC94\uC704\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+    }
+    if (rawEndMs - rawStartMs > MAX_REMOTE_CUE_DURATION_MS) {
+      throw new Error(`${index + 1}\uBC88\uC9F8 \uC6D0\uACA9 \uC790\uB9C9\uC774 4\uCD08 \uC81C\uD55C\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.`);
+    }
+    const startOffsetMs = Math.round(rawStartMs);
+    const endOffsetMs = Math.round(rawEndMs);
+    const requestedPlacement = String(raw?.placement || "bottom").toLowerCase();
+    const placement = Object.hasOwn(PLACEMENT_Y, requestedPlacement) ? requestedPlacement : "bottom";
+    const y = Object.hasOwn(PLACEMENT_Y, requestedPlacement) ? PLACEMENT_Y[requestedPlacement] : clamp3(finiteNumber2(raw?.y, PLACEMENT_Y.bottom), 0.08, 0.92);
+    const color = normalizedColor(raw?.color);
+    return {
+      startOffsetMs,
+      endOffsetMs,
+      text,
+      y,
+      ...color ? { color } : {},
+      remoteMeta: normalizedRemoteMeta(raw, placement)
+    };
+  }).sort((left, right) => left.startOffsetMs - right.startOffsetMs || left.endOffsetMs - right.endOffsetMs);
+  return normalized;
+}
+async function readResponseTextLimited(response, maxBytes = MAX_CAPTION_AGENT_RESPONSE_BYTES) {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uBCF8\uBB38\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4.");
+  }
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uBCF8\uBB38\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4.");
+    }
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uBCF8\uBB38\uC774 \uB108\uBB34 \uD07D\uB2C8\uB2E4.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+async function parseResponse(response) {
+  const text = await readResponseTextLimited(response);
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      if (response.ok) {
+        throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8\uAC00 JSON\uC774 \uC544\uB2CC \uC751\uB2F5\uC744 \uBCF4\uB0C8\uC2B5\uB2C8\uB2E4.");
+      }
+    }
+  }
+  if (!response.ok) {
+    const detail = payload?.error?.message || payload?.message || text;
+    throw new Error(
+      `\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC694\uCCAD \uC2E4\uD328 (${response.status})${detail ? `: ${String(detail).slice(0, 240)}` : ""}`
+    );
+  }
+  return payload || {};
+}
+function abortableDelay(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason instanceof Error ? signal.reason : new DOMException("\uC791\uC5C5\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("\uC791\uC5C5\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function throwIfAborted2(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+  throw signal.reason instanceof Error ? signal.reason : new DOMException("\uC791\uC5C5\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError");
+}
+function createDeadlineSignal(parentSignal, timeoutMs) {
+  const normalizedTimeoutMs = Number(timeoutMs);
+  if (!Number.isFinite(normalizedTimeoutMs) || normalizedTimeoutMs <= 0) {
+    throw new RangeError("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC694\uCCAD \uC81C\uD55C \uC2DC\uAC04\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const controller = new AbortController();
+  const onParentAbort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(
+        parentSignal.reason instanceof Error ? parentSignal.reason : new DOMException("\uC791\uC5C5\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError")
+      );
+    }
+  };
+  if (parentSignal?.aborted) {
+    onParentAbort();
+  } else {
+    parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+  }
+  const timeout = setTimeout(() => {
+    if (!controller.signal.aborted) {
+      controller.abort(
+        new DOMException("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC694\uCCAD \uC81C\uD55C \uC2DC\uAC04\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.", "TimeoutError")
+      );
+    }
+  }, Math.floor(normalizedTimeoutMs));
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", onParentAbort);
+    }
+  };
+}
+function isPlainObject(value) {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+function requiredResponseString(payload, field) {
+  if (typeof payload[field] !== "string" || !payload[field].trim()) {
+    throw new Error(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 ${field} \uD544\uB4DC\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+  }
+  return payload[field];
+}
+function assertExactResponseFields(value, allowedFields, label) {
+  const unknownFields = Object.keys(value).filter(
+    (field) => !allowedFields.includes(field)
+  );
+  if (unknownFields.length > 0) {
+    throw new Error(
+      `${label}\uC5D0 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uD544\uB4DC\uAC00 \uC788\uC2B5\uB2C8\uB2E4: ${unknownFields.join(", ")}`
+    );
+  }
+}
+function validateCompletedCaptionAgentResponse(payload, request) {
+  if (!isPlainObject(payload)) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC644\uB8CC \uC751\uB2F5\uC774 JSON \uAC1D\uCCB4\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  assertExactResponseFields(payload, [
+    "schema",
+    "requestId",
+    "clipId",
+    "language",
+    "sttModel",
+    "captionModel",
+    "model",
+    "resolvedModel",
+    "provider",
+    "status",
+    "cues",
+    "warnings"
+  ], "\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC644\uB8CC \uC751\uB2F5");
+  if (payload.schema !== CAPTION_AGENT_RESPONSE_SCHEMA) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC2A4\uD0A4\uB9C8 \uBC84\uC804\uC774 \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  if (payload.status !== "completed") {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC644\uB8CC \uC751\uB2F5\uC758 status\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const requestId = requiredResponseString(payload, "requestId");
+  const clipId = requiredResponseString(payload, "clipId");
+  if (requestId.length > 128 || clipId.length > 256) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC2DD\uBCC4\uC790\uAC00 \uD5C8\uC6A9 \uAE38\uC774\uB97C \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
+  }
+  if (requestId !== String(request?.requestId || "")) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 \uC694\uCCAD ID\uAC00 \uD604\uC7AC \uC694\uCCAD\uACFC \uB2E4\uB985\uB2C8\uB2E4.");
+  }
+  if (clipId !== String(request?.clip?.id || "")) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 \uCEF7 ID\uAC00 \uC694\uCCAD\uACFC \uB2E4\uB985\uB2C8\uB2E4.");
+  }
+  if (payload.language !== "ko") {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC5B8\uC5B4\uAC00 \uD55C\uAD6D\uC5B4\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  for (const field of [
+    "sttModel",
+    "captionModel",
+    "model",
+    "resolvedModel",
+    "provider"
+  ]) {
+    requiredResponseString(payload, field);
+  }
+  if (payload.provider !== "upstage") {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC81C\uACF5\uC790\uAC00 Upstage\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  if (!Array.isArray(payload.cues) || payload.cues.length > MAX_REMOTE_CUES) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 cues \uD544\uB4DC\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const clipDurationMs2 = Number(request?.clip?.durationMs);
+  for (const [index, cue] of payload.cues.entries()) {
+    if (!isPlainObject(cue) || !Number.isInteger(cue.startMs) || !Number.isInteger(cue.endMs) || cue.startMs < 0 || cue.endMs <= cue.startMs || cue.endMs > clipDurationMs2 || cue.endMs - cue.startMs > MAX_REMOTE_CUE_DURATION_MS || typeof cue.text !== "string" || !cue.text.trim() || cue.text.length > 300 || typeof cue.speakerId !== "string" || !cue.speakerId.trim() || cue.speakerId.length > 80 || typeof cue.reviewRequired !== "boolean" || !["top", "center", "bottom"].includes(cue.placement)) {
+      throw new Error(`${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 cue\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+    }
+    assertExactResponseFields(cue, [
+      "startMs",
+      "endMs",
+      "text",
+      "speakerId",
+      "reviewRequired",
+      "placement"
+    ], `${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 cue`);
+  }
+  if (!Array.isArray(payload.warnings) || payload.warnings.length > MAX_REMOTE_WARNINGS) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 warnings \uD544\uB4DC\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  for (const [index, warning] of payload.warnings.entries()) {
+    if (!isPlainObject(warning) || typeof warning.code !== "string" || !warning.code.trim() || warning.code.length > 128 || !Number.isInteger(warning.cueIndex) || warning.cueIndex < 0) {
+      throw new Error(`${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 warning\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+    }
+    assertExactResponseFields(
+      warning,
+      ["code", "cueIndex"],
+      `${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 warning`
+    );
+  }
+  return payload;
+}
+function assertSafeStatusUrl(statusUrl, endpoint) {
+  const status = new URL(statusUrl, endpoint);
+  const requested = new URL(endpoint);
+  if (status.username || status.password || status.hash) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC791\uC5C5 \uC0C1\uD0DC \uC8FC\uC18C\uC5D0 \uC778\uC99D \uC815\uBCF4\uB098 # \uC870\uAC01\uC744 \uB123\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  if (status.origin !== requested.origin) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8\uAC00 \uB2E4\uB978 \uCD9C\uCC98\uC758 \uC791\uC5C5 \uC0C1\uD0DC \uC8FC\uC18C\uB97C \uBC18\uD658\uD588\uC2B5\uB2C8\uB2E4.");
+  }
+  return status.toString();
+}
+async function requestCaptionAgent({
+  endpoint,
+  token,
+  providerConfig,
+  request,
+  signal,
+  fetchImpl = fetch,
+  onProgress = () => {
+  },
+  timeoutMs = CAPTION_AGENT_REQUEST_TIMEOUT_MS,
+  maxPollAttempts = MAX_CAPTION_AGENT_POLL_ATTEMPTS
+}) {
+  const normalizedEndpoint = normalizeCaptionAgentEndpoint(endpoint);
+  throwIfAborted2(signal);
+  const normalizedMaxPollAttempts = Number(maxPollAttempts);
+  if (!Number.isInteger(normalizedMaxPollAttempts) || normalizedMaxPollAttempts < 1) {
+    throw new RangeError("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uD3F4\uB9C1 \uD69F\uC218 \uC0C1\uD55C\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const deadline = createDeadlineSignal(signal, timeoutMs);
+  const requestSignal = deadline.signal;
+  try {
+    throwIfAborted2(requestSignal);
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
+      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
+    };
+    if (String(token || "").trim()) {
+      headers.Authorization = `Bearer ${String(token).trim()}`;
+    }
+    onProgress(0.08, "\uC678\uBD80 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8\uC5D0 \uC74C\uC131\uC744 \uBCF4\uB0B4\uB294 \uC911");
+    throwIfAborted2(requestSignal);
+    let response = await fetchImpl(normalizedEndpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+      signal: requestSignal,
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error"
+    });
+    let payload = await parseResponse(response);
+    let statusUrl = payload.statusUrl ? assertSafeStatusUrl(payload.statusUrl, normalizedEndpoint) : null;
+    let pollCount = 0;
+    while (response.status === 202 || ["queued", "transcribing", "captioning", "running"].includes(payload.status)) {
+      if (!statusUrl) {
+        throw new Error("\uBE44\uB3D9\uAE30 \uC790\uB9C9 \uC791\uC5C5\uC5D0 \uC0C1\uD0DC \uD655\uC778 \uC8FC\uC18C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+      }
+      if (pollCount >= normalizedMaxPollAttempts) {
+        throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC0C1\uD0DC \uD655\uC778 \uD69F\uC218 \uC0C1\uD55C\uC744 \uB118\uC5C8\uC2B5\uB2C8\uB2E4.");
+      }
+      pollCount += 1;
+      onProgress(
+        clamp3(finiteNumber2(payload.progress, 0.15 + pollCount * 0.025), 0.12, 0.92),
+        String(payload.message || "\uC678\uBD80 \uC74C\uC131\uC778\uC2DD\uACFC Solar \uC790\uB9C9 \uC815\uB9AC \uC911")
+      );
+      await abortableDelay(
+        clamp3(finiteNumber2(payload.retryAfterMs, 1200), 300, 1e4),
+        requestSignal
+      );
+      throwIfAborted2(requestSignal);
+      response = await fetchImpl(statusUrl, {
+        method: "GET",
+        headers: {
+          "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
+          ...String(token || "").trim() ? { Authorization: `Bearer ${String(token).trim()}` } : {}
+        },
+        signal: requestSignal,
+        cache: "no-store",
+        credentials: "omit",
+        redirect: "error"
+      });
+      payload = await parseResponse(response);
+      statusUrl = payload.statusUrl ? assertSafeStatusUrl(payload.statusUrl, normalizedEndpoint) : statusUrl;
+    }
+    throwIfAborted2(requestSignal);
+    validateCompletedCaptionAgentResponse(payload, request);
+    onProgress(1, "Solar \uC790\uB9C9 \uCD08\uC548 \uC218\uC2E0 \uC644\uB8CC");
+    return payload;
+  } finally {
+    deadline.cleanup();
+  }
+}
+async function probeCaptionAgent({
+  endpoint,
+  token,
+  providerConfig,
+  signal,
+  fetchImpl = fetch,
+  timeoutMs = CAPTION_AGENT_PROBE_TIMEOUT_MS
+}) {
+  const normalizedEndpoint = normalizeCaptionAgentEndpoint(endpoint);
+  throwIfAborted2(signal);
+  const deadline = createDeadlineSignal(signal, timeoutMs);
+  try {
+    const headers = {
+      "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA,
+      ...captionProviderHeaders(normalizedEndpoint, providerConfig)
+    };
+    if (String(token || "").trim()) {
+      headers.Authorization = `Bearer ${String(token).trim()}`;
+    }
+    const response = await fetchImpl(normalizedEndpoint, {
+      method: "GET",
+      headers,
+      signal: deadline.signal,
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error"
+    });
+    return parseResponse(response);
+  } finally {
+    deadline.cleanup();
+  }
+}
+
 // src/editor/main.js
 var elements = Object.fromEntries([
   "project-name",
@@ -33019,7 +33982,16 @@ var elements = Object.fromEntries([
   "asset-inspector-content",
   "audio-inspector-content",
   "add-cue-top",
-  "asr-model",
+  "caption-agent-endpoint",
+  "caption-agent-token",
+  "caption-stt-endpoint",
+  "caption-stt-model",
+  "caption-stt-api-key",
+  "caption-upstage-api-key",
+  "clear-caption-provider-keys",
+  "caption-model",
+  "test-caption-agent",
+  "caption-agent-warning",
   "generate-captions",
   "ai-progress",
   "ai-progress-label",
@@ -33030,6 +34002,7 @@ var elements = Object.fromEntries([
   "cue-count",
   "cue-empty",
   "cue-editor",
+  "cue-review-note",
   "cue-text",
   "cue-start",
   "cue-end",
@@ -33142,8 +34115,6 @@ var toastTimer = null;
 var activeClipId = null;
 var undoStack = [];
 var redoStack = [];
-var asrWorker = null;
-var currentAsrJob = null;
 var activeJobController = null;
 var pointerEditActive = false;
 var inspectorMode = "selected";
@@ -33173,6 +34144,7 @@ var automaticLocalDraftOperation = null;
 var lastAutomaticDraftAtMs = 0;
 var localDraftAutosaveAnchorAtMs = 0;
 var focusBeforeLocalDraftDialog = null;
+var captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
 var imageAssetObjectUrls = /* @__PURE__ */ new Map();
 var EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
 var MAX_IMAGE_ASSET_BYTES = 25 * 1024 * 1024;
@@ -33771,19 +34743,43 @@ function renderHeader() {
   if (elements.project_name.value !== project.name && document.activeElement !== elements.project_name) {
     elements.project_name.value = project.name;
   }
-  const sourceType = String(project.source?.contentType || "CHZZK").toUpperCase();
-  elements.source_kind.textContent = sourceType === "UNKNOWN" ? "CHZZK" : sourceType;
+  const sourcePlatform = String(project.source?.platform || "CHZZK").toUpperCase();
+  const sourceType = String(project.source?.contentType || "UNKNOWN").toUpperCase();
+  elements.source_kind.textContent = sourceType === "UNKNOWN" ? sourcePlatform : `${sourcePlatform} \xB7 ${sourceType}`;
   elements.source_title.textContent = [
     project.source?.streamerName,
     project.source?.broadcastTitle
-  ].filter(Boolean).join(" \xB7 ") || "\uCE58\uC9C0\uC9C1 \uD504\uB85C\uC81D\uD2B8";
+  ].filter(Boolean).join(" \xB7 ") || "\uD0A4\uB9AC\uB204\uD0A4 \uD504\uB85C\uC81D\uD2B8";
   elements.source_link_state.classList.toggle("connected", sourceBindingConnected);
-  elements.source_link_state.title = sourceBindingConnected ? "\uC6D0\uB798 \uCE58\uC9C0\uC9C1 \uD0ED\uACFC \uC5F0\uACB0\uB428" : "\uC6D0\uB798 \uCE58\uC9C0\uC9C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD568";
+  elements.source_link_state.title = sourceBindingConnected ? "\uC6D0\uB798 \uC601\uC0C1 \uD0ED\uACFC \uC5F0\uACB0\uB428" : "\uC6D0\uB798 \uC601\uC0C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD568";
   elements.undo.disabled = undoStack.length === 0;
   elements.redo.disabled = redoStack.length === 0;
   elements.export_video.disabled = !mediaFile || !project.clips.some((clip) => clip.enabled !== false);
-  if (!activeJobController && document.activeElement !== elements.asr_model && [...elements.asr_model.options].some((option) => option.value === project.ai?.model)) {
-    elements.asr_model.value = project.ai.model;
+  if (!activeJobController && document.activeElement !== elements.caption_model && [...elements.caption_model.options].some((option) => option.value === project.ai?.model)) {
+    elements.caption_model.value = project.ai.model;
+  }
+  const warnings = Array.isArray(project.ai?.warnings) ? project.ai.warnings.filter((warning) => warning && typeof warning.code === "string" && warning.code.trim()) : [];
+  elements.caption_agent_warning.hidden = warnings.length === 0;
+  if (warnings.length > 0) {
+    const warningLabels = {
+      NO_RECOGNIZABLE_SPEECH: "\uC778\uC2DD\uB41C \uBC1C\uD654 \uC5C6\uC74C",
+      LOCAL_VISUAL_ANALYSIS_FAILED: "\uD654\uBA74 \uC704\uCE58 \uBD84\uC11D \uC2E4\uD328\xB7\uD558\uB2E8 \uAE30\uBCF8\uAC12 \uC0AC\uC6A9",
+      DROPPED_INVALID_CUE: "\uC720\uD6A8\uD558\uC9C0 \uC54A\uC740 \uC790\uB9C9 \uC81C\uC678",
+      DROPPED_EMPTY_RANGE: "\uBE48 \uC2DC\uAC04 \uC790\uB9C9 \uC81C\uC678",
+      TRIMMED_LONG_TEXT: "\uAE34 \uD14D\uC2A4\uD2B8 \uCD95\uC57D",
+      SPLIT_LONG_CUE: "4\uCD08 \uC774\uD558\uB85C \uC790\uB3D9 \uBD84\uD560",
+      TRIMMED_WARNING_COUNT: "\uCD94\uAC00 \uCC98\uB9AC \uACBD\uACE0 \uC0DD\uB7B5",
+      TRIMMED_CUE_COUNT: "\uC790\uB9C9 \uAC1C\uC218 \uC0C1\uD55C\uC73C\uB85C \uC77C\uBD80 \uC81C\uC678"
+    };
+    const counts = /* @__PURE__ */ new Map();
+    for (const warning of warnings) {
+      const label = warningLabels[warning.code] || "\uAE30\uD0C0 \uCC98\uB9AC \uACBD\uACE0";
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    const summary = [...counts.entries()].map(([label, count]) => `${label} ${count}\uAC74`).join(" \xB7 ");
+    elements.caption_agent_warning.textContent = `AI \uCC98\uB9AC \uACBD\uACE0 ${warnings.length}\uAC74 \xB7 ${summary}. \uB204\uB77D \uAC00\uB2A5\uC131\uC774 \uC788\uC73C\uB2C8 \uD574\uB2F9 \uCEF7 \uC6D0\uC74C\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.`;
+  } else {
+    elements.caption_agent_warning.textContent = "";
   }
 }
 function renderMediaCard() {
@@ -33840,6 +34836,7 @@ function renderCueInspector() {
   if (!cue || showingList) {
     return;
   }
+  elements.cue_review_note.hidden = !(cue.origin === "ai" && cue.remoteMeta?.reviewRequired && !cue.humanEdited);
   const range = cueTimelineRange(project, cue);
   if (document.activeElement !== elements.cue_text) {
     elements.cue_text.value = cue.text;
@@ -33854,7 +34851,7 @@ function renderCueInspector() {
   elements.cue_y.value = String(Math.round(cue.y * 100));
   elements.cue_x_value.textContent = `${Math.round(cue.x * 100)}%`;
   elements.cue_y_value.textContent = `${Math.round(cue.y * 100)}%`;
-  elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.052) * 100);
+  elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.0675) * 100);
   elements.font_color.value = cue.color || project.subtitleDefaults.color || "#ffffff";
   const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
@@ -33979,6 +34976,11 @@ function renderCueList() {
     button.type = "button";
     button.className = "cue-list-item";
     button.classList.toggle("selected", cue.id === project.selectedCueId);
+    const reviewRequired = cue.origin === "ai" && cue.remoteMeta?.reviewRequired && !cue.humanEdited;
+    button.classList.toggle("review-required", reviewRequired);
+    if (reviewRequired) {
+      button.title = "AI\uAC00 \uBD88\uBA85\uD655\uD55C \uBC1C\uD654\uB85C \uD45C\uC2DC\uD568 \xB7 \uC6D0\uC74C \uC7AC\uD655\uC778 \uD544\uC694";
+    }
     button.dataset.id = cue.id;
     const time = document.createElement("time");
     time.textContent = `L${cue.lane + 1} \xB7 ${formatTime(range.startMs, { compact: true }).slice(0, -4)}`;
@@ -34786,6 +35788,11 @@ function renderTimeline({ keepScroll = false } = {}) {
     }
     const block = document.createElement("div");
     block.className = `cue-block ${cue.origin === "ai" ? "ai" : "human"}${cue.humanEdited ? " human-edited" : ""}`;
+    const reviewRequired = cue.origin === "ai" && cue.remoteMeta?.reviewRequired && !cue.humanEdited;
+    block.classList.toggle("review-required", reviewRequired);
+    if (reviewRequired) {
+      block.title = "AI\uAC00 \uBD88\uBA85\uD655\uD55C \uBC1C\uD654\uB85C \uD45C\uC2DC\uD568 \xB7 \uC6D0\uC74C \uC7AC\uD655\uC778 \uD544\uC694";
+    }
     block.classList.toggle("selected", cue.id === project.selectedCueId);
     block.dataset.id = cue.id;
     block.dataset.lane = String(cue.lane);
@@ -34935,7 +35942,7 @@ function renderSubtitleOverlay() {
     overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
     overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
     overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
-    const fontSize = Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.052));
+    const fontSize = Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.0675));
     overlay.style.fontSize = `${fontSize}px`;
     overlay.style.color = cue.color || project.subtitleDefaults.color || "#ffffff";
     overlay.style.background = "transparent";
@@ -35686,7 +36693,7 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
     await seekTimeline(project.playheadMs || 0);
     const overrun = clipOutsideMedia(project);
     if (overrun) {
-      showToast("\uC120\uD0DD \uAD6C\uAC04 \uC77C\uBD80\uAC00 \uC5F0\uACB0\uD55C \uC6D0\uBCF8 \uAE38\uC774 \uBC16\uC5D0 \uC788\uC2B5\uB2C8\uB2E4. \uB77C\uC774\uBE0C\u2194VOD \uC815\uB82C\uAC12\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error", 7e3);
+      showToast("\uC120\uD0DD \uAD6C\uAC04 \uC77C\uBD80\uAC00 \uC5F0\uACB0\uD55C \uC6D0\uBCF8 \uAE38\uC774 \uBC16\uC5D0 \uC788\uC2B5\uB2C8\uB2E4. \uD398\uC774\uC9C0\u2194\uB85C\uCEEC \uC815\uB82C\uAC12\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.", "error", 7e3);
     } else {
       showToast("\uC6D0\uBCF8 \uC601\uC0C1\uC744 \uC5F0\uACB0\uD588\uC2B5\uB2C8\uB2E4.", "success");
     }
@@ -35708,68 +36715,76 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
     unlockProjectMutations();
   }
 }
-function ensureAsrWorker() {
-  if (asrWorker) {
-    return asrWorker;
-  }
-  asrWorker = new Worker(chrome.runtime.getURL("editor/asr-worker.js"), { type: "module" });
-  const worker = asrWorker;
-  worker.addEventListener("message", (event) => {
-    const message = event.data || {};
-    if (!currentAsrJob || message.jobId !== currentAsrJob.id) {
-      return;
+function readCaptionAgentConfig() {
+  return {
+    endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
+    token: elements.caption_agent_token.value,
+    model: elements.caption_model.value,
+    providerConfig: {
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value,
+      sttApiKey: elements.caption_stt_api_key.value,
+      upstageApiKey: elements.caption_upstage_api_key.value
     }
-    if (message.type === "progress") {
-      currentAsrJob.onProgress(message);
-    } else if (message.type === "result") {
-      currentAsrJob.resolve(message);
-      currentAsrJob = null;
-    } else if (message.type === "error") {
-      currentAsrJob.reject(new Error(message.error));
-      currentAsrJob = null;
-    }
-  });
-  const discardWorker = () => {
-    if (asrWorker === worker) {
-      asrWorker = null;
-    }
-    worker.terminate();
   };
-  worker.addEventListener("error", (event) => {
-    if (currentAsrJob) {
-      currentAsrJob.reject(new Error(event.message || "AI \uC790\uB9C9 worker\uAC00 \uC911\uB2E8\uB418\uC5C8\uC2B5\uB2C8\uB2E4."));
-      currentAsrJob = null;
-    }
-    discardWorker();
-  });
-  worker.addEventListener("messageerror", () => {
-    if (currentAsrJob) {
-      currentAsrJob.reject(new Error("AI \uC790\uB9C9 worker \uC751\uB2F5\uC744 \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."));
-      currentAsrJob = null;
-    }
-    discardWorker();
-  });
-  return worker;
 }
-function transcribePcm(audio, model, onProgress) {
-  if (currentAsrJob) {
-    throw new Error("\uC774\uBBF8 \uC74C\uC131\uC778\uC2DD \uC791\uC5C5\uC774 \uC2E4\uD589 \uC911\uC785\uB2C8\uB2E4.");
+async function prepareCaptionAgentConfig() {
+  const config = readCaptionAgentConfig();
+  const permissionGranted = await ensureCaptionAgentPermission(config.endpoint);
+  if (!permissionGranted) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC8FC\uC18C \uC811\uADFC \uAD8C\uD55C\uC774 \uD5C8\uC6A9\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
   }
-  const worker = ensureAsrWorker();
-  const id = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    currentAsrJob = { id, resolve, reject, onProgress };
-    try {
-      worker.postMessage({ type: "transcribe", jobId: id, model, audio }, [audio.buffer]);
-    } catch (error) {
-      currentAsrJob = null;
-      if (asrWorker === worker) {
-        asrWorker = null;
-      }
-      worker.terminate();
-      reject(error);
-    }
+  captionAgentSettings = await saveCaptionAgentSettings({
+    endpoint: config.endpoint,
+    model: config.model,
+    sttEndpoint: config.providerConfig.sttEndpoint,
+    sttModel: config.providerConfig.sttModel
   });
+  elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
+  elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+  elements.caption_stt_model.value = captionAgentSettings.sttModel;
+  return {
+    ...config,
+    ...captionAgentSettings,
+    providerConfig: {
+      ...config.providerConfig,
+      sttEndpoint: captionAgentSettings.sttEndpoint,
+      sttModel: captionAgentSettings.sttModel
+    }
+  };
+}
+async function testCaptionAgentConnection() {
+  if (activeJobController || projectMutationLockCount > 0) {
+    return;
+  }
+  const controller = new AbortController();
+  activeJobController = controller;
+  elements.test_caption_agent.disabled = true;
+  try {
+    const config = await prepareCaptionAgentConfig();
+    const result = await probeCaptionAgent({
+      ...config,
+      signal: controller.signal
+    });
+    const provider = result.provider ? ` \xB7 ${result.provider}` : "";
+    const model = result.model || result.defaultModel || config.model;
+    const readiness = result.configured?.ready === false ? " \xB7 STT/Upstage \uC124\uC815 \uBBF8\uC644\uB8CC" : "";
+    showToast(
+      `\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC5F0\uACB0 \uD655\uC778 \uC644\uB8CC${provider} \xB7 ${model}${readiness}`,
+      result.configured?.ready === false ? "error" : "success",
+      result.configured?.ready === false ? 0 : 5200
+    );
+  } catch (error) {
+    const canceled = error.name === "AbortError";
+    showToast(
+      canceled ? "\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC5F0\uACB0 \uD655\uC778\uC744 \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4." : `\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC5F0\uACB0 \uC2E4\uD328: ${error.message}`,
+      canceled ? "info" : "error",
+      0
+    );
+  } finally {
+    activeJobController = null;
+    elements.test_caption_agent.disabled = false;
+  }
 }
 function setAiProgress(progress, label) {
   const value = Math.max(0, Math.min(1, Number(progress) || 0));
@@ -35786,70 +36801,171 @@ async function generateCaptions() {
     showToast("AI \uC790\uB9C9\uC744 \uB9CC\uB4E4\uB824\uBA74 \uBA3C\uC800 \uC6D0\uBCF8 \uC601\uC0C1\uC744 \uC5F0\uACB0\uD574 \uC8FC\uC138\uC694.", "error");
     return;
   }
-  if (!project.clips.some((clip) => clip.enabled !== false)) {
+  const enabledClips = project.clips.filter(
+    (clip) => clip.enabled !== false
+  );
+  if (enabledClips.length === 0) {
     showToast("\uC120\uD0DD\uD55C \uAD6C\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+    return;
+  }
+  if (enabledClips.length > MAX_CAPTION_AGENT_CLIPS_PER_RUN) {
+    showToast(
+      `\uD55C \uBC88\uC5D0 \uC790\uB9C9\uC744 \uB9CC\uB4E4 \uC218 \uC788\uB294 \uD65C\uC131 \uCEF7\uC740 \uCD5C\uB300 ${MAX_CAPTION_AGENT_CLIPS_PER_RUN}\uAC1C\uC785\uB2C8\uB2E4.`,
+      "error",
+      0
+    );
     return;
   }
   if (activeJobController || projectMutationLockCount > 0) {
     return;
   }
+  const returnFocus = document.activeElement;
   const controller = new AbortController();
   activeJobController = controller;
-  const model = elements.asr_model.value;
+  elements.generate_captions.disabled = true;
+  let config;
+  try {
+    config = await prepareCaptionAgentConfig();
+  } catch (error) {
+    showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694: ${error.message}`, "error", 0);
+    activeJobController = null;
+    elements.generate_captions.disabled = false;
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+    }
+    return;
+  }
+  const { endpoint, token, model, providerConfig } = config;
   const undoSnapshot = cloneProject(project);
   let undoRecorded = false;
+  let reviewRequiredCount = 0;
+  let captionWarnings = [];
+  let generatedCueCount = 0;
   showJob(
-    "AI \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4DC\uB294 \uC911",
-    "\uCCAB \uC2E4\uD589\uC740 \uC120\uD0DD\uD55C Whisper \uBAA8\uB378 \uB370\uC774\uD130\uB97C \uBC1B\uC740 \uB4A4 \uBE0C\uB77C\uC6B0\uC800\uC5D0 \uCE90\uC2DC\uD569\uB2C8\uB2E4.",
+    "Solar \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4DC\uB294 \uC911",
+    "\uD65C\uC131\uD654\uB41C \uBAA8\uB4E0 \uC120\uD0DD \uCEF7\uC758 \uC74C\uC131\uC744 \uCC28\uB840\uB85C \uC678\uBD80 STT\uC5D0 \uBCF4\uB0B4\uACE0, \uC804\uC0AC\uBB38\uACFC \uACE0\uC9C0\uB41C \uC774\uB984\xB7\uBA54\uBAA8 \uBB38\uB9E5\uC740 Solar\uC5D0 \uBCF4\uB0C5\uB2C8\uB2E4.",
     0,
-    { cancelable: true }
+    { cancelable: true, returnFocus }
   );
-  elements.generate_captions.disabled = true;
   project = {
     ...project,
     ai: {
       ...project.ai,
+      provider: "caption-agent",
       model,
       status: "running",
       progress: 0,
-      error: null
+      error: null,
+      warnings: []
     }
   };
   renderHeader();
   lockProjectMutations();
   try {
-    const clips = project.clips.filter((clip) => clip.enabled !== false);
+    const clips = enabledClips;
     for (let index = 0; index < clips.length; index += 1) {
       const clip = clips[index];
       const base = index / clips.length;
       const span = 1 / clips.length;
-      setAiProgress(base, `${index + 1}/${clips.length} \xB7 \uC120\uD0DD \uAD6C\uAC04\uC758 \uC74C\uC131\uC744 \uC900\uBE44\uD558\uB294 \uC911`);
+      captionAgentAudioFootprint(clipDurationMs(clip));
+      setAiProgress(base, `${index + 1}/${clips.length} \xB7 \uD654\uBA74 \uC548\uC804 \uC601\uC5ED\uC744 \uB85C\uCEEC \uBD84\uC11D\uD558\uB294 \uC911`);
+      let placementHints;
+      try {
+        placementHints = await extractClipCaptionPlacementHints(
+          mediaFile,
+          clip,
+          {
+            signal: controller.signal,
+            onProgress: (value) => {
+              setAiProgress(
+                base + span * value * 0.1,
+                `${index + 1}/${clips.length} \xB7 \uB300\uD45C \uD504\uB808\uC784 \uC548\uC804 \uC601\uC5ED \uBD84\uC11D \uC911`
+              );
+            }
+          }
+        );
+      } catch (error) {
+        if (controller.signal.aborted || error?.name === "AbortError") {
+          throw error;
+        }
+        console.warn("\uB300\uD45C \uD504\uB808\uC784 \uC790\uB9C9 \uC704\uCE58 \uBD84\uC11D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", error);
+        placementHints = fallbackCaptionPlacementHints(clipDurationMs(clip));
+        captionWarnings = mergeAiWarnings(
+          captionWarnings,
+          [{
+            code: "LOCAL_VISUAL_ANALYSIS_FAILED",
+            cueIndex: 0
+          }],
+          clip.id
+        );
+      }
+      setAiProgress(
+        base + span * 0.1,
+        `${index + 1}/${clips.length} \xB7 \uC120\uD0DD \uAD6C\uAC04\uC758 \uC74C\uC131\uC744 \uC900\uBE44\uD558\uB294 \uC911`
+      );
       const pcm = await extractClipPcm16k(mediaFile, clip, {
         signal: controller.signal,
         onProgress: (value) => {
-          setAiProgress(base + span * value * 0.18, `${index + 1}/${clips.length} \xB7 \uC74C\uC131 \uCD94\uCD9C \uC911`);
+          setAiProgress(
+            base + span * (0.1 + value * 0.16),
+            `${index + 1}/${clips.length} \xB7 \uC804\uC1A1\uD560 \uC74C\uC131 \uCD94\uCD9C \uC911`
+          );
         }
       });
-      const result = await transcribePcm(pcm, model, (message) => {
-        const local = 0.18 + (message.progress || 0) * 0.8;
-        setAiProgress(base + span * local, `${index + 1}/${clips.length} \xB7 ${message.label}`);
+      controller.signal.throwIfAborted();
+      setAiProgress(base + span * 0.28, `${index + 1}/${clips.length} \xB7 WAV \uC694\uCCAD \uC900\uBE44 \uC911`);
+      const request = createCaptionAgentRequest({
+        project,
+        clip,
+        model,
+        audioBase64: encodePcm16WavBase64(pcm),
+        placementHints
       });
-      const drafts = transcriptChunksToCueDrafts(
-        result.chunks,
+      const result = await requestCaptionAgent({
+        endpoint,
+        token,
+        providerConfig,
+        request,
+        signal: controller.signal,
+        onProgress: (progress, label) => {
+          const local = 0.28 + Math.max(0, Math.min(1, progress)) * 0.7;
+          setAiProgress(base + span * local, `${index + 1}/${clips.length} \xB7 ${label}`);
+        }
+      });
+      const drafts = normalizeCaptionAgentCues(
+        result.cues,
         clipDurationMs(clip)
       );
-      if (drafts.length === 0 && result.text) {
-        drafts.push({
-          startOffsetMs: 0,
-          endOffsetMs: Math.min(clipDurationMs(clip), 4500),
-          text: result.text
-        });
+      generatedCueCount += drafts.length;
+      if (generatedCueCount > MAX_CAPTION_AGENT_CUES_PER_RUN) {
+        throw new Error(
+          `\uD55C \uBC88\uC5D0 \uB9CC\uB4E4 \uC218 \uC788\uB294 AI \uC790\uB9C9\uC740 \uCD5C\uB300 ${MAX_CAPTION_AGENT_CUES_PER_RUN.toLocaleString("ko-KR")}\uAC1C\uC785\uB2C8\uB2E4. \uD65C\uC131 \uCEF7\uC744 \uB098\uB220\uC11C \uC2E4\uD589\uD574 \uC8FC\uC138\uC694.`
+        );
       }
+      captionWarnings = mergeAiWarnings(
+        captionWarnings,
+        result.warnings,
+        clip.id
+      );
+      reviewRequiredCount += drafts.filter((draft) => draft.remoteMeta?.reviewRequired).length;
       if (!undoRecorded) {
         pushUndo(undoSnapshot);
         undoRecorded = true;
       }
-      project = replaceAiSubtitleDraft(project, clip.id, drafts);
+      project = {
+        ...replaceAiSubtitleDraft(project, clip.id, drafts),
+        ai: {
+          ...project.ai,
+          provider: String(result.provider || "caption-agent"),
+          model,
+          resolvedModel: String(result.resolvedModel || result.model || model),
+          lastRequestId: String(result.requestId || ""),
+          status: "running",
+          progress: Math.min(0.99, (index + 1) / clips.length),
+          error: null,
+          warnings: captionWarnings
+        }
+      };
       await saveProject(project);
       renderAll({ keepScroll: true });
       setAiProgress(base + span, `${index + 1}/${clips.length} \xB7 \uC790\uB9C9 \uCD08\uC548 \uC800\uC7A5 \uC644\uB8CC`);
@@ -35866,7 +36982,11 @@ async function generateCaptions() {
     };
     await saveProject(project);
     setAiProgress(1, "\uC120\uD0DD \uAD6C\uAC04 \uC790\uB9C9 \uCD08\uC548 \uC644\uB8CC");
-    showToast("AI \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uD14D\uC2A4\uD2B8\xB7\uC2DC\uAC04\xB7\uC704\uCE58\uB97C \uAC80\uC218\uD574 \uC8FC\uC138\uC694.", "success", 6500);
+    showToast(
+      captionWarnings.length > 0 ? `Solar \uC790\uB9C9\uC740 \uC644\uB8CC\uB410\uC9C0\uB9CC \uCC98\uB9AC \uACBD\uACE0\uAC00 ${captionWarnings.length}\uAC74 \uC788\uC2B5\uB2C8\uB2E4. \uB178\uB780 \uACBD\uACE0\uC5D0\uC11C \uB204\uB77D \uAC00\uB2A5\uC131\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.` : reviewRequiredCount > 0 ? `Solar \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uC7AC\uD655\uC778\uC774 \uD544\uC694\uD55C ${reviewRequiredCount}\uAC1C \uC790\uB9C9\uC740 \uB178\uB780\uC0C9\uC73C\uB85C \uD45C\uC2DC\uD588\uC2B5\uB2C8\uB2E4.` : "Solar \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uD14D\uC2A4\uD2B8\xB7\uC2DC\uAC04\xB7\uC704\uCE58\uB97C \uD55C \uBC88 \uAC80\uC218\uD574 \uC8FC\uC138\uC694.",
+      captionWarnings.length > 0 ? "error" : "success",
+      captionWarnings.length > 0 ? 9e3 : 6500
+    );
   } catch (error) {
     const canceled = error.name === "AbortError";
     project = {
@@ -35893,14 +37013,6 @@ function cancelActiveJob() {
     return;
   }
   activeJobController?.abort();
-  if (currentAsrJob) {
-    currentAsrJob.reject(new DOMException("\uC791\uC5C5\uC774 \uCDE8\uC18C\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError"));
-    currentAsrJob = null;
-  }
-  if (asrWorker) {
-    asrWorker.terminate();
-    asrWorker = null;
-  }
 }
 function setJobCancelable(cancelable) {
   activeJobCancelable = Boolean(cancelable);
@@ -35910,8 +37022,8 @@ function setJobCancelable(cancelable) {
     elements.job_dialog.querySelector(".job-card")?.focus();
   }
 }
-function showJob(title, message, progress = 0, { cancelable = true } = {}) {
-  focusBeforeJob = document.activeElement;
+function showJob(title, message, progress = 0, { cancelable = true, returnFocus = document.activeElement } = {}) {
+  focusBeforeJob = returnFocus;
   elements.job_title.textContent = title;
   elements.job_message.textContent = message;
   setJobCancelable(cancelable);
@@ -36203,7 +37315,7 @@ async function focusSourceTab({ seek = false } = {}) {
       sourceSeconds: mapping ? (mapping.sourceMs - (project.broadcastSession?.alignmentOffsetMs || 0)) / 1e3 : null
     });
     if (!response?.ok) {
-      throw new Error(response?.error || "\uC6D0\uB798 \uCE58\uC9C0\uC9C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+      throw new Error(response?.error || "\uC6D0\uB798 \uC601\uC0C1 \uD0ED\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
     }
     sourceBindingConnected = true;
     renderHeader();
@@ -36920,14 +38032,68 @@ function bindActions() {
     }
   });
   elements.generate_captions.addEventListener("click", () => void generateCaptions());
-  elements.asr_model.addEventListener("change", () => {
+  elements.test_caption_agent.addEventListener("click", () => void testCaptionAgentConnection());
+  elements.caption_model.addEventListener("change", () => {
     applyProject({
       ...project,
       ai: {
         ...project.ai,
-        model: elements.asr_model.value
+        provider: "caption-agent",
+        model: elements.caption_model.value
       }
     });
+    void saveCaptionAgentSettings({
+      endpoint: elements.caption_agent_endpoint.value,
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
+    }).catch((error) => {
+      showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
+    });
+  });
+  elements.caption_agent_endpoint.addEventListener("change", () => {
+    try {
+      elements.caption_agent_endpoint.value = normalizeCaptionAgentEndpoint(
+        elements.caption_agent_endpoint.value
+      );
+    } catch (error) {
+      showToast(error.message, "error", 0);
+      elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
+      return;
+    }
+    void saveCaptionAgentSettings({
+      endpoint: elements.caption_agent_endpoint.value,
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
+    }).then((settings) => {
+      captionAgentSettings = settings;
+    }).catch((error) => {
+      showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
+    });
+  });
+  const persistProviderSettings = () => {
+    void saveCaptionAgentSettings({
+      endpoint: elements.caption_agent_endpoint.value,
+      model: elements.caption_model.value,
+      sttEndpoint: elements.caption_stt_endpoint.value,
+      sttModel: elements.caption_stt_model.value
+    }).then((settings) => {
+      captionAgentSettings = settings;
+      elements.caption_stt_endpoint.value = settings.sttEndpoint;
+      elements.caption_stt_model.value = settings.sttModel;
+    }).catch((error) => {
+      showToast(`STT \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
+      elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+      elements.caption_stt_model.value = captionAgentSettings.sttModel;
+    });
+  };
+  elements.caption_stt_endpoint.addEventListener("change", persistProviderSettings);
+  elements.caption_stt_model.addEventListener("change", persistProviderSettings);
+  elements.clear_caption_provider_keys.addEventListener("click", () => {
+    elements.caption_stt_api_key.value = "";
+    elements.caption_upstage_api_key.value = "";
+    showToast("\uD604\uC7AC \uD3B8\uC9D1\uAE30 \uD0ED\uC5D0 \uC785\uB825\uD55C API \uD0A4\uB97C \uC9C0\uC6E0\uC2B5\uB2C8\uB2E4.", "success");
   });
   elements.cancel_job.addEventListener("click", cancelActiveJob);
   elements.job_dialog.addEventListener("cancel", (event) => {
@@ -37151,6 +38317,16 @@ async function initializeSourceBinding() {
 }
 async function initialize() {
   bindActions();
+  try {
+    captionAgentSettings = await loadCaptionAgentSettings();
+  } catch (error) {
+    console.warn("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.", error);
+    captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
+  }
+  elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
+  elements.caption_model.value = captionAgentSettings.model;
+  elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
+  elements.caption_stt_model.value = captionAgentSettings.sttModel;
   const { projectId, captureState } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;

@@ -1,4 +1,2 @@
-extension/editor/asr-worker.js -whitespace
-extension/editor/vendor/*.mjs -whitespace
 extension/licenses/PRETENDARD-OFL-1.1.txt -whitespace
 vendor/pretendard/LICENSE -whitespace
