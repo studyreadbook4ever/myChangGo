@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -17,8 +17,6 @@ const jobDirectory = path.resolve(process.argv[2] || path.join(root, "beta-runs"
 const referencePath = path.resolve(process.argv[3] || path.join(root, "beta-runs", "synthetic-reference.json"));
 const videoPath = path.join(jobDirectory, "synthetic-full-video.mp4");
 const generatedAt = new Date().toISOString();
-const betaPythonPath = path.join(root, ".beta-tools", "venv", "bin", "python");
-const betaModelDirectory = path.join(root, ".beta-tools", "models");
 
 await stat(videoPath);
 const reference = JSON.parse(await readFile(referencePath, "utf8"));
@@ -106,22 +104,19 @@ manifest.inputs.fullVideo.sha256 = reference.video.sha256;
 
 const startHere = `${generateCodexStartHere({ projectName, source, generatedAt })}
 
-## 이 베타에 준비된 로컬 전사 도구
+## 이 베타의 자막 에이전트
 
-자세한 명령은 **LOCAL_BETA_TOOLS.md**를 읽으세요. 원본 미디어는 외부로 업로드하지 않고 faster-whisper를 CPU에서 실행합니다.
+자세한 연결 규격은 **CAPTION_AGENT.md**를 읽으세요. 선택 구간의 음성만 외부 STT와 Upstage Solar companion으로 보내고 결과 cue를 사람이 검수합니다.
 `;
-const toolsGuide = `# 로컬 베타 도구
+const toolsGuide = `# 자막 에이전트 베타
 
-## 원본 전사
+## 처리 경계
 
-다음 명령을 작업 폴더에서 실행할 수 있습니다.
-
-    HF_HUB_OFFLINE=1 ${betaPythonPath} tools/transcribe-beta.py synthetic-full-video.mp4 --json raw-transcript.json --srt raw-transcript.srt --model base --model-dir ${betaModelDirectory}
-
-- 모델 저장 위치: ${betaModelDirectory}
-- 실행 방식: CPU int8 / 한국어 고정 / word timestamps
-- 첫 실행에서 모델 파일만 내려받으며 원본 영상은 외부 서비스로 전송하지 않습니다.
-- raw-transcript 파일은 원본 타임라인용 중간 산출물입니다. 최종 subtitles.ko.srt는 편집본 타임라인으로 다시 계산해야 합니다.
+- 전체 원본이나 최종 영상은 companion에 보내지 않습니다.
+- 편집기가 사용자 확정 컷마다 16kHz mono WAV를 만들어 자막 에이전트에 전송합니다.
+- 외부 STT는 단어 시각을 만들고 Upstage Solar는 한국 VTuber 키리누키용 4초 이하 자막으로 정리합니다.
+- 반환된 cue는 편집기에서 사람이 한 번 검수한 뒤 기존 로컬 렌더러로 출력합니다.
+- API 키는 companion 환경 변수에만 두며 프로젝트 JSON·임시저장·로그에는 넣지 않습니다.
 
 ## 미디어 도구
 
@@ -129,20 +124,19 @@ const toolsGuide = `# 로컬 베타 도구
 - ffmpeg: 무손상에 가까운 구간 추출, 연결, 자막 입히기와 MP4 렌더링
 `;
 
-await mkdir(path.join(jobDirectory, "tools"), { recursive: true });
+await mkdir(jobDirectory, { recursive: true });
 await Promise.all([
   writeFile(path.join(jobDirectory, "edit-brief.md"), prompt, "utf8"),
   writeFile(path.join(jobDirectory, "creator-policy.md"), creatorPolicy, "utf8"),
   writeFile(path.join(jobDirectory, "creator-policy-index.json"), `${JSON.stringify(policyIndex, null, 2)}\n`, "utf8"),
   writeFile(
     path.join(jobDirectory, "AGENTS.md"),
-    `${codexAgents}\n\n## 이 합성 베타의 추가 지침\n\n- LOCAL_BETA_TOOLS.md를 읽고 준비된 로컬 전사 도구를 사용한다.\n- 실제 방송인 콘텐츠로 오인하지 않는다.\n`,
+    `${codexAgents}\n\n## 이 합성 베타의 추가 지침\n\n- CAPTION_AGENT.md를 읽고 외부 자막 에이전트 경계를 지킨다.\n- 실제 방송인 콘텐츠로 오인하지 않는다.\n`,
     "utf8"
   ),
   writeFile(path.join(jobDirectory, "START_HERE.md"), startHere, "utf8"),
-  writeFile(path.join(jobDirectory, "LOCAL_BETA_TOOLS.md"), toolsGuide, "utf8"),
-  writeFile(path.join(jobDirectory, "job-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8"),
-  copyFile(path.join(root, "scripts", "transcribe-beta.py"), path.join(jobDirectory, "tools", "transcribe-beta.py"))
+  writeFile(path.join(jobDirectory, "CAPTION_AGENT.md"), toolsGuide, "utf8"),
+  writeFile(path.join(jobDirectory, "job-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8")
 ]);
 
 console.log(JSON.stringify({
@@ -154,12 +148,11 @@ console.log(JSON.stringify({
   files: [
     "AGENTS.md",
     "START_HERE.md",
-    "LOCAL_BETA_TOOLS.md",
+    "CAPTION_AGENT.md",
     "edit-brief.md",
     "creator-policy.md",
     "creator-policy-index.json",
     "job-manifest.json",
-    "synthetic-full-video.mp4",
-    "tools/transcribe-beta.py"
+    "synthetic-full-video.mp4"
   ]
 }, null, 2));

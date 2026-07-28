@@ -4,7 +4,7 @@
 
 사용자가 찍은 시작·끝은 `authority: USER`인 확정 범위입니다. AI는 재미있는 구간을 대신 고르거나 경계를 자동으로 늘리지 않고, 선택된 범위의 한국어 자막 초안만 만듭니다. 텍스트, cue 시작·끝·레인·색상, 영상 위 자막 위치, 구간별 음량과 컷 경계·내부 삭제 범위는 사람이 직접 고칠 수 있습니다.
 
-현재 미디어 입력은 사용 권한이 있는 로컬 원본 파일입니다. Extension은 치지직 탭의 방송 정보·현재 시각·재생 위치 제어를 연결하지만, 치지직 영상을 우회 다운로드하거나 외부 서비스로 업로드하지 않습니다. AI 실행 시 Whisper 모델 데이터만 최초 한 번 내려받아 브라우저 캐시에 저장합니다.
+현재 미디어 입력은 사용 권한이 있는 로컬 원본 파일입니다. Extension은 치지직 탭의 방송 정보·현재 시각·재생 위치 제어를 연결하지만 치지직 영상을 우회 다운로드하지 않습니다. 원본 전체와 최종 렌더는 이 기기에 남습니다. 사용자가 자막 생성을 명시적으로 실행하면 활성화된 모든 선택 컷의 16kHz 오디오, 제한된 프로젝트 문맥(식별자·프로젝트명·스트리머명·각 컷 메모), 로컬 대표 프레임에서 계산한 숫자형 화면 방해도만 설정한 자막 에이전트로 차례로 전송됩니다. 대표 프레임 픽셀은 전송하지 않습니다.
 
 ## 설치
 
@@ -40,14 +40,48 @@ Extension 소스를 수정한 뒤에는 `chrome://extensions`에서 다시 로�
 6. **원본 연결**에서 해당 방송의 사용 권한이 있는 로컬 영상 파일을 선택합니다.
 7. 로컬 파일의 시작점이 치지직 방송 시각과 다르면 **라이브 ↔ 로컬 VOD 정렬** 오프셋을 먼저 맞춥니다.
 8. 필요하면 컷 트랙 양끝 손잡이를 끌어 경계를 직접 조정합니다.
-9. **선택 구간만 자막 초안 만들기**를 실행합니다. 브라우저가 필요한 구간의 오디오만 읽어 로컬 ONNX/WASM Whisper로 전사합니다.
+9. 편집기의 **자막 에이전트 연결**에서 endpoint와 세션 토큰을 입력하고 **연결 확인**을 누른 뒤 **활성 컷 전체 Solar 자막**을 실행합니다. 브라우저는 활성화된 모든 선택 컷의 오디오를 각각 16kHz WAV로 만들고 제한된 프로젝트 문맥과 함께 설정한 자막 에이전트에 차례로 보냅니다. 대표 프레임은 로컬에서만 저해상도 분석하고 픽셀 대신 시간별 화면 방해도 점수를 보냅니다.
 10. `영상 → 에셋 → 음성 → 자막` 타임라인에서 이미지·자막·음성을 검수합니다. 영상 중간을 덜어낼 때는 재생헤드에서 `시작 [I]`와 `끝 [O]`을 찍고 **구간 삭제**를 누릅니다. 삭제 뒤 영상과 연결된 에셋·음성·자막은 함께 당겨집니다. 웹 이미지 자체를 복사한 뒤 편집기에서 `Ctrl/Cmd+V`를 누르면 현재 위치에 에셋으로 들어가며 PNG·WebP의 투명 영역도 보존됩니다. 자막 레인은 기본 2개이며 `+`로 늘릴 수 있습니다.
 11. 큰 편집 전에는 **지금 임시저장**을 누를 수 있습니다. 편집기는 5분마다 자동 임시저장하며, **저장 목록**에서 이 기기의 최근 5개 중 하나를 고르면 현재 상태를 먼저 임시저장한 뒤 불러옵니다.
 12. **영상 내보내기**에서 폴더를 한 번 고르면 선택 컷·이미지 에셋·자막이 들어간 MP4 또는 WebM, 프로젝트 JSON, 자막이 있을 때의 SRT가 같은 폴더에 저장됩니다.
 
-긴 원본을 통째로 메모리에 복사하지 않습니다. 미리보기·전사·렌더링은 사용자가 선택한 구간을 기준으로 디스크에서 필요한 부분만 읽습니다.
+긴 원본을 통째로 메모리에 복사하지 않습니다. 미리보기·자막용 오디오 추출·렌더링은 사용자가 선택한 구간을 기준으로 디스크에서 필요한 부분만 읽습니다.
 
-Whisper Tiny가 빠른 초안용 기본값입니다. Whisper Small은 정확도를 우선하는 대신 다운로드·메모리·처리 시간이 더 큽니다. 둘 다 한국어 초안이므로 고유명사와 빠른 발화는 사람이 반드시 확인해야 합니다.
+자막 에이전트는 선택 컷 오디오를 외부 STT로 전사한 다음, 타임코드가 있는 전사문을 Upstage Solar Pro 3에 보내 의미 단위 cue로 정리합니다. Solar Pro 3는 음성을 직접 전사하는 모델이 아니므로 외부 STT가 반드시 필요합니다. 편집기는 각 컷의 대표 프레임 7장을 이 기기에서만 축소 분석해 top·center·bottom의 방해도 점수를 만들고, Solar는 cue 시각에 가까운 점수를 바탕으로 위치를 고릅니다. 결과는 인식된 발화를 빠뜨리지 않고 cue당 최대 4초로 나누며, 문장 끝 마침표는 제거하되 물음표 등 의미 있는 문장부호는 유지하는 검수용 초안입니다.
+
+한 번의 실행은 활성 컷 최대 500개, 새 AI cue 최대 10,000개로 제한합니다. 더 큰 작업은 활성 컷을 나눠 실행해 브라우저 메모리와 외부 API 비용을 통제하세요.
+
+### 자막 에이전트 연결
+
+Extension에는 외부 서비스 API 키를 입력하거나 저장하지 않습니다. 편집기에는 다음 연결 정보만 입력합니다.
+
+- **Endpoint**: 기본값 `http://127.0.0.1:4319/v1/captions`
+- **세션 토큰**: companion의 `KIRINUKI_AGENT_TOKEN`과 같은 값. 현재 편집기 세션의 메모리에만 있고 저장되지 않습니다.
+- **모델**: 기본값 `solar-pro3`. endpoint와 모델 선택은 이 기기의 `chrome.storage.local`에 저장됩니다.
+
+저장소의 reference gateway를 쓰려면 Extension ID를 `chrome://extensions`에서 확인하고 companion 프로세스의 환경 변수를 설정합니다.
+
+```bash
+export KIRINUKI_ALLOWED_ORIGIN='chrome-extension://<확장프로그램-ID>'
+export KIRINUKI_AGENT_TOKEN='<충분히 긴 임의 토큰>'
+export KIRINUKI_STT_ENDPOINT='https://<STT-제공자>/v1/audio/transcriptions'
+export KIRINUKI_STT_API_KEY='<STT-API-키>'
+export KIRINUKI_STT_MODEL='<STT-모델-이름>'
+export UPSTAGE_API_KEY='<Upstage-API-키>'
+export KIRINUKI_SOLAR_MODEL='solar-pro3'
+export KIRINUKI_AGENT_PORT='4319'
+# 선택: 전체 파이프라인 제한시간(ms), 최대 20분
+export KIRINUKI_PIPELINE_TIMEOUT_MS='900000'
+npm run caption-gateway
+```
+
+`KIRINUKI_ALLOWED_ORIGIN`에는 와일드카드가 아니라 현재 Extension의 정확한 origin 하나를 지정하세요. gateway는 `127.0.0.1`에만 바인딩되며, Extension에 입력한 세션 토큰과 환경 변수의 토큰이 일치해야 합니다. 환경 변수는 Extension이 아니라 companion 프로세스에만 두고 저장소·프로젝트 JSON·로그에 기록하지 마세요. reference gateway가 기대하는 STT endpoint는 오디오 multipart 전사 요청을 받는 서비스이며, 제공자별 계약·보존 정책·비용은 별도로 확인해야 합니다.
+
+관련 Upstage 공식 문서:
+
+- [Chat API Reference](https://console.upstage.ai/api/chat)
+- [Structured outputs](https://console.upstage.ai/docs/capabilities/generate/structured-outputs)
+- [Solar Pro 3](https://console.upstage.ai/docs/models/solar-pro-3)
 
 ### LIVE와 다시보기·로컬 파일 시간 맞추기
 
@@ -135,29 +169,33 @@ Codex가 프로젝트 폴더의 `AGENTS.md`를 지속 지침으로 읽는 구조
 - 치지직 라이브 상태 메타데이터를 읽을 수 없을 때는 HTML 플레이어 시각으로 폴백하므로, 생성 프롬프트의 캡처 방법과 신뢰도를 검수해야 합니다.
 - 사이드패널의 작은 캡처 상태는 `chrome.storage.local`, 편집 프로젝트·자막·파일 핸들·붙여넣은 이미지 Blob은 IndexedDB에 자동 저장됩니다.
 - 편집기의 수동·5분 자동·복원 직전 임시저장은 프로젝트별 최근 5개만 같은 IndexedDB에 보관합니다. 서버로 전송하지 않으며 Extension 데이터 삭제나 제거 시 함께 사라질 수 있습니다.
-- Whisper 모델 데이터는 Chrome의 Extension Cache Storage에 저장됩니다. 원본 영상과 추출 음성은 Hugging Face나 다른 외부 서비스로 업로드하지 않습니다.
+- 원본 전체, 대표 프레임 픽셀, 이미지 에셋과 최종 렌더는 자막 에이전트에 보내지 않습니다. 사용자가 **활성 컷 전체 Solar 자막**을 누르면 활성화된 모든 선택 컷의 16kHz 오디오와 프로젝트 식별자·이름, 스트리머명, 각 컷 메모, 로컬에서 계산한 시간별 top·center·bottom 방해도 점수가 설정한 endpoint로 차례로 전송됩니다. reference gateway는 각 음성을 외부 STT에 보내고, timed transcript와 이름·메모 문맥·숫자형 위치 요약을 Upstage에 보냅니다.
+- 세션 토큰은 저장하지 않고, endpoint와 모델 선택만 `chrome.storage.local`에 보관합니다. Upstage와 외부 STT API 키는 companion 프로세스의 환경 변수에만 둡니다.
 - 다른 방송 탭으로 이동했을 때 기존 구간과 원본이 섞이지 않도록 충돌을 감지하고 새 기록을 막습니다.
 - 같은 채널의 서로 다른 생방송은 `channelId + broadcastStartedAt`으로 구분합니다.
 - 여러 Chrome 창의 사이드패널은 revision을 확인해 최신 상태를 동기화하며, 입력 중인 텍스트는 다른 창의 변경 위에 보존·재저장합니다.
-- Codex 작업 규칙은 원본을 덮어쓰지 않고 외부 서비스에 미디어를 업로드하지 않도록 요구합니다.
-- 기본 자막은 배경 없는 흰색 `Pretendard ExtraBold`로 표시합니다. 저장소에는 공식 Pretendard 1.3.9 WOFF2 원본과 SIL Open Font License 1.1 고지를 함께 포함합니다.
+- Codex 작업 규칙은 원본을 덮어쓰지 않으며, 자막 생성 UI에서 명시적으로 허용한 선택 컷 오디오 외에는 외부 서비스에 미디어를 업로드하지 않도록 요구합니다.
+- 새 프로젝트의 기본 자막은 이전 5.2% 기준보다 약 30% 큰 화면 높이 6.75%의 배경 없는 흰색 `Pretendard ExtraBold`로 표시합니다. 기존 저장 프로젝트에서 이미 정한 크기는 그대로 유지합니다. 저장소에는 공식 Pretendard 1.3.9 WOFF2 원본과 SIL Open Font License 1.1 고지를 함께 포함합니다.
 
-저장된 원본 권한이 만료되면 **원본 연결**을 다시 눌러 같은 파일을 선택하세요. 사이드패널의 **모든 로컬 작업 초기화**는 저장된 모든 구간·편집 프로젝트·임시저장·파일 핸들을 지우되 모델 캐시는 유지합니다. 모델만 다시 받으려면 편집기 DevTools의 **Application → Cache Storage → `transformers-cache`**를 삭제하세요. Extension을 제거하면 프로젝트와 모델 캐시가 모두 사라질 수 있습니다.
+저장된 원본 권한이 만료되면 **원본 연결**을 다시 눌러 같은 파일을 선택하세요. 사이드패널의 **모든 로컬 작업 초기화**는 저장된 모든 구간·편집 프로젝트·임시저장·파일 핸들을 지우지만 디스크의 원본 영상과 이미 내보낸 파일은 삭제하지 않습니다. Extension을 제거하면 브라우저에 저장된 프로젝트와 연결 설정이 사라질 수 있습니다.
 
 ### 권한과 네트워크
 
 - `activeTab`, `scripting`, `tabs`: 이미 열린 치지직 탭과 통신하고 원본 탭을 다시 포커스합니다.
 - `clipboardRead`: 사용자가 에셋 패널의 붙여넣기 버튼을 누른 순간 클립보드의 이미지 형식만 읽습니다. 일반 텍스트와 클립보드 기록은 저장하지 않습니다.
-- `storage`, `unlimitedStorage`: 선택 구간·편집 프로젝트·모델 캐시를 로컬에 보존합니다.
+- `storage`, `unlimitedStorage`: 선택 구간·편집 프로젝트·자막·에셋·임시저장과 endpoint·모델 설정을 로컬에 보존합니다.
 - 치지직 host 권한: LIVE/VOD 메타데이터와 플레이어 시각을 읽습니다.
-- Hugging Face host 권한: 고정된 Whisper Tiny/Small revision의 모델 데이터만 받습니다. 실행용 WASM과 JavaScript는 Extension 안에 포함되어 있으며 CDN에서 실행 코드를 가져오지 않습니다.
+- loopback host 권한: 기본 reference gateway인 `127.0.0.1` 또는 `localhost`에 연결합니다.
+- 선택적 HTTPS host 권한: 사용자가 다른 자막 에이전트 endpoint를 설정하고 연결을 실행할 때 그 정확한 origin에 대한 권한을 Chrome에서 요청합니다. 일반 `http` endpoint는 loopback만 허용합니다.
 
-현재 `sharp`는 Transformers.js의 Node 전용 하위 의존성이지만 브라우저 번들에는 포함되지 않습니다. 잠금 파일은 알려진 취약 버전을 피하도록 `0.35.3`으로 override하며, `npm audit`을 릴리스 검증에 포함합니다.
+Extension은 Upstage나 STT 제공자의 API 키를 직접 받지 않습니다. 세션 토큰은 편집기 탭을 닫으면 사라지고, 실제 API 키는 사용자가 운영하는 companion 환경에만 남습니다.
 
 ## 알려진 제한
 
 - 치지직 영상을 우회 다운로드하지 않습니다. 본인이 소유하거나 사용 허가를 받은 로컬 원본이 필요합니다.
-- 입력 컨테이너를 읽을 수 있어도 Chrome이 영상·오디오 코덱을 디코딩하지 못하면 미리보기·전사·렌더가 실패할 수 있습니다.
+- 입력 컨테이너를 읽을 수 있어도 Chrome이 영상·오디오 코덱을 디코딩하지 못하면 미리보기·자막용 오디오 추출·렌더가 실패할 수 있습니다.
+- Solar Pro 3는 텍스트 모델이라 음성을 직접 전사할 수 없습니다. 자막 생성에는 호환되는 외부 STT와 네트워크 연결이 필요합니다.
+- 자막 생성 시 선택 컷 오디오가 설정한 STT 제공자와 timed transcript가 Upstage로 전송됩니다. 각 제공자의 보존 정책·지역·요금·rate limit을 확인하고, 민감한 방송은 보내기 전에 동의를 검토하세요.
 - 주 영상 트랙과 주 오디오 트랙만 사용합니다. 출력은 최대 1920×1080, 최대 60fps이며 VFR 입력은 컷 경계를 보존하는 CFR 출력으로 바뀝니다.
 - 이미지 에셋은 PNG·JPEG·WebP·GIF를 지원하며 GIF는 정지 프레임 에셋으로 처리합니다. 같은 시각의 에셋은 선택 가능한 하위 줄로 펼쳐지고, 내보낼 때는 현재 필요한 이미지만 순차 디코드합니다. 동시에 표시되는 이미지의 실제 RGBA 메모리 상한은 256MiB입니다. SVG와 원격 URL만 붙여넣는 방식은 지원하지 않습니다.
 - 음성은 고정 1개 레인에서 구간별 음량·뮤트·페이드만 조절합니다. 음원 분리, 다중 오디오 트랙과 플러그인 효과는 제공하지 않습니다.
@@ -179,11 +217,7 @@ Chromium/ChromeDriver와 FFmpeg/ffprobe가 있는 릴리스 환경에서는 브�
 npm run check:full
 ```
 
-`test:browser`는 기본적으로 로컬 WASM 컴파일과 ASR worker 부팅까지만 확인합니다. 16kHz mono `f32le` 한국어 음성 샘플로 실제 Whisper Tiny 추론까지 확인하려면 다음처럼 실행합니다.
-
-```bash
-KIRINUKI_ASR_PCM=/절대경로/korean.f32 npm run test:browser
-```
+기본 테스트의 자막 에이전트·gateway 검증은 mock 네트워크를 사용하므로 실제 STT나 Upstage API 키가 필요하지 않습니다. 실제 서비스 연결은 별도 자격증명과 비용·개인정보 정책을 확인한 환경에서 편집기의 **연결 확인**으로 검증하세요.
 
 릴리스 ZIP은 전체 검증 후 정확한 파일 allowlist만 묶고, SHA-256을 기록한 다음 ZIP을 다시 풀어 Chrome에 실제 로드합니다. 시스템 `zip`과 `unzip`이 필요합니다.
 
@@ -201,8 +235,8 @@ npm run check:policy-links
 
 ## 검증 상태
 
-순수 프로젝트 모델에서는 방송 회차 분리, 사용자 확정 컷 변환, 시간축 매핑, v1/v2→v3 마이그레이션, 투명 이미지 에셋, 다중 자막 레인·cue별 색상, 구간별 음성 자동화, AI 재실행 시 사람 수정 보존, 컷 재정렬과 SRT 출력을 단위 테스트합니다. 브라우저 E2E는 이미지 붙여넣기·겹침 하위 줄·고아 Blob 정리와 재로딩, 자막·에셋 양끝의 실제 포인터 드래그, 0.12초 음소거의 정밀 미리보기 시계, 파일 연결과 IndexedDB 복구를 확인합니다. 합성 영상 E2E는 불투명·반투명·완전 투명 픽셀의 실제 WebCodecs 렌더 결과와 JSON/SRT·최종 ZIP 로드를 확인합니다. 실제 한국어 음성으로 Whisper Tiny 전사와 단어 시각도 별도 확인했습니다.
+순수 프로젝트 모델에서는 방송 회차 분리, 사용자 확정 컷 변환, 시간축 매핑, v1/v2→v3 마이그레이션, 투명 이미지 에셋, 다중 자막 레인·cue별 색상, 구간별 음성 자동화, AI 재실행 시 사람 수정 보존, 컷 재정렬과 SRT 출력을 단위 테스트합니다. 자막 에이전트 테스트는 `chzzk-kirinuki-caption-*/v1` 요청·응답, 최대 4초 cue와 잘못된 응답 거부를 확인하고, reference gateway 테스트는 origin·세션 토큰 검증과 외부 STT·Solar 응답 처리를 mock으로 확인합니다. 브라우저 E2E는 이미지 붙여넣기·겹침 하위 줄·고아 Blob 정리와 재로딩, 자막·에셋 양끝의 실제 포인터 드래그, 0.12초 음소거의 정밀 미리보기 시계, 파일 연결과 IndexedDB 복구를 확인합니다. 합성 영상 E2E는 불투명·반투명·완전 투명 픽셀의 실제 WebCodecs 렌더 결과와 JSON/SRT·최종 ZIP 로드를 확인합니다.
 
 마지막 로컬 검증 환경은 Arch Linux, Node.js 26.4.0, npm 11.18.0, Chromium/ChromeDriver 150.0.7871.46, FFmpeg/ffprobe 8.1.2입니다. 선언한 Node 20.9·Chrome 120 하한은 빌드 target과 API 기준이며 동일 버전 CI 매트릭스에서 직접 실행한 결과는 아닙니다.
 
-제3자 코드와 라이선스·소스 위치는 [Third-party notices](legal/THIRD_PARTY_NOTICES.md)에 기록합니다. 합성 미디어, 실제 음성 샘플과 모델 캐시는 저장소에 포함하지 않습니다.
+제3자 코드와 라이선스·소스 위치는 [Third-party notices](legal/THIRD_PARTY_NOTICES.md)에 기록합니다. 합성 미디어, 실제 음성 샘플, 자격증명과 실제 서비스 응답은 저장소에 포함하지 않습니다.

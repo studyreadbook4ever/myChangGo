@@ -1,0 +1,515 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  CAPTION_AGENT_REQUEST_SCHEMA,
+  CAPTION_AGENT_RESPONSE_SCHEMA,
+  MAX_CAPTION_AGENT_CLIPS_PER_RUN,
+  MAX_CAPTION_AGENT_CLIP_DURATION_MS,
+  MAX_CAPTION_AGENT_CUES_PER_RUN,
+  MAX_REMOTE_WARNINGS,
+  captionAgentAudioFootprint,
+  captionAgentPermissionOrigin,
+  createCaptionAgentRequest,
+  encodePcm16WavBase64,
+  normalizeCaptionAgentCues,
+  normalizeCaptionAgentEndpoint,
+  probeCaptionAgent,
+  requestCaptionAgent
+} from "../src/editor/caption-agent.js";
+
+function jsonResponse(payload, {
+  status = 200
+} = {}) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+function agentRequest({
+  requestId = "request-1",
+  clipId = "clip-1",
+  durationMs = 5_000
+} = {}) {
+  return {
+    schema: CAPTION_AGENT_REQUEST_SCHEMA,
+    requestId,
+    clip: {
+      id: clipId,
+      durationMs
+    }
+  };
+}
+
+function completedAgentResponse(request, overrides = {}) {
+  return {
+    schema: CAPTION_AGENT_RESPONSE_SCHEMA,
+    requestId: request.requestId,
+    clipId: request.clip.id,
+    language: "ko",
+    sttModel: "external-stt",
+    captionModel: "solar-pro3",
+    model: "solar-pro3",
+    resolvedModel: "solar-pro3",
+    provider: "upstage",
+    status: "completed",
+    cues: [],
+    warnings: [],
+    ...overrides
+  };
+}
+
+test("에이전트 주소는 HTTPS 또는 loopback HTTP만 허용하고 인증정보를 거부한다", () => {
+  assert.equal(
+    normalizeCaptionAgentEndpoint("http://127.0.0.1:4319/v1/captions"),
+    "http://127.0.0.1:4319/v1/captions"
+  );
+  assert.equal(
+    normalizeCaptionAgentEndpoint("https://captions.example/v1/captions"),
+    "https://captions.example/v1/captions"
+  );
+  assert.equal(
+    captionAgentPermissionOrigin("https://captions.example:8443/v1/captions"),
+    "https://captions.example/*"
+  );
+  assert.throws(
+    () => normalizeCaptionAgentEndpoint("http://captions.example/v1/captions"),
+    /HTTPS/u
+  );
+  assert.throws(
+    () => normalizeCaptionAgentEndpoint("https://user:secret@captions.example/v1/captions"),
+    /아이디나 비밀번호/u
+  );
+});
+
+test("16kHz mono Float32 PCM을 올바른 PCM16 WAV base64로 만든다", () => {
+  const encoded = encodePcm16WavBase64(
+    new Float32Array([-1, 0, 1]),
+    16_000
+  );
+  const wav = Buffer.from(encoded, "base64");
+  assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
+  assert.equal(wav.subarray(8, 12).toString("ascii"), "WAVE");
+  assert.equal(wav.readUInt16LE(22), 1);
+  assert.equal(wav.readUInt32LE(24), 16_000);
+  assert.equal(wav.readUInt16LE(34), 16);
+  assert.equal(wav.readUInt32LE(40), 6);
+  assert.equal(wav.readInt16LE(44), -32_768);
+  assert.equal(wav.readInt16LE(46), 0);
+  assert.equal(wav.readInt16LE(48), 32_767);
+});
+
+test("요청은 실제 컷 메모·길이와 한국어 키리누키 4초 정책을 담는다", () => {
+  const request = createCaptionAgentRequest({
+    project: {
+      id: "project-1",
+      name: "새 프로젝트",
+      source: { streamerName: "스트리머" }
+    },
+    clip: {
+      id: "clip-1",
+      note: "첫 장면",
+      sourceStartMs: 10_000,
+      sourceEndMs: 15_500
+    },
+    model: "solar-pro3",
+    audioBase64: "UklGRg==",
+    placementHints: {
+      analysis: "local-three-band-edge-density-v1",
+      framesShared: false,
+      samples: [{
+        atMs: 500,
+        topScore: 700,
+        centerScore: 400,
+        bottomScore: 100,
+        preferredPlacement: "bottom"
+      }]
+    }
+  });
+  assert.equal(request.schema, CAPTION_AGENT_REQUEST_SCHEMA);
+  assert.match(
+    request.requestId,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+  );
+  assert.equal(request.clip.durationMs, 5_500);
+  assert.equal(request.clip.title, "첫 장면");
+  assert.equal(request.locale, "ko-KR");
+  assert.equal(request.policy.includeAllRecognizableSpeech, true);
+  assert.equal(request.policy.maxCueDurationMs, 4_000);
+  assert.equal(request.policy.terminalPeriod, "omit");
+  assert.equal(request.visual.framesShared, false);
+  assert.equal(request.visual.samples[0].preferredPlacement, "bottom");
+  assert.equal(request.audio.data, "UklGRg==");
+});
+
+test("원격 cue는 정렬·경계·4초를 검증하고 동시 발화와 표시 메타를 보존한다", () => {
+  const cues = normalizeCaptionAgentCues([
+    {
+      startMs: 1_000,
+      endMs: 2_000,
+      text: "진짜야?.",
+      speakerId: " guest ",
+      reviewRequired: true,
+      placement: "top",
+      color: "#00FF88"
+    },
+    {
+      start_ms: 0,
+      end_ms: 1_000,
+      text: "「안녕하세요。」",
+      speaker_id: " main ",
+      review_required: false,
+      placement: "bottom"
+    }
+  ], 5_000);
+
+  assert.deepEqual(cues.map((cue) => cue.text), [
+    "「안녕하세요」",
+    "진짜야?"
+  ]);
+  assert.deepEqual(cues[0].remoteMeta, {
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom"
+  });
+  assert.deepEqual(cues[1].remoteMeta, {
+    speakerId: "guest",
+    reviewRequired: true,
+    placement: "top"
+  });
+  assert.equal(cues[1].color, "#00ff88");
+  assert.equal(cues[1].y, 0.18);
+
+  assert.throws(
+    () => normalizeCaptionAgentCues([{
+      startMs: 0,
+      endMs: 4_001,
+      text: "너무 긴 자막"
+    }], 5_000),
+    /4초/u
+  );
+  assert.throws(
+    () => normalizeCaptionAgentCues([{
+      startMs: -1,
+      endMs: 1_000,
+      text: "범위 밖"
+    }], 5_000),
+    /시간 범위/u
+  );
+  const simultaneous = normalizeCaptionAgentCues([
+    {
+      startMs: 0,
+      endMs: 1_500,
+      text: "첫 자막",
+      speakerId: "main"
+    },
+    {
+      startMs: 1_000,
+      endMs: 2_000,
+      text: "동시 발화",
+      speakerId: "guest"
+    }
+  ], 5_000);
+  assert.deepEqual(
+    simultaneous.map((cue) => cue.remoteMeta.speakerId),
+    ["main", "guest"]
+  );
+});
+
+test("오디오 추출 전에 컷 길이와 WAV 메모리 상한을 검사한다", () => {
+  const footprint = captionAgentAudioFootprint(
+    MAX_CAPTION_AGENT_CLIP_DURATION_MS
+  );
+  assert.equal(footprint.durationMs, 30 * 60 * 1_000);
+  assert(footprint.floatPcmBytes > footprint.wavBytes);
+  assert(footprint.wavBytes < 64 * 1024 * 1024);
+  assert.throws(
+    () => captionAgentAudioFootprint(
+      MAX_CAPTION_AGENT_CLIP_DURATION_MS + 1
+    ),
+    /30분/u
+  );
+  assert.equal(MAX_CAPTION_AGENT_CLIPS_PER_RUN, 500);
+  assert.equal(MAX_CAPTION_AGENT_CUES_PER_RUN, 10_000);
+});
+
+test("동기 응답은 리다이렉트와 credential을 금지한 요청으로 전달한다", async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const request = agentRequest();
+  const result = await requestCaptionAgent({
+    endpoint: "https://captions.example/v1/captions",
+    token: "session-token",
+    request,
+    signal: controller.signal,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse(completedAgentResponse(request));
+    }
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.redirect, "error");
+  assert.equal(calls[0].options.credentials, "omit");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer session-token");
+  assert.equal(calls[0].options.signal.aborted, false);
+});
+
+test("비동기 상태 URL은 최초 요청과 같은 origin만 허용한다", async () => {
+  await assert.rejects(
+    requestCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      request: agentRequest(),
+      fetchImpl: async () => jsonResponse({
+        status: "queued",
+        statusUrl: "https://attacker.example/jobs/1"
+      }, { status: 202 })
+    }),
+    /다른 출처/u
+  );
+
+  await assert.rejects(
+    requestCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      request: agentRequest(),
+      fetchImpl: async () => jsonResponse({
+        status: "queued",
+        statusUrl: "https://user:secret@captions.example/jobs/1"
+      }, { status: 202 })
+    }),
+    /인증 정보/u
+  );
+});
+
+test("비동기 폴링은 same-origin 상대 URL을 GET으로 조회해 완료 응답을 반환한다", async () => {
+  const calls = [];
+  const request = agentRequest();
+  const result = await requestCaptionAgent({
+    endpoint: "https://captions.example/v1/captions",
+    token: "poll-token",
+    request,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (calls.length === 1) {
+        return jsonResponse({
+          status: "queued",
+          statusUrl: "/v1/jobs/one",
+          retryAfterMs: 300
+        }, { status: 202 });
+      }
+      return jsonResponse(completedAgentResponse(request));
+    }
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, "https://captions.example/v1/jobs/one");
+  assert.equal(calls[1].options.method, "GET");
+  assert.equal(calls[1].options.redirect, "error");
+  assert.equal(calls[1].options.credentials, "omit");
+  assert.equal(calls[1].options.headers.Authorization, "Bearer poll-token");
+});
+
+test("비동기 폴링은 same-origin 상대 URL을 따르고 AbortSignal로 즉시 멈춘다", async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const pending = requestCaptionAgent({
+    endpoint: "https://captions.example/v1/captions",
+    request: agentRequest(),
+    signal: controller.signal,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return jsonResponse({
+        status: "queued",
+        statusUrl: "/v1/jobs/one",
+        retryAfterMs: 10_000
+      }, { status: 202 });
+    },
+    onProgress: (_progress, message) => {
+      if (message.includes("Solar")) {
+        controller.abort();
+      }
+    }
+  });
+
+  await assert.rejects(
+    pending,
+    (error) => error?.name === "AbortError"
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("이미 취소된 신호는 네트워크 요청을 시작하지 않는다", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let fetchCount = 0;
+  await assert.rejects(
+    requestCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      request: agentRequest(),
+      signal: controller.signal,
+      fetchImpl: async () => {
+        fetchCount += 1;
+        return jsonResponse({ status: "completed", cues: [] });
+      }
+    }),
+    (error) => error?.name === "AbortError"
+  );
+  assert.equal(fetchCount, 0);
+});
+
+test("완료 응답은 요청 ID·컷 ID와 모든 필수 필드 타입을 검증한다", async () => {
+  const request = agentRequest();
+  const cases = [
+    {
+      name: "requestId 누락",
+      response: completedAgentResponse(request, { requestId: undefined }),
+      pattern: /requestId/u
+    },
+    {
+      name: "requestId 불일치",
+      response: completedAgentResponse(request, { requestId: "stale-request" }),
+      pattern: /요청 ID/u
+    },
+    {
+      name: "clipId 불일치",
+      response: completedAgentResponse(request, { clipId: "other-clip" }),
+      pattern: /컷 ID/u
+    },
+    {
+      name: "필수 배열 타입 위반",
+      response: completedAgentResponse(request, { warnings: null }),
+      pattern: /warnings/u
+    },
+    {
+      name: "warning 개수 상한 위반",
+      response: completedAgentResponse(request, {
+        warnings: Array.from(
+          { length: MAX_REMOTE_WARNINGS + 1 },
+          (_, cueIndex) => ({ code: "TOO_MANY", cueIndex })
+        )
+      }),
+      pattern: /warnings/u
+    },
+    {
+      name: "응답 추가 필드 거부",
+      response: completedAgentResponse(request, { debugTranscript: "비공개" }),
+      pattern: /지원하지 않는 필드/u
+    },
+    {
+      name: "제공자 계약 위반",
+      response: completedAgentResponse(request, { provider: "unknown" }),
+      pattern: /Upstage/u
+    },
+    {
+      name: "cue 필수 필드 타입 위반",
+      response: completedAgentResponse(request, {
+        cues: [{
+          startMs: 0,
+          endMs: 1_000,
+          text: "안녕",
+          speakerId: "main",
+          reviewRequired: "false",
+          placement: "bottom"
+        }]
+      }),
+      pattern: /cue/u
+    }
+  ];
+
+  for (const fixture of cases) {
+    await assert.rejects(
+      requestCaptionAgent({
+        endpoint: "https://captions.example/v1/captions",
+        request,
+        fetchImpl: async () => jsonResponse(fixture.response)
+      }),
+      fixture.pattern,
+      fixture.name
+    );
+  }
+});
+
+test("비동기 폴링은 횟수 상한에서 중단된다", async () => {
+  const request = agentRequest();
+  let fetchCount = 0;
+  await assert.rejects(
+    requestCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      request,
+      maxPollAttempts: 1,
+      fetchImpl: async () => {
+        fetchCount += 1;
+        return jsonResponse({
+          status: "running",
+          statusUrl: "/v1/jobs/one",
+          retryAfterMs: 300
+        }, { status: 202 });
+      }
+    }),
+    /횟수 상한/u
+  );
+  assert.equal(fetchCount, 2);
+});
+
+test("전체 요청 제한 시간은 진행 중인 네트워크 요청도 중단한다", async () => {
+  const request = agentRequest();
+  let receivedSignal = null;
+  await assert.rejects(
+    requestCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      request,
+      timeoutMs: 20,
+      fetchImpl: async (_url, options) => {
+        receivedSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => {
+            reject(options.signal.reason);
+          }, { once: true });
+        });
+      }
+    }),
+    (error) => error?.name === "TimeoutError"
+  );
+  assert.equal(receivedSignal?.aborted, true);
+});
+
+test("연결 확인에도 짧은 deadline이 적용된다", async () => {
+  let receivedSignal = null;
+  await assert.rejects(
+    probeCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      timeoutMs: 20,
+      fetchImpl: async (_url, options) => {
+        receivedSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => {
+            reject(options.signal.reason);
+          }, { once: true });
+        });
+      }
+    }),
+    (error) => error?.name === "TimeoutError"
+  );
+  assert.equal(receivedSignal?.aborted, true);
+});
+
+test("자막 에이전트의 과대 응답은 본문을 버퍼링하기 전에 거부한다", async () => {
+  const request = agentRequest();
+  await assert.rejects(
+    requestCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      request,
+      fetchImpl: async () => new Response("{}", {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": String(9 * 1024 * 1024)
+        }
+      })
+    }),
+    /응답 본문이 너무 큽니다/u
+  );
+});

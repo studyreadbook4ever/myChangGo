@@ -11,6 +11,7 @@ import {
 } from "./lib/editor-core.js";
 
 const BINDINGS_KEY = "chzzkKirinukiSourceBindingsV1";
+const LEGACY_TRANSFORMERS_CACHE_NAME = "transformers-cache";
 let workspaceOperationQueue = Promise.resolve();
 
 function queueWorkspaceOperation(operation) {
@@ -26,6 +27,21 @@ const enableActionSidePanel = async () => {
     console.error("사이드패널 동작을 설정하지 못했습니다.", error);
   }
 };
+
+async function purgeLegacyLocalAsrCache() {
+  try {
+    await caches.delete(LEGACY_TRANSFORMERS_CACHE_NAME);
+  } catch (error) {
+    console.warn("이전 로컬 음성인식 모델 캐시를 정리하지 못했습니다.", error);
+  }
+}
+
+async function initializeExtensionRuntime() {
+  await Promise.all([
+    enableActionSidePanel(),
+    purgeLegacyLocalAsrCache()
+  ]);
+}
 
 async function readBindings() {
   const stored = await chrome.storage.session.get(BINDINGS_KEY);
@@ -231,6 +247,7 @@ async function resetWorkspace(message) {
   } catch (error) {
     cleanupErrors.push(`편집 프로젝트 저장소: ${error.message}`);
   }
+  await purgeLegacyLocalAsrCache();
 
   return { state, workspaceMeta, cleanupErrors };
 }
@@ -256,8 +273,13 @@ async function runSourceAction(message) {
   }
 }
 
-chrome.runtime.onInstalled.addListener(enableActionSidePanel);
-chrome.runtime.onStartup.addListener(enableActionSidePanel);
+chrome.runtime.onInstalled.addListener(() => {
+  void initializeExtensionRuntime();
+});
+chrome.runtime.onStartup.addListener(() => {
+  void initializeExtensionRuntime();
+});
+void purgeLegacyLocalAsrCache();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message.type !== "string") {

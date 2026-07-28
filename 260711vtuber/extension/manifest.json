@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "치지직 키리누키 스튜디오",
-  "version": "2.0.0",
-  "description": "치지직 생방송·다시보기의 선택 구간을 컷 편집하고 투명 이미지 에셋·구간별 음성·다중 로컬 AI 한글 자막을 검수·렌더합니다.",
+  "version": "2.1.0",
+  "description": "치지직 생방송·다시보기의 선택 구간을 컷 편집하고 투명 에셋·구간별 음성·다중 Solar 한글 자막을 검수·렌더합니다.",
   "minimum_chrome_version": "120",
   "permissions": [
     "activeTab",
@@ -16,19 +16,14 @@
   "host_permissions": [
     "https://chzzk.naver.com/*",
     "https://api.chzzk.naver.com/*",
-    "https://huggingface.co/*",
-    "https://*.huggingface.co/*",
-    "https://*.hf.co/*",
-    "https://*.xethub.hf.co/*"
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';"
-  },
-  "cross_origin_embedder_policy": {
-    "value": "require-corp"
-  },
-  "cross_origin_opener_policy": {
-    "value": "same-origin"
+    "extension_pages": "script-src 'self'; worker-src 'self'; object-src 'self';"
   },
   "background": {
     "service_worker": "service-worker.js",

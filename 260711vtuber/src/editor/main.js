@@ -21,6 +21,7 @@ import {
   imageAssetTimelineRange,
   findSubtitleOverlaps,
   mapTimelineToSource,
+  mergeAiWarnings,
   mergeCaptureIntoEditorProject,
   normalizeEditorProject,
   projectDurationMs,
@@ -28,7 +29,6 @@ import {
   replaceAiSubtitleDraft,
   rippleDeleteTimelineRange,
   serializeSrt,
-  transcriptChunksToCueDrafts,
   updateAudioRegion,
   updateClipTrim,
   updateImageAsset,
@@ -36,7 +36,9 @@ import {
 } from "../../extension/lib/editor-core.js";
 import { STORAGE_KEY } from "../../extension/lib/core.js";
 import {
+  extractClipCaptionPlacementHints,
   extractClipPcm16k,
+  fallbackCaptionPlacementHints,
   getPreferredOutputProfile,
   inspectMediaFile,
   renderProjectVideo
@@ -55,6 +57,21 @@ import {
   saveProjectWithImageAssetBlob,
   saveProject
 } from "./project-store.js";
+import {
+  DEFAULT_CAPTION_AGENT_SETTINGS,
+  MAX_CAPTION_AGENT_CLIPS_PER_RUN,
+  MAX_CAPTION_AGENT_CUES_PER_RUN,
+  captionAgentAudioFootprint,
+  createCaptionAgentRequest,
+  encodePcm16WavBase64,
+  ensureCaptionAgentPermission,
+  loadCaptionAgentSettings,
+  normalizeCaptionAgentCues,
+  normalizeCaptionAgentEndpoint,
+  probeCaptionAgent,
+  requestCaptionAgent,
+  saveCaptionAgentSettings
+} from "./caption-agent.js";
 
 const elements = Object.fromEntries([
   "project-name",
@@ -99,7 +116,11 @@ const elements = Object.fromEntries([
   "asset-inspector-content",
   "audio-inspector-content",
   "add-cue-top",
-  "asr-model",
+  "caption-agent-endpoint",
+  "caption-agent-token",
+  "caption-model",
+  "test-caption-agent",
+  "caption-agent-warning",
   "generate-captions",
   "ai-progress",
   "ai-progress-label",
@@ -110,6 +131,7 @@ const elements = Object.fromEntries([
   "cue-count",
   "cue-empty",
   "cue-editor",
+  "cue-review-note",
   "cue-text",
   "cue-start",
   "cue-end",
@@ -224,8 +246,6 @@ let toastTimer = null;
 let activeClipId = null;
 let undoStack = [];
 let redoStack = [];
-let asrWorker = null;
-let currentAsrJob = null;
 let activeJobController = null;
 let pointerEditActive = false;
 let inspectorMode = "selected";
@@ -255,6 +275,7 @@ let automaticLocalDraftOperation = null;
 let lastAutomaticDraftAtMs = 0;
 let localDraftAutosaveAnchorAtMs = 0;
 let focusBeforeLocalDraftDialog = null;
+let captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
 const imageAssetObjectUrls = new Map();
 
 const EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
@@ -974,10 +995,43 @@ function renderHeader() {
   elements.export_video.disabled = !mediaFile || !project.clips.some((clip) => clip.enabled !== false);
   if (
     !activeJobController &&
-    document.activeElement !== elements.asr_model &&
-    [...elements.asr_model.options].some((option) => option.value === project.ai?.model)
+    document.activeElement !== elements.caption_model &&
+    [...elements.caption_model.options].some((option) => option.value === project.ai?.model)
   ) {
-    elements.asr_model.value = project.ai.model;
+    elements.caption_model.value = project.ai.model;
+  }
+  const warnings = Array.isArray(project.ai?.warnings)
+    ? project.ai.warnings.filter((warning) => (
+      warning &&
+      typeof warning.code === "string" &&
+      warning.code.trim()
+    ))
+    : [];
+  elements.caption_agent_warning.hidden = warnings.length === 0;
+  if (warnings.length > 0) {
+    const warningLabels = {
+      NO_RECOGNIZABLE_SPEECH: "인식된 발화 없음",
+      LOCAL_VISUAL_ANALYSIS_FAILED: "화면 위치 분석 실패·하단 기본값 사용",
+      DROPPED_INVALID_CUE: "유효하지 않은 자막 제외",
+      DROPPED_EMPTY_RANGE: "빈 시간 자막 제외",
+      TRIMMED_LONG_TEXT: "긴 텍스트 축약",
+      SPLIT_LONG_CUE: "4초 이하로 자동 분할",
+      TRIMMED_WARNING_COUNT: "추가 처리 경고 생략",
+      TRIMMED_CUE_COUNT: "자막 개수 상한으로 일부 제외"
+    };
+    const counts = new Map();
+    for (const warning of warnings) {
+      const label = warningLabels[warning.code] || "기타 처리 경고";
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    const summary = [...counts.entries()]
+      .map(([label, count]) => `${label} ${count}건`)
+      .join(" · ");
+    elements.caption_agent_warning.textContent = (
+      `AI 처리 경고 ${warnings.length}건 · ${summary}. 누락 가능성이 있으니 해당 컷 원음을 확인해 주세요.`
+    );
+  } else {
+    elements.caption_agent_warning.textContent = "";
   }
 }
 
@@ -1037,6 +1091,11 @@ function renderCueInspector() {
   if (!cue || showingList) {
     return;
   }
+  elements.cue_review_note.hidden = !(
+    cue.origin === "ai" &&
+    cue.remoteMeta?.reviewRequired &&
+    !cue.humanEdited
+  );
   const range = cueTimelineRange(project, cue);
   if (document.activeElement !== elements.cue_text) {
     elements.cue_text.value = cue.text;
@@ -1051,7 +1110,7 @@ function renderCueInspector() {
   elements.cue_y.value = String(Math.round(cue.y * 100));
   elements.cue_x_value.textContent = `${Math.round(cue.x * 100)}%`;
   elements.cue_y_value.textContent = `${Math.round(cue.y * 100)}%`;
-  elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.052) * 100);
+  elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.0675) * 100);
   elements.font_color.value = cue.color || project.subtitleDefaults.color || "#ffffff";
   const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
@@ -1194,6 +1253,15 @@ function renderCueList() {
     button.type = "button";
     button.className = "cue-list-item";
     button.classList.toggle("selected", cue.id === project.selectedCueId);
+    const reviewRequired = (
+      cue.origin === "ai" &&
+      cue.remoteMeta?.reviewRequired &&
+      !cue.humanEdited
+    );
+    button.classList.toggle("review-required", reviewRequired);
+    if (reviewRequired) {
+      button.title = "AI가 불명확한 발화로 표시함 · 원음 재확인 필요";
+    }
     button.dataset.id = cue.id;
     const time = document.createElement("time");
     time.textContent = `L${cue.lane + 1} · ${formatTime(range.startMs, { compact: true }).slice(0, -4)}`;
@@ -2103,6 +2171,15 @@ function renderTimeline({ keepScroll = false } = {}) {
     }
     const block = document.createElement("div");
     block.className = `cue-block ${cue.origin === "ai" ? "ai" : "human"}${cue.humanEdited ? " human-edited" : ""}`;
+    const reviewRequired = (
+      cue.origin === "ai" &&
+      cue.remoteMeta?.reviewRequired &&
+      !cue.humanEdited
+    );
+    block.classList.toggle("review-required", reviewRequired);
+    if (reviewRequired) {
+      block.title = "AI가 불명확한 발화로 표시함 · 원음 재확인 필요";
+    }
     block.classList.toggle("selected", cue.id === project.selectedCueId);
     block.dataset.id = cue.id;
     block.dataset.lane = String(cue.lane);
@@ -2260,7 +2337,7 @@ function renderSubtitleOverlay() {
     overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
     overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
     overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
-    const fontSize = Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.052));
+    const fontSize = Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.0675));
     overlay.style.fontSize = `${fontSize}px`;
     overlay.style.color = cue.color || project.subtitleDefaults.color || "#ffffff";
     overlay.style.background = "transparent";
@@ -3108,69 +3185,55 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
   }
 }
 
-function ensureAsrWorker() {
-  if (asrWorker) {
-    return asrWorker;
-  }
-  asrWorker = new Worker(chrome.runtime.getURL("editor/asr-worker.js"), { type: "module" });
-  const worker = asrWorker;
-  worker.addEventListener("message", (event) => {
-    const message = event.data || {};
-    if (!currentAsrJob || message.jobId !== currentAsrJob.id) {
-      return;
-    }
-    if (message.type === "progress") {
-      currentAsrJob.onProgress(message);
-    } else if (message.type === "result") {
-      currentAsrJob.resolve(message);
-      currentAsrJob = null;
-    } else if (message.type === "error") {
-      currentAsrJob.reject(new Error(message.error));
-      currentAsrJob = null;
-    }
-  });
-  const discardWorker = () => {
-    if (asrWorker === worker) {
-      asrWorker = null;
-    }
-    worker.terminate();
+function readCaptionAgentConfig() {
+  return {
+    endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
+    token: elements.caption_agent_token.value,
+    model: elements.caption_model.value
   };
-  worker.addEventListener("error", (event) => {
-    if (currentAsrJob) {
-      currentAsrJob.reject(new Error(event.message || "AI 자막 worker가 중단되었습니다."));
-      currentAsrJob = null;
-    }
-    discardWorker();
-  });
-  worker.addEventListener("messageerror", () => {
-    if (currentAsrJob) {
-      currentAsrJob.reject(new Error("AI 자막 worker 응답을 읽지 못했습니다."));
-      currentAsrJob = null;
-    }
-    discardWorker();
-  });
-  return worker;
 }
 
-function transcribePcm(audio, model, onProgress) {
-  if (currentAsrJob) {
-    throw new Error("이미 음성인식 작업이 실행 중입니다.");
+async function prepareCaptionAgentConfig() {
+  const config = readCaptionAgentConfig();
+  const permissionGranted = await ensureCaptionAgentPermission(config.endpoint);
+  if (!permissionGranted) {
+    throw new Error("자막 에이전트 주소 접근 권한이 허용되지 않았습니다.");
   }
-  const worker = ensureAsrWorker();
-  const id = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    currentAsrJob = { id, resolve, reject, onProgress };
-    try {
-      worker.postMessage({ type: "transcribe", jobId: id, model, audio }, [audio.buffer]);
-    } catch (error) {
-      currentAsrJob = null;
-      if (asrWorker === worker) {
-        asrWorker = null;
-      }
-      worker.terminate();
-      reject(error);
-    }
+  captionAgentSettings = await saveCaptionAgentSettings({
+    endpoint: config.endpoint,
+    model: config.model
   });
+  elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
+  return { ...config, ...captionAgentSettings };
+}
+
+async function testCaptionAgentConnection() {
+  if (activeJobController || projectMutationLockCount > 0) {
+    return;
+  }
+  const controller = new AbortController();
+  activeJobController = controller;
+  elements.test_caption_agent.disabled = true;
+  try {
+    const config = await prepareCaptionAgentConfig();
+    const result = await probeCaptionAgent({
+      ...config,
+      signal: controller.signal
+    });
+    const provider = result.provider ? ` · ${result.provider}` : "";
+    const model = result.model || result.defaultModel || config.model;
+    showToast(`자막 에이전트 연결 확인 완료${provider} · ${model}`, "success", 5200);
+  } catch (error) {
+    const canceled = error.name === "AbortError";
+    showToast(
+      canceled ? "자막 에이전트 연결 확인을 취소했습니다." : `자막 에이전트 연결 실패: ${error.message}`,
+      canceled ? "info" : "error",
+      0
+    );
+  } finally {
+    activeJobController = null;
+    elements.test_caption_agent.disabled = false;
+  }
 }
 
 function setAiProgress(progress, label) {
@@ -3189,71 +3252,173 @@ async function generateCaptions() {
     showToast("AI 자막을 만들려면 먼저 원본 영상을 연결해 주세요.", "error");
     return;
   }
-  if (!project.clips.some((clip) => clip.enabled !== false)) {
+  const enabledClips = project.clips.filter(
+    (clip) => clip.enabled !== false
+  );
+  if (enabledClips.length === 0) {
     showToast("선택한 구간이 없습니다.", "error");
+    return;
+  }
+  if (enabledClips.length > MAX_CAPTION_AGENT_CLIPS_PER_RUN) {
+    showToast(
+      `한 번에 자막을 만들 수 있는 활성 컷은 최대 ${MAX_CAPTION_AGENT_CLIPS_PER_RUN}개입니다.`,
+      "error",
+      0
+    );
     return;
   }
   if (activeJobController || projectMutationLockCount > 0) {
     return;
   }
+  const returnFocus = document.activeElement;
   const controller = new AbortController();
   activeJobController = controller;
-  const model = elements.asr_model.value;
+  elements.generate_captions.disabled = true;
+  let config;
+  try {
+    config = await prepareCaptionAgentConfig();
+  } catch (error) {
+    showToast(`자막 에이전트 설정을 확인해 주세요: ${error.message}`, "error", 0);
+    activeJobController = null;
+    elements.generate_captions.disabled = false;
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+    }
+    return;
+  }
+  const { endpoint, token, model } = config;
   const undoSnapshot = cloneProject(project);
   let undoRecorded = false;
+  let reviewRequiredCount = 0;
+  let captionWarnings = [];
+  let generatedCueCount = 0;
   showJob(
-    "AI 자막 초안을 만드는 중",
-    "첫 실행은 선택한 Whisper 모델 데이터를 받은 뒤 브라우저에 캐시합니다.",
+    "Solar 자막 초안을 만드는 중",
+    "활성화된 모든 선택 컷의 음성을 차례로 외부 STT에 보내고, 전사문과 고지된 이름·메모 문맥은 Solar에 보냅니다.",
     0,
-    { cancelable: true }
+    { cancelable: true, returnFocus }
   );
-  elements.generate_captions.disabled = true;
   project = {
     ...project,
     ai: {
       ...project.ai,
+      provider: "caption-agent",
       model,
       status: "running",
       progress: 0,
-      error: null
+      error: null,
+      warnings: []
     }
   };
   renderHeader();
 
   lockProjectMutations();
   try {
-    const clips = project.clips.filter((clip) => clip.enabled !== false);
+    const clips = enabledClips;
     for (let index = 0; index < clips.length; index += 1) {
       const clip = clips[index];
       const base = index / clips.length;
       const span = 1 / clips.length;
-      setAiProgress(base, `${index + 1}/${clips.length} · 선택 구간의 음성을 준비하는 중`);
+      captionAgentAudioFootprint(clipDurationMs(clip));
+      setAiProgress(base, `${index + 1}/${clips.length} · 화면 안전 영역을 로컬 분석하는 중`);
+      let placementHints;
+      try {
+        placementHints = await extractClipCaptionPlacementHints(
+          mediaFile,
+          clip,
+          {
+            signal: controller.signal,
+            onProgress: (value) => {
+              setAiProgress(
+                base + span * value * 0.1,
+                `${index + 1}/${clips.length} · 대표 프레임 안전 영역 분석 중`
+              );
+            }
+          }
+        );
+      } catch (error) {
+        if (controller.signal.aborted || error?.name === "AbortError") {
+          throw error;
+        }
+        console.warn("대표 프레임 자막 위치 분석에 실패했습니다.", error);
+        placementHints = fallbackCaptionPlacementHints(clipDurationMs(clip));
+        captionWarnings = mergeAiWarnings(
+          captionWarnings,
+          [{
+            code: "LOCAL_VISUAL_ANALYSIS_FAILED",
+            cueIndex: 0
+          }],
+          clip.id
+        );
+      }
+      setAiProgress(
+        base + span * 0.1,
+        `${index + 1}/${clips.length} · 선택 구간의 음성을 준비하는 중`
+      );
       const pcm = await extractClipPcm16k(mediaFile, clip, {
         signal: controller.signal,
         onProgress: (value) => {
-          setAiProgress(base + span * value * 0.18, `${index + 1}/${clips.length} · 음성 추출 중`);
+          setAiProgress(
+            base + span * (0.1 + value * 0.16),
+            `${index + 1}/${clips.length} · 전송할 음성 추출 중`
+          );
         }
       });
-      const result = await transcribePcm(pcm, model, (message) => {
-        const local = 0.18 + (message.progress || 0) * 0.8;
-        setAiProgress(base + span * local, `${index + 1}/${clips.length} · ${message.label}`);
+      controller.signal.throwIfAborted();
+      setAiProgress(base + span * 0.28, `${index + 1}/${clips.length} · WAV 요청 준비 중`);
+      const request = createCaptionAgentRequest({
+        project,
+        clip,
+        model,
+        audioBase64: encodePcm16WavBase64(pcm),
+        placementHints
       });
-      const drafts = transcriptChunksToCueDrafts(
-        result.chunks,
+      const result = await requestCaptionAgent({
+        endpoint,
+        token,
+        request,
+        signal: controller.signal,
+        onProgress: (progress, label) => {
+          const local = 0.28 + Math.max(0, Math.min(1, progress)) * 0.7;
+          setAiProgress(base + span * local, `${index + 1}/${clips.length} · ${label}`);
+        }
+      });
+      const drafts = normalizeCaptionAgentCues(
+        result.cues,
         clipDurationMs(clip)
       );
-      if (drafts.length === 0 && result.text) {
-        drafts.push({
-          startOffsetMs: 0,
-          endOffsetMs: Math.min(clipDurationMs(clip), 4_500),
-          text: result.text
-        });
+      generatedCueCount += drafts.length;
+      if (generatedCueCount > MAX_CAPTION_AGENT_CUES_PER_RUN) {
+        throw new Error(
+          `한 번에 만들 수 있는 AI 자막은 최대 ${MAX_CAPTION_AGENT_CUES_PER_RUN.toLocaleString("ko-KR")}개입니다. 활성 컷을 나눠서 실행해 주세요.`
+        );
       }
+      captionWarnings = mergeAiWarnings(
+        captionWarnings,
+        result.warnings,
+        clip.id
+      );
+      reviewRequiredCount += drafts.filter((draft) => (
+        draft.remoteMeta?.reviewRequired
+      )).length;
       if (!undoRecorded) {
         pushUndo(undoSnapshot);
         undoRecorded = true;
       }
-      project = replaceAiSubtitleDraft(project, clip.id, drafts);
+      project = {
+        ...replaceAiSubtitleDraft(project, clip.id, drafts),
+        ai: {
+          ...project.ai,
+          provider: String(result.provider || "caption-agent"),
+          model,
+          resolvedModel: String(result.resolvedModel || result.model || model),
+          lastRequestId: String(result.requestId || ""),
+          status: "running",
+          progress: Math.min(0.99, (index + 1) / clips.length),
+          error: null,
+          warnings: captionWarnings
+        }
+      };
       await saveProject(project);
       renderAll({ keepScroll: true });
       setAiProgress(base + span, `${index + 1}/${clips.length} · 자막 초안 저장 완료`);
@@ -3270,7 +3435,15 @@ async function generateCaptions() {
     };
     await saveProject(project);
     setAiProgress(1, "선택 구간 자막 초안 완료");
-    showToast("AI 자막 초안을 만들었습니다. 텍스트·시간·위치를 검수해 주세요.", "success", 6500);
+    showToast(
+      captionWarnings.length > 0
+        ? `Solar 자막은 완료됐지만 처리 경고가 ${captionWarnings.length}건 있습니다. 노란 경고에서 누락 가능성을 확인해 주세요.`
+        : reviewRequiredCount > 0
+        ? `Solar 자막 초안을 만들었습니다. 재확인이 필요한 ${reviewRequiredCount}개 자막은 노란색으로 표시했습니다.`
+        : "Solar 자막 초안을 만들었습니다. 텍스트·시간·위치를 한 번 검수해 주세요.",
+      captionWarnings.length > 0 ? "error" : "success",
+      captionWarnings.length > 0 ? 9000 : 6500
+    );
   } catch (error) {
     const canceled = error.name === "AbortError";
     project = {
@@ -3298,14 +3471,6 @@ function cancelActiveJob() {
     return;
   }
   activeJobController?.abort();
-  if (currentAsrJob) {
-    currentAsrJob.reject(new DOMException("작업이 취소되었습니다.", "AbortError"));
-    currentAsrJob = null;
-  }
-  if (asrWorker) {
-    asrWorker.terminate();
-    asrWorker = null;
-  }
 }
 
 function setJobCancelable(cancelable) {
@@ -3317,8 +3482,13 @@ function setJobCancelable(cancelable) {
   }
 }
 
-function showJob(title, message, progress = 0, { cancelable = true } = {}) {
-  focusBeforeJob = document.activeElement;
+function showJob(
+  title,
+  message,
+  progress = 0,
+  { cancelable = true, returnFocus = document.activeElement } = {}
+) {
+  focusBeforeJob = returnFocus;
   elements.job_title.textContent = title;
   elements.job_message.textContent = message;
   setJobCancelable(cancelable);
@@ -4385,13 +4555,40 @@ function bindActions() {
   });
 
   elements.generate_captions.addEventListener("click", () => void generateCaptions());
-  elements.asr_model.addEventListener("change", () => {
+  elements.test_caption_agent.addEventListener("click", () => void testCaptionAgentConnection());
+  elements.caption_model.addEventListener("change", () => {
     applyProject({
       ...project,
       ai: {
         ...project.ai,
-        model: elements.asr_model.value
+        provider: "caption-agent",
+        model: elements.caption_model.value
       }
+    });
+    void saveCaptionAgentSettings({
+      endpoint: elements.caption_agent_endpoint.value,
+      model: elements.caption_model.value
+    }).catch((error) => {
+      showToast(`자막 에이전트 설정 저장 실패: ${error.message}`, "error", 0);
+    });
+  });
+  elements.caption_agent_endpoint.addEventListener("change", () => {
+    try {
+      elements.caption_agent_endpoint.value = normalizeCaptionAgentEndpoint(
+        elements.caption_agent_endpoint.value
+      );
+    } catch (error) {
+      showToast(error.message, "error", 0);
+      elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
+      return;
+    }
+    void saveCaptionAgentSettings({
+      endpoint: elements.caption_agent_endpoint.value,
+      model: elements.caption_model.value
+    }).then((settings) => {
+      captionAgentSettings = settings;
+    }).catch((error) => {
+      showToast(`자막 에이전트 설정 저장 실패: ${error.message}`, "error", 0);
     });
   });
   elements.cancel_job.addEventListener("click", cancelActiveJob);
@@ -4624,6 +4821,14 @@ async function initializeSourceBinding() {
 
 async function initialize() {
   bindActions();
+  try {
+    captionAgentSettings = await loadCaptionAgentSettings();
+  } catch (error) {
+    console.warn("자막 에이전트 설정을 불러오지 못했습니다.", error);
+    captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
+  }
+  elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
+  elements.caption_model.value = captionAgentSettings.model;
   const { projectId, captureState } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;

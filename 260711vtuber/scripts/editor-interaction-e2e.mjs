@@ -15,8 +15,8 @@ const SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 const STORAGE_KEY = "chzzkKirinukiProjectV1";
 const WORKSPACE_META_KEY = "chzzkKirinukiWorkspaceMetaV1";
 const BINDINGS_KEY = "chzzkKirinukiSourceBindingsV1";
-const MODEL_CACHE_NAME = "transformers-cache";
-const MODEL_CACHE_SENTINEL_TEXT = "keep-model-cache-across-workspace-reset";
+const LEGACY_MODEL_CACHE_NAME = "transformers-cache";
+const LEGACY_MODEL_CACHE_SENTINEL_TEXT = "remove-legacy-model-cache-on-reset";
 const PROJECT_ID = "e2e-editor-interaction";
 const EDITED_TEXT = "사람이 직접 고친 한글 자막";
 const KEY = Object.freeze({
@@ -910,14 +910,28 @@ async function main() {
 
   const aiProbeSetup = await executeSync(`
     const button = document.querySelector("#generate-captions");
-    globalThis.__kirinukiE2eOriginalWorker = globalThis.Worker;
-    globalThis.__kirinukiE2eWorkerConstructions = 0;
-    globalThis.Worker = new Proxy(globalThis.Worker, {
-      construct() {
-        globalThis.__kirinukiE2eWorkerConstructions += 1;
-        throw new Error("E2E: Escape 전에 AI worker가 생성되었습니다.");
+    globalThis.__kirinukiE2eOriginalFetch = globalThis.fetch;
+    globalThis.__kirinukiE2eCaptionFetch = {
+      requests: 0,
+      aborted: 0
+    };
+    globalThis.fetch = (input, init = {}) => {
+      if (String(input).startsWith("http://127.0.0.1:4319/")) {
+        globalThis.__kirinukiE2eCaptionFetch.requests += 1;
+        return new Promise((_resolve, reject) => {
+          const abort = () => {
+            globalThis.__kirinukiE2eCaptionFetch.aborted += 1;
+            reject(new DOMException("E2E caption request canceled", "AbortError"));
+          };
+          if (init.signal?.aborted) {
+            abort();
+          } else {
+            init.signal?.addEventListener("abort", abort, { once: true });
+          }
+        });
       }
-    });
+      return globalThis.__kirinukiE2eOriginalFetch(input, init);
+    };
     button.focus();
     globalThis.__kirinukiE2eDialogTrace = [];
     window.addEventListener("keydown", (event) => {
@@ -943,18 +957,18 @@ async function main() {
     });
     return {
       activeId: document.activeElement?.id || null,
-      workerWrapped: globalThis.Worker !== globalThis.__kirinukiE2eOriginalWorker
+      fetchWrapped: globalThis.fetch !== globalThis.__kirinukiE2eOriginalFetch
     };
   `);
   assert(
-    aiProbeSetup.activeId === "generate-captions" && aiProbeSetup.workerWrapped,
+    aiProbeSetup.activeId === "generate-captions" && aiProbeSetup.fetchWrapped,
     `AI dialog probe 준비 실패: ${JSON.stringify(aiProbeSetup)}`
   );
 
   let aiDialogOpened = null;
   let aiDialogAfterTab = null;
   let aiDialogCanceled = null;
-  let aiWorkerProbe = null;
+  let aiFetchProbe = null;
   try {
     await clickElement("#generate-captions");
     aiDialogOpened = await waitUntil(async () => {
@@ -974,6 +988,13 @@ async function main() {
         state.activeId === "cancel-job"
       ) ? state : false;
     }, "AI 작업 dialog open과 초기 focus");
+
+    await waitUntil(async () => {
+      const state = await executeSync(`
+        return structuredClone(globalThis.__kirinukiE2eCaptionFetch || {});
+      `);
+      return state.requests === 1 ? state : false;
+    }, "선택 컷 외부 자막 요청 시작", { timeout: 20_000 });
 
     await pressKey(KEY.TAB);
     aiDialogAfterTab = await waitUntil(async () => {
@@ -1022,7 +1043,7 @@ async function main() {
           activeInside: Boolean(dialog?.contains(document.activeElement)),
           buttonDisabled: button?.disabled,
           progressHidden: document.querySelector("#ai-progress")?.hidden,
-          workerConstructions: globalThis.__kirinukiE2eWorkerConstructions || 0,
+          captionFetch: globalThis.__kirinukiE2eCaptionFetch || null,
           trace: globalThis.__kirinukiE2eDialogTrace || [],
           toast: document.querySelector("#toast")?.textContent || ""
         };
@@ -1038,21 +1059,255 @@ async function main() {
       { timeout: 20_000 }
     );
   } finally {
-    aiWorkerProbe = await executeSync(`
-      const result = {
-        constructions: globalThis.__kirinukiE2eWorkerConstructions || 0
-      };
-      if (globalThis.__kirinukiE2eOriginalWorker) {
-        globalThis.Worker = globalThis.__kirinukiE2eOriginalWorker;
+    aiFetchProbe = await executeSync(`
+      const result = structuredClone(globalThis.__kirinukiE2eCaptionFetch || {});
+      if (globalThis.__kirinukiE2eOriginalFetch) {
+        globalThis.fetch = globalThis.__kirinukiE2eOriginalFetch;
       }
-      delete globalThis.__kirinukiE2eOriginalWorker;
+      delete globalThis.__kirinukiE2eOriginalFetch;
       return result;
     `).catch(() => null);
   }
   assert(
-    aiWorkerProbe?.constructions === 0,
-    `Escape 전에 실제 AI worker가 시작됐습니다: ${JSON.stringify(aiWorkerProbe)}`
+    aiFetchProbe?.requests === 1 && aiFetchProbe?.aborted === 1,
+    `외부 자막 요청 취소 계약이 지켜지지 않았습니다: ${JSON.stringify(aiFetchProbe)}`
   );
+
+  const aiSuccessBefore = await readStoredProject();
+  assert(
+    aiSuccessBefore?.subtitles?.length === 0 &&
+      aiSuccessBefore?.ai?.status === "canceled",
+    `AI 성공 경로 사전 프로젝트 상태가 올바르지 않습니다: ${JSON.stringify(aiSuccessBefore?.ai)}`
+  );
+  const aiSuccessSetup = await executeSync(`
+    const endpointPrefix = "http://127.0.0.1:4319/";
+    globalThis.__kirinukiE2eAiSuccessOriginalFetch = globalThis.fetch;
+    globalThis.__kirinukiE2eAiSuccessFetch = {
+      requests: [],
+      unexpected: []
+    };
+    document.querySelector("#caption-agent-token").value = "e2e-session-token";
+    globalThis.fetch = async (input, init = {}) => {
+      if (!String(input).startsWith(endpointPrefix)) {
+        return globalThis.__kirinukiE2eAiSuccessOriginalFetch(input, init);
+      }
+      const trace = globalThis.__kirinukiE2eAiSuccessFetch;
+      if (String(init.method || "GET").toUpperCase() !== "POST") {
+        trace.unexpected.push({
+          url: String(input),
+          method: String(init.method || "GET").toUpperCase()
+        });
+        return new Response(JSON.stringify({ error: "unexpected method" }), {
+          status: 405,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      const request = JSON.parse(String(init.body || "{}"));
+      const audioBinary = atob(request.audio?.data || "");
+      const requestIndex = trace.requests.length;
+      trace.requests.push({
+        url: String(input),
+        method: String(init.method || "").toUpperCase(),
+        requestId: request.requestId || null,
+        clipId: request.clip?.id || null,
+        durationMs: request.clip?.durationMs || null,
+        audioBytes: audioBinary.length,
+        audioMagic: audioBinary.slice(0, 4),
+        sampleRateHz: request.audio?.sampleRateHz || null,
+        channels: request.audio?.channels || null,
+        protocolHeader: new Headers(init.headers).get("X-Kirinuki-Protocol"),
+        authorization: new Headers(init.headers).get("Authorization"),
+        policy: request.policy || null,
+        visual: request.visual || null
+      });
+      const first = requestIndex === 0;
+      const response = {
+        schema: "chzzk-kirinuki-caption-response/v1",
+        requestId: request.requestId,
+        clipId: request.clip.id,
+        language: "ko",
+        sttModel: "e2e-stt",
+        captionModel: request.model,
+        model: request.model,
+        resolvedModel: request.model,
+        provider: "upstage",
+        status: "completed",
+        cues: [{
+          startMs: first ? 200 : 300,
+          endMs: first ? 1600 : 1900,
+          text: first ? "첫 컷 AI 초안입니다." : "두 번째 컷 AI 초안?",
+          speakerId: first ? "streamer" : "guest",
+          reviewRequired: first,
+          placement: first ? "top" : "bottom"
+        }],
+        warnings: first
+          ? [{ code: "DROPPED_INVALID_CUE", cueIndex: 1 }]
+          : []
+      };
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    };
+    return {
+      wrapped: globalThis.fetch !== globalThis.__kirinukiE2eAiSuccessOriginalFetch,
+      tokenValue: document.querySelector("#caption-agent-token")?.value || ""
+    };
+  `);
+  assert(
+    aiSuccessSetup.wrapped && aiSuccessSetup.tokenValue === "e2e-session-token",
+    `AI 성공 응답 mock 준비 실패: ${JSON.stringify(aiSuccessSetup)}`
+  );
+
+  let aiSuccessProject = null;
+  let aiSuccessDom = null;
+  let aiSuccessFetch = null;
+  let aiSuccessRestored = null;
+  try {
+    await clickElement("#generate-captions");
+    aiSuccessProject = await waitForStoredProject(
+      (candidate) => (
+        candidate.ai?.status === "done" &&
+        candidate.subtitles?.length === 2 &&
+        candidate.ai?.warnings?.length === 1
+      ),
+      "mock 외부 에이전트의 전체 선택 컷 Solar 자막 저장",
+      { timeout: 60_000 }
+    );
+    aiSuccessDom = await waitUntil(async () => {
+      const state = await executeSync(`
+        const warning = document.querySelector("#caption-agent-warning");
+        const reviewBlock = document.querySelector(".cue-block.review-required");
+        reviewBlock?.querySelector(".cue-block-body")?.click();
+        return {
+          dialogHidden: document.querySelector("#job-dialog")?.hidden,
+          progressHidden: document.querySelector("#ai-progress")?.hidden,
+          cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
+          reviewMarkerCount: document.querySelectorAll(".cue-block.review-required").length,
+          reviewMarkerTitle: reviewBlock?.title || "",
+          warningHidden: warning?.hidden,
+          warningText: warning?.textContent || "",
+          reviewNoteHidden: document.querySelector("#cue-review-note")?.hidden,
+          selectedCueText: document.querySelector("#cue-text")?.value || ""
+        };
+      `);
+      return (
+        state.dialogHidden === true &&
+        state.cueCount === 2 &&
+        state.reviewMarkerCount === 1 &&
+        state.warningHidden === false &&
+        state.warningText.includes("유효하지 않은 자막 제외 1건") &&
+        state.reviewNoteHidden === false &&
+        state.selectedCueText === "첫 컷 AI 초안입니다"
+      ) ? state : false;
+    }, "Solar 자막 검수 표식과 영속 gateway 경고 UI", { timeout: 20_000 });
+  } finally {
+    aiSuccessFetch = await executeSync(`
+      const result = structuredClone(globalThis.__kirinukiE2eAiSuccessFetch || {});
+      if (globalThis.__kirinukiE2eAiSuccessOriginalFetch) {
+        globalThis.fetch = globalThis.__kirinukiE2eAiSuccessOriginalFetch;
+      }
+      document.querySelector("#caption-agent-token").value = "";
+      delete globalThis.__kirinukiE2eAiSuccessOriginalFetch;
+      return result;
+    `).catch(() => null);
+  }
+  const expectedAiClipIds = aiSuccessBefore.clips
+    .filter((clip) => clip.enabled !== false)
+    .map((clip) => clip.id);
+  assert(
+    aiSuccessFetch?.unexpected?.length === 0 &&
+      aiSuccessFetch?.requests?.length === expectedAiClipIds.length &&
+      aiSuccessFetch.requests.map((request) => request.clipId).join(",") === expectedAiClipIds.join(",") &&
+      aiSuccessFetch.requests.every((request) => (
+        request.method === "POST" &&
+        request.requestId &&
+        request.audioBytes > 44 &&
+        request.audioMagic === "RIFF" &&
+        request.sampleRateHz === 16_000 &&
+        request.channels === 1 &&
+        request.protocolHeader === "chzzk-kirinuki-caption-request/v1" &&
+        request.authorization === "Bearer e2e-session-token" &&
+        request.policy?.includeAllRecognizableSpeech === true &&
+        request.policy?.maxCueDurationMs === 4_000 &&
+        request.visual?.analysis === "local-three-band-edge-density-v1" &&
+        request.visual?.framesShared === false &&
+        request.visual?.samples?.length === 7 &&
+        request.visual.samples.every((sample, index, samples) => (
+          Number.isInteger(sample.atMs) &&
+          sample.atMs >= 0 &&
+          sample.atMs < request.durationMs &&
+          (index === 0 || sample.atMs > samples[index - 1].atMs) &&
+          ["top", "center", "bottom"].includes(sample.preferredPlacement) &&
+          ["topScore", "centerScore", "bottomScore"].every((field) => (
+            Number.isInteger(sample[field]) &&
+            sample[field] >= 0 &&
+            sample[field] <= 1_000
+          ))
+        ))
+      )),
+    `모든 활성 컷의 음성 추출/strict 응답 왕복 계약 위반: ${JSON.stringify(aiSuccessFetch)}`
+  );
+  assert(
+    aiSuccessProject.subtitles.every((cue) => cue.origin === "ai") &&
+      aiSuccessProject.subtitles.some((cue) => (
+        cue.text === "첫 컷 AI 초안입니다" &&
+        cue.remoteMeta?.reviewRequired === true &&
+        cue.remoteMeta?.placement === "top"
+      )) &&
+      aiSuccessProject.subtitles.some((cue) => cue.text === "두 번째 컷 AI 초안?") &&
+      aiSuccessProject.ai.warnings[0]?.clipId === expectedAiClipIds[0] &&
+      aiSuccessProject.ai.warnings[0]?.code === "DROPPED_INVALID_CUE",
+    `AI 자막/검수/경고 persistence 계약 위반: ${JSON.stringify({
+      subtitles: aiSuccessProject.subtitles,
+      ai: aiSuccessProject.ai
+    })}`
+  );
+
+  await clickElement("#undo");
+  aiSuccessRestored = await waitForStoredProject(
+    (candidate) => (
+      candidate.subtitles?.length === 0 &&
+      candidate.ai?.status === aiSuccessBefore.ai?.status &&
+      candidate.ai?.warnings?.length === 0
+    ),
+    "AI 성공 경로 undo로 후속 테스트용 clean 상태 복원"
+  );
+  await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
+        warningHidden: document.querySelector("#caption-agent-warning")?.hidden,
+        warningText: document.querySelector("#caption-agent-warning")?.textContent || ""
+      };
+    `);
+    return (
+      state.cueCount === 0 &&
+      state.warningHidden === true &&
+      state.warningText === ""
+    ) ? state : false;
+  }, "AI 성공 경로 undo 뒤 DOM clean 상태");
+  const aiSuccessSmoke = {
+    enabledClipIds: expectedAiClipIds,
+    requests: aiSuccessFetch.requests,
+    persisted: {
+      status: aiSuccessProject.ai.status,
+      cueCount: aiSuccessProject.subtitles.length,
+      warningCount: aiSuccessProject.ai.warnings.length,
+      cues: aiSuccessProject.subtitles.map((cue) => ({
+        clipId: cue.clipId,
+        text: cue.text,
+        reviewRequired: cue.remoteMeta?.reviewRequired || false,
+        placement: cue.remoteMeta?.placement || null
+      }))
+    },
+    dom: aiSuccessDom,
+    restored: {
+      status: aiSuccessRestored.ai?.status || null,
+      cueCount: aiSuccessRestored.subtitles?.length || 0,
+      warningCount: aiSuccessRestored.ai?.warnings?.length || 0
+    }
+  };
 
   const nativeSpaceSetup = await executeSync(`
     const button = document.querySelector("#add-cue-top");
@@ -2734,7 +2989,7 @@ async function main() {
     writerId: "e2e-reset-fixture"
   };
   const modelCacheSentinelUrl =
-    "https://huggingface.co/chzzk-kirinuki-e2e/model-cache-sentinel";
+    "https://legacy-model-cache.invalid/chzzk-kirinuki-e2e/sentinel";
   const resetFixture = await executeAsync(`
     const [
       storageKey,
@@ -2829,14 +3084,14 @@ async function main() {
     PROJECT_ID,
     staleWorkspaceState,
     staleWorkspaceMetaSeed,
-    MODEL_CACHE_NAME,
+    LEGACY_MODEL_CACHE_NAME,
     modelCacheSentinelUrl,
-    MODEL_CACHE_SENTINEL_TEXT,
+    LEGACY_MODEL_CACHE_SENTINEL_TEXT,
     DATABASE_NAME
   ]);
   assert(
     resetFixture?.ok &&
-      resetFixture.cacheText === MODEL_CACHE_SENTINEL_TEXT &&
+      resetFixture.cacheText === LEGACY_MODEL_CACHE_SENTINEL_TEXT &&
       resetFixture.databaseFixture?.projectCount >= 1 &&
       resetFixture.databaseFixture?.handleCount >= 1 &&
       resetFixture.databaseFixture?.handleValue?.name ===
@@ -3128,7 +3383,7 @@ async function main() {
       state.projectName === "" &&
       state.segmentCount === 0 &&
       !state.statusHidden &&
-      state.status.includes("모델 캐시는 유지") &&
+      state.status.includes("임시저장·원본 파일 권한을 초기화") &&
       !state.resetDisabled &&
       state.resetResponse?.ok === true &&
       Array.isArray(state.resetResponse?.cleanupErrors) &&
@@ -3237,8 +3492,9 @@ async function main() {
         caches.keys(),
         chrome.tabs.query({})
       ]);
-      const cache = await caches.open(cacheName);
-      const cached = await cache.match(cacheUrl);
+      const cached = cacheNames.includes(cacheName)
+        ? await (await caches.open(cacheName)).match(cacheUrl)
+        : null;
       done({
         state: stored[storageKey] || null,
         workspaceMeta: stored[workspaceMetaKey] || null,
@@ -3264,7 +3520,7 @@ async function main() {
     BINDINGS_KEY,
     SEED_PREFIX,
     DATABASE_NAME,
-    MODEL_CACHE_NAME,
+    LEGACY_MODEL_CACHE_NAME,
     modelCacheSentinelUrl,
     `chrome-extension://${extensionId}/editor.html`
   ]);
@@ -3279,11 +3535,11 @@ async function main() {
       Object.keys(resetAudit.bindings).length === 0 &&
       !resetAudit.databaseNames.includes(DATABASE_NAME) &&
       resetAudit.editorTabs.length === 0 &&
-      resetAudit.cacheNames.includes(MODEL_CACHE_NAME) &&
-      resetAudit.cacheText === MODEL_CACHE_SENTINEL_TEXT &&
+      !resetAudit.cacheNames.includes(LEGACY_MODEL_CACHE_NAME) &&
+      resetAudit.cacheText === null &&
       resetAudit.panelDom.projectName === "" &&
       resetAudit.panelDom.segmentCount === 0,
-    `multi-window reset 뒤 workspace 정리/Cache 보존 계약 위반: ${JSON.stringify(
+    `multi-window reset 뒤 workspace 정리/이전 모델 Cache 제거 계약 위반: ${JSON.stringify(
       resetAudit
     )}`
   );
@@ -3366,8 +3622,9 @@ async function main() {
         opened: aiDialogOpened,
         afterTab: aiDialogAfterTab,
         canceled: aiDialogCanceled,
-        worker: aiWorkerProbe
-      }
+        captionFetch: aiFetchProbe
+      },
+      aiSuccess: aiSuccessSmoke
     },
     restoredDom,
     resetSmoke,

@@ -34,6 +34,20 @@ const OUTPUT_AUDIO_SAMPLE_RATE = 48_000;
 const OUTPUT_AUDIO_BITRATE = 160_000;
 const FRAME_INDEX_EPSILON = 1e-7;
 export const MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES = 256 * 1024 * 1024;
+export const CAPTION_PLACEMENT_ANALYSIS =
+  "local-three-band-edge-density-v1";
+export const CAPTION_PLACEMENT_SAMPLE_COUNT = 7;
+
+const CAPTION_PLACEMENT_BANDS = Object.freeze([
+  Object.freeze({ placement: "top", start: 0.06, end: 0.34 }),
+  Object.freeze({ placement: "center", start: 0.36, end: 0.64 }),
+  Object.freeze({ placement: "bottom", start: 0.66, end: 0.94 })
+]);
+const CAPTION_PLACEMENT_TIE_ORDER = Object.freeze({
+  bottom: 0,
+  top: 1,
+  center: 2
+});
 
 function throwIfAborted(signal) {
   if (signal?.aborted) {
@@ -337,6 +351,229 @@ export async function extractClipPcm16k(file, clip, {
   }
 }
 
+function pixelLuminance(data, offset) {
+  return (
+    data[offset] * 0.2126
+    + data[offset + 1] * 0.7152
+    + data[offset + 2] * 0.0722
+  );
+}
+
+function captionBandObstructionScore(data, width, height, band) {
+  const startX = Math.max(0, Math.floor(width * 0.04));
+  const endX = Math.min(width, Math.ceil(width * 0.96));
+  const startY = Math.max(0, Math.floor(height * band.start));
+  const endY = Math.min(height, Math.ceil(height * band.end));
+  let luminanceTotal = 0;
+  let luminanceSquaredTotal = 0;
+  let edgeTotal = 0;
+  let edgeCount = 0;
+  let pixelCount = 0;
+
+  for (let y = startY; y < endY; y += 1) {
+    for (let x = startX; x < endX; x += 1) {
+      const offset = (y * width + x) * 4;
+      const luminance = pixelLuminance(data, offset);
+      luminanceTotal += luminance;
+      luminanceSquaredTotal += luminance * luminance;
+      pixelCount += 1;
+      if (x > startX) {
+        edgeTotal += Math.abs(
+          luminance - pixelLuminance(data, offset - 4)
+        );
+        edgeCount += 1;
+      }
+      if (y > startY) {
+        edgeTotal += Math.abs(
+          luminance - pixelLuminance(data, offset - width * 4)
+        );
+        edgeCount += 1;
+      }
+    }
+  }
+
+  if (pixelCount === 0) {
+    return 1_000;
+  }
+  const mean = luminanceTotal / pixelCount;
+  const variance = Math.max(
+    0,
+    luminanceSquaredTotal / pixelCount - mean * mean
+  );
+  const contrast = Math.sqrt(variance);
+  const edgeDensity = edgeCount > 0 ? edgeTotal / edgeCount : 0;
+  return Math.round(
+    clamp((contrast * 1.8 + edgeDensity * 2.2) / 255, 0, 1) * 1_000
+  );
+}
+
+export function analyzeCaptionPlacementFrame(
+  rgba,
+  width,
+  height
+) {
+  const normalizedWidth = Number(width);
+  const normalizedHeight = Number(height);
+  if (
+    !rgba
+    || !Number.isInteger(normalizedWidth)
+    || !Number.isInteger(normalizedHeight)
+    || normalizedWidth < 2
+    || normalizedHeight < 3
+    || rgba.length < normalizedWidth * normalizedHeight * 4
+  ) {
+    throw new TypeError("자막 안전 영역을 분석할 RGBA 프레임이 올바르지 않습니다.");
+  }
+  const scores = Object.fromEntries(
+    CAPTION_PLACEMENT_BANDS.map((band) => [
+      `${band.placement}Score`,
+      captionBandObstructionScore(
+        rgba,
+        normalizedWidth,
+        normalizedHeight,
+        band
+      )
+    ])
+  );
+  const preferredPlacement = CAPTION_PLACEMENT_BANDS
+    .map((band) => band.placement)
+    .sort((first, second) => (
+      scores[`${first}Score`] - scores[`${second}Score`]
+      || CAPTION_PLACEMENT_TIE_ORDER[first]
+      - CAPTION_PLACEMENT_TIE_ORDER[second]
+    ))[0];
+  return {
+    ...scores,
+    preferredPlacement
+  };
+}
+
+export function fallbackCaptionPlacementHints(durationMs) {
+  const duration = Math.max(1, Math.round(Number(durationMs) || 1));
+  return {
+    analysis: CAPTION_PLACEMENT_ANALYSIS,
+    framesShared: false,
+    samples: [{
+      atMs: Math.min(duration - 1, Math.floor(duration / 2)),
+      topScore: 500,
+      centerScore: 500,
+      bottomScore: 500,
+      preferredPlacement: "bottom"
+    }]
+  };
+}
+
+export async function extractClipCaptionPlacementHints(file, clip, {
+  onProgress = () => {},
+  sampleCount = CAPTION_PLACEMENT_SAMPLE_COUNT,
+  signal
+} = {}) {
+  const input = createInput(file);
+  try {
+    const [videoTrack, audioTrack] = await Promise.all([
+      input.getPrimaryVideoTrack(),
+      input.getPrimaryAudioTrack()
+    ]);
+    if (!videoTrack) {
+      throw new Error("자막 위치를 분석할 영상 트랙을 찾지 못했습니다.");
+    }
+    if (!(await videoTrack.canDecode())) {
+      throw new Error("자막 위치 분석을 위해 영상 프레임을 디코딩할 수 없습니다.");
+    }
+    const timeline = await readMediaTimeline(input, [videoTrack, audioTrack]);
+    validateRenderClips({
+      clips: [{ ...clip, enabled: true, timelineStartMs: 0 }]
+    }, timeline.durationSeconds * 1_000);
+
+    const sourceWidth = await videoTrack.getDisplayWidth();
+    const sourceHeight = await videoTrack.getDisplayHeight();
+    if (!(sourceWidth > 0) || !(sourceHeight > 0)) {
+      throw new Error("자막 위치 분석용 영상 크기를 확인하지 못했습니다.");
+    }
+    const aspectRatio = sourceWidth / sourceHeight;
+    const analysisWidth = aspectRatio >= 1
+      ? 160
+      : Math.max(64, Math.round(160 * aspectRatio));
+    const analysisHeight = aspectRatio >= 1
+      ? Math.max(64, Math.round(160 / aspectRatio))
+      : 160;
+    const canvas = new OffscreenCanvas(analysisWidth, analysisHeight);
+    const context = canvas.getContext("2d", {
+      alpha: false,
+      willReadFrequently: true
+    });
+    if (!context) {
+      throw new Error("자막 위치 분석용 캔버스를 준비하지 못했습니다.");
+    }
+
+    const durationMs = Math.round(clip.sourceEndMs - clip.sourceStartMs);
+    const count = Math.max(
+      1,
+      Math.min(
+        CAPTION_PLACEMENT_SAMPLE_COUNT,
+        durationMs,
+        Math.floor(Number(sampleCount)) || CAPTION_PLACEMENT_SAMPLE_COUNT
+      )
+    );
+    const localTimestampsMs = Array.from({ length: count }, (_, index) => (
+      Math.max(
+        0,
+        Math.min(
+          durationMs - 1,
+          Math.round(durationMs * (index + 0.5) / count)
+        )
+      )
+    ));
+    const sourceTimestamps = localTimestampsMs.map((timestampMs) => (
+      timeline.originSeconds
+      + (clip.sourceStartMs + timestampMs) / 1_000
+    ));
+    const sink = new VideoSampleSink(videoTrack);
+    const samples = [];
+    let sampleIndex = 0;
+    for await (const sample of sink.samplesAtTimestamps(sourceTimestamps)) {
+      try {
+        throwIfAborted(signal);
+        if (!sample) {
+          throw new Error("자막 위치를 분석할 대표 프레임을 읽지 못했습니다.");
+        }
+        context.fillStyle = "#000";
+        context.fillRect(0, 0, analysisWidth, analysisHeight);
+        sample.drawWithFit(context, { fit: "cover" });
+        const analysis = analyzeCaptionPlacementFrame(
+          context.getImageData(
+            0,
+            0,
+            analysisWidth,
+            analysisHeight
+          ).data,
+          analysisWidth,
+          analysisHeight
+        );
+        samples.push({
+          atMs: localTimestampsMs[sampleIndex],
+          ...analysis
+        });
+      } finally {
+        sample?.close();
+      }
+      sampleIndex += 1;
+      onProgress(sampleIndex / count);
+    }
+    if (samples.length !== count) {
+      throw new Error("자막 위치 분석용 대표 프레임을 모두 읽지 못했습니다.");
+    }
+    onProgress(1);
+    return {
+      analysis: CAPTION_PLACEMENT_ANALYSIS,
+      framesShared: false,
+      samples
+    };
+  } finally {
+    input.dispose();
+  }
+}
+
 function clampSamplePosition(value, length) {
   return Math.max(0, Math.min(Math.max(0, length - 1), value));
 }
@@ -633,7 +870,7 @@ function drawCaption(context, canvas, project, cue) {
     return;
   }
   const defaults = project.subtitleDefaults;
-  let fontSize = Math.max(18, Math.round(canvas.height * (defaults.fontScale || 0.052)));
+  let fontSize = Math.max(18, Math.round(canvas.height * (defaults.fontScale || 0.0675)));
   const fontFamily = String(defaults.fontFamily || "Pretendard").replace(/["\\]/gu, "");
   const fontWeight = clamp(Math.round(Number(defaults.fontWeight) || 800), 100, 900);
   const requestedX = canvas.width * cue.x;

@@ -11,9 +11,6 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const extensionRoot = path.resolve(process.argv[2] || path.join(root, "extension"));
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "chzzk-kirinuki-browser-smoke-"));
 const profileRoot = path.join(tempRoot, "chromium-profile");
-const asrPcmPath = process.env.KIRINUKI_ASR_PCM
-  ? path.resolve(process.env.KIRINUKI_ASR_PCM)
-  : "";
 
 let driver = null;
 let sessionId = "";
@@ -236,9 +233,7 @@ async function main() {
     serviceWorkerPath,
     "editor.html",
     "sidepanel.html",
-    "editor/editor.js",
-    "editor/asr-worker.js",
-    "editor/vendor/ort-wasm-simd-threaded.jsep.wasm"
+    "editor/editor.js"
   ]) {
     await access(path.join(extensionRoot, requiredPath));
   }
@@ -330,59 +325,49 @@ async function main() {
         "local-draft-dialog",
         "local-draft-list",
         "restore-local-draft",
+        "caption-agent-endpoint",
+        "caption-agent-token",
+        "caption-model",
+        "test-caption-agent",
         "generate-captions",
+        "caption-agent-warning",
+        "cue-review-note",
         "export-video"
       ];
       return {
         title: document.title,
         readyState: document.readyState,
-        crossOriginIsolated: globalThis.crossOriginIsolated,
-        sharedArrayBuffer: typeof SharedArrayBuffer,
+        endpoint: document.getElementById("caption-agent-endpoint")?.value,
+        model: document.getElementById("caption-model")?.value,
+        fontSize: document.getElementById("font-size")?.value,
+        tokenType: document.getElementById("caption-agent-token")?.type,
         missingIds: requiredIds.filter((id) => !document.getElementById(id))
       };
     `,
     args: []
   });
   assert(editor.readyState === "complete", `editor readyState가 complete가 아닙니다: ${editor.readyState}`);
-  assert(editor.crossOriginIsolated === true, "editor가 cross-origin isolated 상태가 아닙니다.");
-  assert(editor.sharedArrayBuffer === "function", "editor에서 SharedArrayBuffer를 사용할 수 없습니다.");
+  assert(editor.endpoint === "http://127.0.0.1:4319/v1/captions", `기본 자막 에이전트 주소가 올바르지 않습니다: ${editor.endpoint}`);
+  assert(editor.model === "solar-pro3", `기본 Solar 모델이 올바르지 않습니다: ${editor.model}`);
+  assert(editor.fontSize === "6.75", `기본 자막 크기가 30% 확대값이 아닙니다: ${editor.fontSize}`);
+  assert(editor.tokenType === "password", "자막 에이전트 세션 토큰 입력이 password가 아닙니다.");
   assert(editor.missingIds.length === 0, `editor 핵심 DOM 누락: ${editor.missingIds.join(", ")}`);
 
   const runtime = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/async`, {
     script: `
       const done = arguments[arguments.length - 1];
-      const timeout = setTimeout(() => done({ error: "ASR worker boot timeout" }), 8_000);
+      const timeout = setTimeout(() => done({ error: "caption agent runtime timeout" }), 8_000);
       (async () => {
-        const wasmUrl = chrome.runtime.getURL("editor/vendor/ort-wasm-simd-threaded.jsep.wasm");
-        const response = await fetch(wasmUrl);
-        if (!response.ok) {
-          throw new Error("WASM asset HTTP " + response.status);
-        }
-        const bytes = await response.arrayBuffer();
-        await WebAssembly.compile(bytes);
-
-        const worker = new Worker(chrome.runtime.getURL("editor/asr-worker.js"), { type: "module" });
-        const workerResult = await new Promise((resolve) => {
-          const workerTimeout = setTimeout(() => resolve({ ok: false, error: "disposed 응답 timeout" }), 5_000);
-          worker.addEventListener("message", (event) => {
-            if (event.data?.type === "disposed") {
-              clearTimeout(workerTimeout);
-              resolve({ ok: true });
-            }
-          });
-          worker.addEventListener("error", (event) => {
-            clearTimeout(workerTimeout);
-            resolve({ ok: false, error: event.message || "ASR worker module error" });
-          });
-          worker.postMessage({ type: "dispose" });
+        const cacheNames = await caches.keys();
+        const localAgentPermission = await chrome.permissions.contains({
+          origins: ["http://127.0.0.1/*"]
         });
-        worker.terminate();
+        const stored = await chrome.storage.local.get("chzzk-kirinuki-caption-agent-settings-v1");
         clearTimeout(timeout);
         done({
-          wasmStatus: response.status,
-          wasmBytes: bytes.byteLength,
-          wasmCompiled: true,
-          worker: workerResult
+          cacheNames,
+          localAgentPermission,
+          settings: stored["chzzk-kirinuki-caption-agent-settings-v1"] || null
         });
       })().catch((error) => {
         clearTimeout(timeout);
@@ -392,81 +377,8 @@ async function main() {
     args: []
   });
   assert(!runtime.error, `editor runtime asset 검사 실패: ${runtime.error}`);
-  assert(runtime.wasmStatus === 200, `WASM asset 응답 실패: HTTP ${runtime.wasmStatus}`);
-  assert(runtime.wasmBytes > 8, `WASM asset이 비어 있습니다: ${runtime.wasmBytes} bytes`);
-  assert(runtime.wasmCompiled === true, "WASM asset 컴파일에 실패했습니다.");
-  assert(runtime.worker?.ok === true, `ASR worker 부팅 실패: ${runtime.worker?.error || "알 수 없는 오류"}`);
-
-  let asrRuntime = null;
-  if (asrPcmPath) {
-    const pcmBytes = await readFile(asrPcmPath);
-    assert(pcmBytes.byteLength > 0 && pcmBytes.byteLength % 4 === 0, "ASR smoke PCM은 비어 있지 않은 f32le 파일이어야 합니다.");
-    const pcmBase64 = pcmBytes.toString("base64");
-    asrRuntime = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/async`, {
-      script: `
-        const [pcmBase64] = arguments;
-        const done = arguments[arguments.length - 1];
-        const timeout = setTimeout(() => done({ error: "실제 ASR timeout" }), 300_000);
-        const binary = atob(pcmBase64);
-        const bytes = new Uint8Array(binary.length);
-        for (let index = 0; index < binary.length; index += 1) {
-          bytes[index] = binary.charCodeAt(index);
-        }
-        const audio = new Float32Array(bytes.buffer);
-        const worker = new Worker(chrome.runtime.getURL("editor/asr-worker.js"), { type: "module" });
-        const progress = [];
-        worker.addEventListener("message", (event) => {
-          const message = event.data || {};
-          if (message.jobId !== "browser-asr-smoke") {
-            return;
-          }
-          if (message.type === "progress") {
-            progress.push(message.progress);
-          } else if (message.type === "result") {
-            clearTimeout(timeout);
-            worker.terminate();
-            done({
-              text: message.text,
-              chunks: message.chunks,
-              speechDetected: message.speechDetected,
-              progress
-            });
-          } else if (message.type === "error") {
-            clearTimeout(timeout);
-            worker.terminate();
-            done({ error: message.error, progress });
-          }
-        });
-        worker.addEventListener("error", (event) => {
-          clearTimeout(timeout);
-          worker.terminate();
-          done({ error: event.message || "ASR worker module error", progress });
-        });
-        worker.postMessage({
-          type: "transcribe",
-          jobId: "browser-asr-smoke",
-          model: "Xenova/whisper-tiny",
-          audio
-        }, [audio.buffer]);
-      `,
-      args: [pcmBase64]
-    }, 330_000);
-    assert(!asrRuntime.error, `실제 Whisper Tiny 전사 실패: ${asrRuntime.error}`);
-    assert(asrRuntime.speechDetected === true, "한국어 음성 샘플을 무음으로 잘못 판정했습니다.");
-    assert(Array.isArray(asrRuntime.chunks) && asrRuntime.chunks.length > 0, "한국어 음성에서 전사 chunk가 나오지 않았습니다.");
-    assert(/[가-힣]{2}/u.test(asrRuntime.text), `한국어 전사 결과를 확인하지 못했습니다: ${asrRuntime.text}`);
-    assert(asrRuntime.chunks.every((chunk) => chunk.timestamp[1] > chunk.timestamp[0]), "0초 길이 ASR chunk가 남았습니다.");
-    assert(asrRuntime.progress.every((value, index, values) => index === 0 || value >= values[index - 1]), "ASR 진행률이 역행했습니다.");
-    const progressValues = asrRuntime.progress;
-    asrRuntime = {
-      ...asrRuntime,
-      progress: {
-        events: progressValues.length,
-        first: progressValues[0] ?? null,
-        last: progressValues.at(-1) ?? null
-      }
-    };
-  }
+  assert(runtime.localAgentPermission === true, "127.0.0.1 자막 에이전트 host permission이 없습니다.");
+  assert(!runtime.cacheNames.includes("transformers-cache"), "이전 로컬 Whisper 모델 캐시가 남아 있습니다.");
 
   const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
   await webdriver(baseUrl, "POST", `/session/${sessionId}/url`, { url: sidepanelUrl });
@@ -504,7 +416,6 @@ async function main() {
     serviceWorker: extensionTarget.url,
     editor,
     runtime,
-    asrRuntime,
     sidepanel,
     browserSevereLogs: severeLogs.length
   }, null, 2));

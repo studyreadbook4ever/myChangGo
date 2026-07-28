@@ -1082,7 +1082,7 @@ async function resetProject() {
   if (resetInProgress) {
     return;
   }
-  if (!confirm("열린 통합 편집기를 닫고 저장된 모든 구간·프로젝트·원본 파일 권한을 초기화할까요? Whisper 모델 캐시는 유지됩니다.")) {
+  if (!confirm("열린 통합 편집기를 닫고 저장된 모든 구간·프로젝트·임시저장·원본 파일 권한을 초기화할까요? 디스크의 원본 영상과 이미 내보낸 파일은 삭제하지 않습니다.")) {
     return;
   }
   resetInProgress = true;
@@ -1121,7 +1121,7 @@ async function resetProject() {
         0
       );
     } else {
-      setStatus("구간·편집 프로젝트·원본 파일 권한을 초기화했습니다. 모델 캐시는 유지했습니다.", "success", 6500);
+      setStatus("구간·편집 프로젝트·임시저장·원본 파일 권한을 초기화했습니다.", "success", 6500);
     }
   } catch (error) {
     setStatus(`프로젝트를 완전히 초기화하지 못했습니다: ${error.message}`, "error", 0);
