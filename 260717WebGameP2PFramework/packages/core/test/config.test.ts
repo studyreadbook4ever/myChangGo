@@ -13,12 +13,20 @@ describe("RelayPlay configuration", () => {
     const config = defineConfig();
 
     expect(config.progress.intervalMs).toBe(1_000);
+    expect(config.room.maxPlayers).toBe(4);
+    expect(config.features.ranking.enabled).toBe(false);
     expect(config.security.peerToPeer).toBe(false);
     expect(config.security.strictMessageValidation).toBe(true);
     expect(config.security.requireIdempotencyKeys).toBe(true);
     expect(config.security.requireResumeEpoch).toBe(true);
     expect(config.time.sync.enabled).toBe(true);
     expect(Object.isFrozen(DEFAULT_CONFIG.security.rateLimits.actions)).toBe(true);
+  });
+
+  it("validates the optional ranking feature without changing the room hard limit", () => {
+    expect(normalizeConfig({ features: { ranking: { enabled: true } } }).features.ranking.enabled).toBe(true);
+    expect(normalizeConfig({ room: { maxPlayers: 256 } }).room.maxPlayers).toBe(256);
+    expect(validateConfig({ features: { ranking: { enabled: "yes" } } }).success).toBe(false);
   });
 
   it("deeply merges nested overrides without losing sibling defaults", () => {

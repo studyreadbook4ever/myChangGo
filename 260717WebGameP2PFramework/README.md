@@ -17,6 +17,29 @@ There are no browser-to-browser sockets, WebRTC, STUN, or TURN. A small room
 server authenticates messages, orders interactions, stores the canonical event
 log, and relays them to recipients. The local frame loop never waits for it.
 
+The included harness is deliberately narrow: one to four players, invite-based
+guest access without account signup, no chat surface, and persistent ranking
+disabled by default. Per-match server-issued placement is distinct from a
+global leaderboard and remains available.
+
+## Small deployment, non-monolithic code
+
+RelayPlay may be deployed on one inexpensive machine as one Node.js process and
+one SQLite database. That is a deployment choice, **not** permission to build a
+monolith. The repository keeps protocol, browser SDK, room policy, provider
+ports, and game code in separate packages with automated dependency-boundary
+tests:
+
+```text
+browser game ──▶ client ──▶ core
+                             ▲
+Node / Cloudflare adapter ──▶ server
+```
+
+The Node process is only a composition root around replaceable HTTP,
+WebSocket, persistence, auth, timer, and broadcast modules. A new provider or
+game should plug into those boundaries instead of copying room logic.
+
 ## Why this model
 
 - Local input remains responsive even on a poor connection.
@@ -25,16 +48,17 @@ log, and relays them to recipients. The local frame loop never waits for it.
   at a future game boundary rather than applied on packet arrival.
 - One simulation and scoring core can serve desktop and mobile while controls,
   layout, effects, and ranked pools remain platform-aware.
-- A Cloudflare Durable Object can own each room without running a 60 Hz server
-  simulation.
+- A Node/SQLite server or Cloudflare Durable Object can own room sequencing
+  without running a 60 Hz server simulation.
 
 ## Repository status
 
 The repository contains the framework source, tests, an in-memory adapter, a
-Cloudflare Durable Object adapter, and a framework-free browser example. It is
-currently intended to be installed from source while the package APIs settle.
+self-hosted Node/SQLite adapter, a Cloudflare Durable Object adapter, and a
+framework-free browser example. It is currently intended to be installed from
+source while the package APIs settle.
 
-Requirements: Node.js 22.12 or newer.
+Requirements: Node.js 24.15 or newer.
 
 ```bash
 npm install
@@ -54,8 +78,13 @@ soft-battle sample in
 | `@relayplay/core` | configuration, presets, protocol, runtime validation, clocks |
 | `@relayplay/client` | browser SDK, progress cadence, time sync, reconnect and resume |
 | `@relayplay/server` | provider-neutral room engine, policy ports and in-memory adapter |
+| `@relayplay/node` | accountless HTTP control plane, WebSocket gateway, SQLite storage and self-hosted composition |
 | `@relayplay/cloudflare` | Worker and hibernatable Durable Object WebSocket adapter |
 | `examples/live-race` | touch + keyboard progress race and targeted freeze interaction |
+
+Dependency direction is enforced: `core` has no RelayPlay dependency;
+`client` and `server` depend only on `core`; provider adapters depend on
+`server` and `core`; browser source depends only on `client` and `core`.
 
 ## The game/network boundary
 
@@ -65,11 +94,12 @@ progress, interaction intent delivery, canonical event ordering, reconnect, and
 time estimates.
 
 ```ts
+const guestSession = await createGuestRoom("https://game.example");
+
 const client = new RelayPlayClient({
-  url: "wss://example.workers.dev/rooms/{roomId}/ws",
-  roomId: "demo-room",
-  playerId: "opaque-player-id",
-  token: await getShortLivedRoomToken(),
+  url: guestSession.serverUrl,
+  roomId: guestSession.roomId,
+  playerId: guestSession.playerId,
   config,
 });
 
@@ -93,9 +123,16 @@ await client.connect();
 client.setReady(true);
 ```
 
-The exact event is not trusted merely because the client reported it. For
-ranked play, attach a replay/verifier implementation on the server and keep
-matchmaking policy separate from transport policy.
+For the self-hosted adapter, `guestSession` comes from `POST /api/rooms` or
+`POST /api/join`. The browser receives an opaque room/player description while
+the room-scoped guest credential stays in an `HttpOnly` cookie and is presented
+automatically during the WebSocket upgrade. Provider-specific applications may
+instead supply their own authentication adapter.
+
+The exact event is not trusted merely because the client reported it. Ranking
+is opt-in and defaults off. Before enabling it, attach a replay/verifier
+implementation on the server and keep identity, matchmaking, and leaderboard
+policy separate from transport policy.
 
 ## Choose a starting preset
 
@@ -132,7 +169,8 @@ available at [`docs/ko/overview.md`](./docs/ko/overview.md).
 - Humans starting a game: [`docs/game-design.md`](./docs/game-design.md)
 - Configuration flags and recipes: [`docs/configuration.md`](./docs/configuration.md)
 - Transport and ordering rules: [`docs/protocol.md`](./docs/protocol.md)
-- Deployment: [`docs/deploy-cloudflare.md`](./docs/deploy-cloudflare.md)
+- Self-hosted deployment: [`docs/deploy-on-prem.md`](./docs/deploy-on-prem.md)
+- Cloudflare deployment: [`docs/deploy-cloudflare.md`](./docs/deploy-cloudflare.md)
 - Threat model and ranked limits: [`docs/security.md`](./docs/security.md)
 - Requirement-to-test evidence: [`docs/verification.md`](./docs/verification.md)
 - Coding agents: [`AGENTS.md`](./AGENTS.md), [`llms.txt`](./llms.txt), and

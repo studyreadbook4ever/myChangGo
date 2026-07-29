@@ -1,6 +1,8 @@
 import type { RelayPlayConfigInput } from "@relayplay/core";
 import type {
+  FinishValidator,
   InteractionValidator,
+  ProgressValidator,
   ReplayVerifier,
   RoomAuthenticator,
   RoomSession,
@@ -20,6 +22,8 @@ export interface CloudflareRoomOptions<Env> {
   readonly extractCredential?: (request: Request, env: Env) => unknown | Promise<unknown>;
   readonly config?: RelayPlayConfigInput;
   readonly validateInteraction?: InteractionValidator;
+  readonly validateProgress?: ProgressValidator;
+  readonly validateFinish?: FinishValidator;
   readonly verifyReplay?: ReplayVerifier;
   readonly minimumPlayersToStart?: number;
   readonly replayBatchSize?: number;

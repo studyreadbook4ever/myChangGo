@@ -92,6 +92,13 @@ export interface ClientEvidenceMessage {
   readonly payload: JsonValue;
 }
 
+export interface ClientFinishMessage {
+  readonly version: 1;
+  readonly type: "finish";
+  readonly idempotencyKey: string;
+  readonly payload: JsonValue;
+}
+
 export type ClientMessage =
   | ClientReadyMessage
   | ClientProgressMessage
@@ -99,7 +106,8 @@ export type ClientMessage =
   | ClientAcknowledgeMessage
   | ClientResumeMessage
   | ClientPingMessage
-  | ClientEvidenceMessage;
+  | ClientEvidenceMessage
+  | ClientFinishMessage;
 
 export interface ServerSessionMessage {
   readonly version: 1;
@@ -109,8 +117,29 @@ export interface ServerSessionMessage {
   readonly playerId: string;
   readonly sessionId: string;
   readonly resumeEpoch: number;
+  readonly resumed: boolean;
   readonly status: RoomStatus;
   readonly lastSequence: number;
+  readonly lastProgressSequence: number;
+}
+
+export interface ServerRoomPlayerSnapshot {
+  readonly playerId: string;
+  readonly connected: boolean;
+  readonly ready: boolean;
+  readonly lastProgressSequence: number;
+}
+
+export interface ServerRoomSnapshotMessage {
+  readonly version: 1;
+  readonly type: "snapshot";
+  readonly roomId: string;
+  readonly roomEpoch: number;
+  readonly status: RoomStatus;
+  readonly startAt?: number;
+  readonly serverTime: number;
+  readonly lastSequence: number;
+  readonly players: readonly ServerRoomPlayerSnapshot[];
 }
 
 export interface ServerPresenceMessage {
@@ -149,6 +178,8 @@ export interface ServerReplayMessage {
   readonly type: "replay";
   readonly roomEpoch: number;
   readonly afterSequence: number;
+  readonly throughSequence: number;
+  readonly hasMore: boolean;
   readonly events: readonly CanonicalEvent[];
 }
 
@@ -177,6 +208,7 @@ export interface ServerErrorMessage {
 
 export type ServerMessage =
   | ServerSessionMessage
+  | ServerRoomSnapshotMessage
   | ServerPresenceMessage
   | ServerReadyMessage
   | ServerProgressMessage
@@ -493,6 +525,9 @@ function validateCanonicalEvent(
       issues.push(issue(`${path}.action`, "missing_key", "interaction action is missing", undefined));
     }
   }
+  if (input.kind === "finish" && !hasOwn(input, "playerId")) {
+    issues.push(issue(`${path}.playerId`, "missing_key", "finish actor is missing", undefined));
+  }
   if (input.kind === "evidence" && !hasOwn(input, "action")) {
     issues.push(issue(`${path}.action`, "missing_key", "evidence type is missing", undefined));
   }
@@ -594,6 +629,11 @@ function validateClientObject(
       requiredEnum(input, "evidenceType", "$.evidenceType", ["replay-chunk", "state-hash", "result"], issues);
       validatePayload(input, "payload", "$.payload", options.maxPayloadBytes, issues);
       break;
+    case "finish":
+      addUnknownKeyIssues(input, ["version", "type", "idempotencyKey", "payload"], "$", issues);
+      validateIdempotencyKey(input, "$.idempotencyKey", issues);
+      validatePayload(input, "payload", "$.payload", options.maxPayloadBytes, issues);
+      break;
     default:
       issues.push(issue("$.type", "invalid_value", "unknown client message type", input.type));
   }
@@ -608,7 +648,19 @@ function validateServerObject(
     case "session":
       addUnknownKeyIssues(
         input,
-        ["version", "type", "roomId", "roomEpoch", "playerId", "sessionId", "resumeEpoch", "status", "lastSequence"],
+        [
+          "version",
+          "type",
+          "roomId",
+          "roomEpoch",
+          "playerId",
+          "sessionId",
+          "resumeEpoch",
+          "resumed",
+          "status",
+          "lastSequence",
+          "lastProgressSequence",
+        ],
         "$",
         issues,
       );
@@ -617,9 +669,82 @@ function validateServerObject(
       validateIdentifier(input, "playerId", "$.playerId", issues);
       validateIdentifier(input, "sessionId", "$.sessionId", issues);
       requiredNumber(input, "resumeEpoch", "$.resumeEpoch", issues, { integer: true, min: 1 });
+      requiredBoolean(input, "resumed", "$.resumed", issues);
       requiredEnum(input, "status", "$.status", ["waiting", "scheduled", "running", "finished"], issues);
       requiredNumber(input, "lastSequence", "$.lastSequence", issues, { integer: true, min: 0 });
+      requiredNumber(input, "lastProgressSequence", "$.lastProgressSequence", issues, {
+        integer: true,
+        min: -1,
+      });
       break;
+    case "snapshot": {
+      addUnknownKeyIssues(
+        input,
+        [
+          "version",
+          "type",
+          "roomId",
+          "roomEpoch",
+          "status",
+          "startAt",
+          "serverTime",
+          "lastSequence",
+          "players",
+        ],
+        "$",
+        issues,
+      );
+      validateIdentifier(input, "roomId", "$.roomId", issues);
+      requiredNumber(input, "roomEpoch", "$.roomEpoch", issues, { integer: true, min: 0 });
+      requiredEnum(input, "status", "$.status", ["waiting", "scheduled", "running", "finished"], issues);
+      optionalNumber(input, "startAt", "$.startAt", issues, { min: 0 });
+      requiredNumber(input, "serverTime", "$.serverTime", issues, { min: 0 });
+      requiredNumber(input, "lastSequence", "$.lastSequence", issues, { integer: true, min: 0 });
+      if (input.status === "scheduled" && !hasOwn(input, "startAt")) {
+        issues.push(
+          issue("$.startAt", "missing_key", "scheduled snapshot requires startAt", undefined),
+        );
+      }
+      if (!Array.isArray(input.players)) {
+        issues.push(issue("$.players", "invalid_type", "snapshot players must be an array", input.players));
+        break;
+      }
+      if (input.players.length > 256) {
+        issues.push(issue("$.players", "too_large", "snapshot exceeds 256 players", input.players.length));
+        break;
+      }
+      const playerIds = new Set<string>();
+      input.players.forEach((player, index) => {
+        const path = `$.players[${index}]`;
+        if (!isPlainObject(player)) {
+          issues.push(issue(path, "invalid_type", "snapshot player must be an object", player));
+          return;
+        }
+        addUnknownKeyIssues(
+          player,
+          ["playerId", "connected", "ready", "lastProgressSequence"],
+          path,
+          issues,
+        );
+        validateIdentifier(player, "playerId", `${path}.playerId`, issues);
+        requiredBoolean(player, "connected", `${path}.connected`, issues);
+        requiredBoolean(player, "ready", `${path}.ready`, issues);
+        requiredNumber(
+          player,
+          "lastProgressSequence",
+          `${path}.lastProgressSequence`,
+          issues,
+          { integer: true, min: -1 },
+        );
+        if (typeof player.playerId === "string") {
+          if (playerIds.has(player.playerId)) {
+            issues.push(issue(`${path}.playerId`, "invariant", "snapshot player IDs must be unique", player.playerId));
+          }
+          playerIds.add(player.playerId);
+        }
+      });
+      break;
+    }
     case "presence":
       addUnknownKeyIssues(input, ["version", "type", "playerId", "connected", "ready"], "$", issues);
       validateIdentifier(input, "playerId", "$.playerId", issues);
@@ -648,9 +773,16 @@ function validateServerObject(
       optionalBoolean(input, "duplicate", "$.duplicate", issues);
       break;
     case "replay":
-      addUnknownKeyIssues(input, ["version", "type", "roomEpoch", "afterSequence", "events"], "$", issues);
+      addUnknownKeyIssues(
+        input,
+        ["version", "type", "roomEpoch", "afterSequence", "throughSequence", "hasMore", "events"],
+        "$",
+        issues,
+      );
       requiredNumber(input, "roomEpoch", "$.roomEpoch", issues, { integer: true, min: 0 });
       requiredNumber(input, "afterSequence", "$.afterSequence", issues, { integer: true, min: 0 });
+      requiredNumber(input, "throughSequence", "$.throughSequence", issues, { integer: true, min: 0 });
+      requiredBoolean(input, "hasMore", "$.hasMore", issues);
       if (!Array.isArray(input.events)) {
         issues.push(issue("$.events", "invalid_type", "replay events must be an array", input.events));
       } else if (input.events.length > options.maxReplayEvents) {
@@ -659,6 +791,75 @@ function validateServerObject(
         input.events.forEach((event, index) => {
           validateCanonicalEvent(event, `$.events[${index}]`, options, issues);
         });
+      }
+      if (
+        typeof input.afterSequence === "number" &&
+        Number.isSafeInteger(input.afterSequence) &&
+        typeof input.throughSequence === "number" &&
+        Number.isSafeInteger(input.throughSequence)
+      ) {
+        if (input.throughSequence < input.afterSequence) {
+          issues.push(
+            issue(
+              "$.throughSequence",
+              "invariant",
+              "throughSequence must not precede afterSequence",
+              input.throughSequence,
+            ),
+          );
+        }
+        if (
+          input.hasMore === true &&
+          input.throughSequence === input.afterSequence
+        ) {
+          issues.push(
+            issue(
+              "$.hasMore",
+              "invariant",
+              "a replay page with hasMore must advance throughSequence",
+              input.hasMore,
+            ),
+          );
+        }
+        if (Array.isArray(input.events)) {
+          let expectedSequence = input.afterSequence + 1;
+          for (const [index, event] of input.events.entries()) {
+            if (isPlainObject(event) && event.sequence !== expectedSequence) {
+              issues.push(
+                issue(
+                  `$.events[${index}].sequence`,
+                  "invariant",
+                  `expected contiguous sequence ${expectedSequence}`,
+                  event.sequence,
+                ),
+              );
+            }
+            if (isPlainObject(event) && event.roomEpoch !== input.roomEpoch) {
+              issues.push(
+                issue(
+                  `$.events[${index}].roomEpoch`,
+                  "invariant",
+                  "replay event roomEpoch must match its replay page",
+                  event.roomEpoch,
+                ),
+              );
+            }
+            expectedSequence += 1;
+          }
+          const expectedThrough = input.events.length === 0
+            ? input.afterSequence
+            : input.afterSequence + input.events.length;
+          if (input.throughSequence !== expectedThrough) {
+            issues.push(
+              issue(
+                "$.throughSequence",
+                "invariant",
+                "throughSequence must match the replay page tail",
+                input.throughSequence,
+              ),
+            );
+          }
+        }
       }
       break;
     case "acknowledged":

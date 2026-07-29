@@ -18,9 +18,12 @@ import type {
   ConnectRequest,
   EffectiveAt,
   EvidenceCommand,
+  FinishCommand,
+  FinishValidator,
   IdGenerator,
   InteractionCommand,
   InteractionValidator,
+  ProgressValidator,
   ReplayVerifier,
   RoomBroadcaster,
   RoomCommand,
@@ -172,11 +175,10 @@ function normalizeEffectiveAt(
   return requested;
 }
 
-function sessionMetadata(
-  request: ConnectRequest,
+function authenticatedMetadata(
   authenticated: Awaited<ReturnType<RoomEngineOptions["authenticate"]>>,
 ): Readonly<Record<string, JsonValue>> {
-  return { ...(request.metadata ?? {}), ...(authenticated.metadata ?? {}) };
+  return authenticated.metadata ?? {};
 }
 
 /**
@@ -193,6 +195,8 @@ export class RoomEngine {
   readonly #clock: Clock;
   readonly #ids: IdGenerator;
   readonly #validateInteraction: InteractionValidator | undefined;
+  readonly #validateProgress: ProgressValidator | undefined;
+  readonly #validateFinish: FinishValidator | undefined;
   readonly #verifyReplay: ReplayVerifier | undefined;
   readonly #minimumPlayersToStart: number;
   readonly #replayBatchSize: number;
@@ -207,6 +211,8 @@ export class RoomEngine {
     this.#clock = options.clock ?? systemClock;
     this.#ids = options.ids ?? systemIds;
     this.#validateInteraction = options.validateInteraction;
+    this.#validateProgress = options.validateProgress;
+    this.#validateFinish = options.validateFinish;
     this.#verifyReplay = options.verifyReplay;
     this.#minimumPlayersToStart =
       options.minimumPlayersToStart ?? Math.min(2, this.#config.room.maxPlayers);
@@ -259,8 +265,10 @@ export class RoomEngine {
     }
     return this.#queue.run(request.roomId, async () => {
       const now = this.#now();
-      const room = await this.#storage.ensureRoom(request.roomId, now);
+      await this.#storage.ensureRoom(request.roomId, now);
+      const room = await this.#advanceRoom(request.roomId);
       const existing = await this.#storage.getSession(request.roomId, authenticated.playerId);
+      const resumed = existing !== undefined;
       let session: StoredSession;
 
       if (existing === undefined) {
@@ -289,11 +297,16 @@ export class RoomEngine {
           lastAcknowledgedSequence: 0,
           lastProgressSequence: -1,
           roles: authenticated.roles ?? [],
-          metadata: sessionMetadata(request, authenticated),
+          metadata: authenticatedMetadata(authenticated),
         };
       } else {
-        const assertedSessionId = authenticated.sessionId ?? request.requestedSessionId;
-        if (assertedSessionId !== undefined && assertedSessionId !== existing.sessionId) {
+        if (authenticated.sessionId === undefined) {
+          throw new RoomEngineError(
+            "AUTH_FAILED",
+            "reconnect credential must bind the existing session",
+          );
+        }
+        if (authenticated.sessionId !== existing.sessionId) {
           throw new RoomEngineError("AUTH_FAILED", "authenticated session does not match");
         }
         if (
@@ -312,17 +325,47 @@ export class RoomEngine {
           connected: true,
           lastSeenAt: now,
           roles: authenticated.roles ?? existing.roles,
-          metadata: { ...existing.metadata, ...sessionMetadata(request, authenticated) },
+          metadata: { ...existing.metadata, ...authenticatedMetadata(authenticated) },
         };
       }
 
+      const replayAfterSequence =
+        request.afterSequence ??
+        (existing !== undefined &&
+          this.#config.features.reconnect.enabled &&
+          this.#config.features.reconnect.replayCanonicalEvents
+          ? existing.lastAcknowledgedSequence
+          : undefined);
       const replay =
-        request.afterSequence === undefined
+        replayAfterSequence === undefined
           ? undefined
-          : await this.#createReplaySignal(room, room.roomEpoch, request.afterSequence);
+          : await this.#createReplaySignal(room, room.roomEpoch, replayAfterSequence);
 
       await this.#storage.putSession(session);
-      await this.#broadcaster.send(request.connectionId, {
+      if (request.activateConnection !== undefined) {
+        const replacedConnectionId =
+          existing?.connected === true && existing.connectionId !== session.connectionId
+            ? existing.connectionId
+            : undefined;
+        try {
+          if (replacedConnectionId === undefined) {
+            await request.activateConnection(session);
+          } else {
+            await request.activateConnection(session, replacedConnectionId);
+          }
+        } catch (error) {
+          if (existing === undefined) {
+            await this.#storage.deleteSession(session.roomId, session.playerId);
+          } else {
+            await this.#storage.putSession(existing);
+          }
+          throw new RoomEngineError("INTERNAL_ERROR", "transport activation failed", {
+            cause: error,
+            retriable: true,
+          });
+        }
+      }
+      await this.#broadcaster.send(session.connectionId, {
         version: 1,
         type: "session",
         roomId: room.roomId,
@@ -330,20 +373,43 @@ export class RoomEngine {
         playerId: session.playerId,
         sessionId: session.sessionId,
         resumeEpoch: session.resumeEpoch,
+        resumed,
         status: room.status,
         lastSequence: room.lastSequence,
+        lastProgressSequence: session.lastProgressSequence,
       });
-      await this.#broadcaster.broadcast(room.roomId, {
+      const players = await this.#storage.listSessions(room.roomId);
+      await this.#broadcaster.send(session.connectionId, {
         version: 1,
-        type: "presence",
-        playerId: session.playerId,
-        connected: true,
-        ready: session.ready,
+        type: "snapshot",
+        roomId: room.roomId,
+        roomEpoch: room.roomEpoch,
+        status: room.status,
+        ...(room.startAt === undefined ? {} : { startAt: room.startAt }),
+        serverTime: this.#now(),
+        lastSequence: room.lastSequence,
+        players: players.map((player) => ({
+          playerId: player.playerId,
+          connected: player.connected,
+          ready: player.ready,
+          lastProgressSequence: player.lastProgressSequence,
+        })),
       });
 
       if (replay !== undefined) {
         await this.#broadcaster.send(session.connectionId, replay);
       }
+      await this.#broadcaster.broadcast(
+        room.roomId,
+        {
+          version: 1,
+          type: "presence",
+          playerId: session.playerId,
+          connected: true,
+          ready: session.ready,
+        },
+        { exceptConnectionId: session.connectionId },
+      );
       if (session.ready && room.status === "waiting") {
         await this.#maybeScheduleStart(room);
       }
@@ -382,6 +448,7 @@ export class RoomEngine {
     try {
       await this.#queue.run(session.roomId, async () => {
         const current = await this.#assertLiveSession(session);
+        await this.#consumeMessageRateLimit(current);
         await this.#advanceRoom(current.roomId);
         switch (command.type) {
           case "ready":
@@ -405,6 +472,9 @@ export class RoomEngine {
           case "evidence":
             await this.#handleEvidence(current, command);
             return;
+          case "finish":
+            await this.#handleFinish(current, command);
+            return;
         }
       });
       return undefined;
@@ -420,6 +490,7 @@ export class RoomEngine {
     await this.#initialized;
     await this.#queue.run(session.roomId, async () => {
       const current = await this.#assertLiveSession(session);
+      await this.#consumeMessageRateLimit(current);
       const room = await this.#requireRoom(current.roomId);
       await this.#resumeUnlocked(current, room.roomEpoch, afterSequence);
     });
@@ -447,7 +518,7 @@ export class RoomEngine {
   public async sweep(roomId: string): Promise<readonly CanonicalEvent[]> {
     await this.#initialized;
     return this.#queue.run(roomId, async () => {
-      const room = await this.#advanceRoom(roomId);
+      await this.#advanceRoom(roomId);
       const now = this.#now();
       const sessions = await this.#storage.listSessions(roomId);
       const events: CanonicalEvent[] = [];
@@ -459,21 +530,38 @@ export class RoomEngine {
         ) {
           continue;
         }
+        const room = await this.#requireRoom(roomId);
         if (room.status === "scheduled" || room.status === "running") {
-          const result = await this.#storage.commitCanonical({
-            roomId,
-            roomEpoch: room.roomEpoch,
-            eventId: this.#newEventId(),
-            kind: "finish",
-            createdAt: now,
-            playerId: session.playerId,
-            payload: { reason: "disconnect-timeout" },
-            idempotencyScope: "room",
-            idempotencyKey: `disconnect:${session.playerId}:${String(session.resumeEpoch)}`,
-            eventLogCapacity: this.#config.room.eventLogCapacity,
-          });
-          events.push(result.event);
-          await this.#broadcastCommitted(roomId, result);
+          const participantIds = await this.#participantIds(room);
+          if (!participantIds.includes(session.playerId)) {
+            await this.#storage.deleteSession(roomId, session.playerId);
+            continue;
+          }
+          const previous = await this.#findPlayerFinish(room, session.playerId);
+          if (previous === undefined) {
+            const completedPlayerIds = await this.#completedPlayerIds(
+              room,
+              participantIds,
+            );
+            const result = await this.#commitPlayerFinish({
+              room,
+              session,
+              now,
+              elapsedMs: Math.max(0, Math.floor(now - (room.startAt ?? now))),
+              placement: completedPlayerIds.length + 1,
+              reason: "disconnect-timeout",
+              resultPayload: null,
+              participantIds,
+              completedPlayerIds,
+            });
+            if (!result.duplicate) {
+              events.push(result.event);
+            }
+          }
+          // Active-match sessions form the fallback participant roster for
+          // storage providers that do not materialize optional room metadata.
+          // They are removed once the match reaches its terminal state.
+          continue;
         }
         await this.#storage.deleteSession(roomId, session.playerId);
       }
@@ -492,6 +580,12 @@ export class RoomEngine {
     }
     for (const session of sessions) {
       if (!session.connected && session.disconnectedAt !== undefined) {
+        if (
+          (room?.status === "scheduled" || room?.status === "running") &&
+          (await this.#findPlayerFinish(room, session.playerId)) !== undefined
+        ) {
+          continue;
+        }
         candidates.push(session.disconnectedAt + this.#config.room.disconnectGraceMs);
       }
     }
@@ -539,15 +633,16 @@ export class RoomEngine {
 
   async #advanceRoom(roomId: string): Promise<StoredRoom> {
     const room = await this.#requireRoom(roomId);
+    const now = this.#now();
     if (
       room.status === "scheduled" &&
       room.startAt !== undefined &&
-      room.startAt <= this.#now()
+      room.startAt <= now
     ) {
       const running: StoredRoom = {
         ...room,
         status: "running",
-        updatedAt: this.#now(),
+        updatedAt: now,
       };
       await this.#storage.putRoom(running);
       return running;
@@ -555,10 +650,10 @@ export class RoomEngine {
     return room;
   }
 
-  async #consumeRateLimit(
+  async #consumeActionRateLimit(
     session: StoredSession,
     action: string,
-    fallback: string,
+    scope: string,
   ): Promise<void> {
     const consume = async (bucket: string, policy: RateLimitConfig): Promise<void> => {
       const result = await this.#storage.consumeRateLimit({
@@ -575,13 +670,28 @@ export class RoomEngine {
       }
     };
 
-    const fallbackPolicy =
-      this.#config.security.rateLimits.actions[fallback] ??
-      this.#config.security.rateLimits.default;
-    await consume(`scope:${fallback}`, fallbackPolicy);
+    const scopePolicy = this.#config.security.rateLimits.actions[scope];
+    if (scopePolicy !== undefined) {
+      await consume(`scope:${scope}`, scopePolicy);
+    }
     const actionPolicy = this.#config.security.rateLimits.actions[action];
-    if (action !== fallback && actionPolicy !== undefined) {
+    if (action !== scope && actionPolicy !== undefined) {
       await consume(`action:${action}`, actionPolicy);
+    }
+  }
+
+  async #consumeMessageRateLimit(session: StoredSession): Promise<void> {
+    const result = await this.#storage.consumeRateLimit({
+      roomId: session.roomId,
+      key: `${session.playerId}:scope:message`,
+      policy: this.#config.security.rateLimits.default,
+      now: this.#now(),
+    });
+    if (!result.allowed) {
+      throw new RoomEngineError("RATE_LIMITED", "session message rate limit exceeded", {
+        retriable: true,
+        retryAfterMs: result.retryAfterMs,
+      });
     }
   }
 
@@ -601,12 +711,7 @@ export class RoomEngine {
           `start:${String(room.roomEpoch)}`,
         );
         if (start !== undefined) {
-          await this.#broadcaster.broadcast(room.roomId, {
-            version: 1,
-            type: "canonical",
-            event: start,
-            duplicate: true,
-          });
+          await this.#sendDuplicate(session.connectionId, start);
         }
         return;
       }
@@ -618,7 +723,7 @@ export class RoomEngine {
       }
       return;
     }
-    await this.#consumeRateLimit(session, "ready", "default");
+    await this.#consumeActionRateLimit(session, "ready", "ready");
     const readySession: StoredSession = {
       ...session,
       ready,
@@ -636,18 +741,17 @@ export class RoomEngine {
   }
 
   async #maybeScheduleStart(room: StoredRoom): Promise<void> {
-    const connected = (await this.#storage.listSessions(room.roomId)).filter(
-      (candidate) => candidate.connected,
-    );
+    const candidates = await this.#storage.listSessions(room.roomId);
     if (
-      connected.length < this.#minimumPlayersToStart ||
-      connected.some((candidate) => !candidate.ready)
+      candidates.length < this.#minimumPlayersToStart ||
+      candidates.some((candidate) => !candidate.connected || !candidate.ready)
     ) {
       return;
     }
 
     const now = this.#now();
     const startAt = now + this.#config.time.startLeadMs;
+    const participantIds = candidates.map((candidate) => candidate.playerId);
     const result = await this.#storage.commitCanonical({
       roomId: room.roomId,
       roomEpoch: room.roomEpoch,
@@ -657,11 +761,17 @@ export class RoomEngine {
       effectiveAt: { kind: "server-time", serverTimeMs: startAt },
       payload: {
         startAt,
-        players: connected.map((candidate) => candidate.playerId),
+        players: participantIds,
       },
       idempotencyScope: "room",
       idempotencyKey: `start:${String(room.roomEpoch)}`,
-      roomUpdate: { status: "scheduled", startAt, updatedAt: now },
+      roomUpdate: {
+        status: "scheduled",
+        startAt,
+        participantIds,
+        completedPlayerIds: [],
+        updatedAt: now,
+      },
       eventLogCapacity: this.#config.room.eventLogCapacity,
     });
     await this.#broadcastCommitted(room.roomId, result);
@@ -679,10 +789,35 @@ export class RoomEngine {
     if (command.sequence <= session.lastProgressSequence) {
       return;
     }
-    await this.#consumeRateLimit(session, "progress", "progress");
+    const room = await this.#requireRoom(session.roomId);
+    if (
+      room.status === "finished" ||
+      (await this.#findPlayerFinish(room, session.playerId)) !== undefined
+    ) {
+      throw new RoomEngineError(
+        "PROGRESS_REJECTED",
+        "a finished player cannot publish new progress",
+      );
+    }
+    await this.#consumeActionRateLimit(session, "progress", "progress");
+    const now = this.#now();
+    const validation =
+      this.#validateProgress === undefined
+        ? { accepted: true as const }
+        : await this.#validateProgress(command, {
+            room,
+            session,
+            now,
+            config: this.#config,
+          });
+    if (!validation.accepted) {
+      throw new RoomEngineError("PROGRESS_REJECTED", validation.message);
+    }
+    const payload = validation.payload ?? command.payload;
+    assertPayload(payload, this.#config.security.maxPayloadBytes);
     await this.#storage.putSession({
       ...session,
-      lastSeenAt: this.#now(),
+      lastSeenAt: now,
       lastProgressSequence: command.sequence,
     });
     if (this.#config.progress.broadcast) {
@@ -693,8 +828,8 @@ export class RoomEngine {
           type: "progress",
           playerId: session.playerId,
           sequence: command.sequence,
-          serverTime: this.#now(),
-          payload: command.payload,
+          serverTime: now,
+          payload,
         },
         { exceptConnectionId: session.connectionId },
       );
@@ -725,13 +860,14 @@ export class RoomEngine {
       command.idempotencyKey,
     );
     if (previous !== undefined) {
-      await this.#broadcaster.broadcast(room.roomId, {
-        version: 1,
-        type: "canonical",
-        event: previous,
-        duplicate: true,
-      });
+      await this.#sendDuplicate(session.connectionId, previous);
       return;
+    }
+    if ((await this.#findPlayerFinish(room, session.playerId)) !== undefined) {
+      throw new RoomEngineError(
+        "INTERACTION_REJECTED",
+        "a finished player cannot submit new interactions",
+      );
     }
 
     let target: StoredSession | undefined;
@@ -750,7 +886,7 @@ export class RoomEngine {
       throw new RoomEngineError("TARGET_NOT_ALLOWED", "this room does not use targets");
     }
 
-    await this.#consumeRateLimit(session, command.action, "interaction");
+    await this.#consumeActionRateLimit(session, command.action, "interaction");
     const now = this.#now();
     const validation =
       this.#validateInteraction === undefined
@@ -801,7 +937,187 @@ export class RoomEngine {
       idempotencyKey: command.idempotencyKey,
       eventLogCapacity: this.#config.room.eventLogCapacity,
     });
-    await this.#broadcastCommitted(room.roomId, commit);
+    if (commit.duplicate) {
+      await this.#sendDuplicate(session.connectionId, commit.event);
+    } else {
+      await this.#broadcastCommitted(room.roomId, commit);
+    }
+  }
+
+  async #handleFinish(session: StoredSession, command: FinishCommand): Promise<void> {
+    requireIdempotencyKey(command.idempotencyKey);
+    assertPayload(command.payload, this.#config.security.maxPayloadBytes);
+    const room = await this.#requireRoom(session.roomId);
+    const previous = await this.#findPlayerFinish(room, session.playerId);
+    if (previous !== undefined) {
+      await this.#sendDuplicate(session.connectionId, previous);
+      return;
+    }
+    if (room.status !== "running") {
+      throw new RoomEngineError("FINISH_REJECTED", "room is not running");
+    }
+
+    const participantIds = await this.#participantIds(room);
+    if (!participantIds.includes(session.playerId)) {
+      throw new RoomEngineError("FINISH_REJECTED", "session is not a match participant");
+    }
+    const completedPlayerIds = await this.#completedPlayerIds(room, participantIds);
+    const placement = completedPlayerIds.length + 1;
+    const now = this.#now();
+    const elapsedMs = Math.max(0, Math.floor(now - (room.startAt ?? now)));
+
+    await this.#consumeActionRateLimit(session, "finish", "finish");
+    if (
+      (this.#config.features.ranking.enabled ||
+        this.#config.features.verification.finalResults) &&
+      this.#validateFinish === undefined
+    ) {
+      throw new RoomEngineError(
+        "FINISH_REJECTED",
+        "verified finish policy requires a finish validator",
+      );
+    }
+    const validation =
+      this.#validateFinish === undefined
+        ? { accepted: true as const }
+        : await this.#validateFinish(command, {
+            room,
+            session,
+            now,
+            elapsedMs,
+            placement,
+            config: this.#config,
+          });
+    if (!validation.accepted) {
+      throw new RoomEngineError("FINISH_REJECTED", validation.message);
+    }
+    const resultPayload = validation.payload ?? command.payload;
+    assertPayload(resultPayload, this.#config.security.maxPayloadBytes);
+    await this.#commitPlayerFinish({
+      room,
+      session,
+      now,
+      elapsedMs,
+      placement,
+      reason: "completed",
+      resultPayload,
+      participantIds,
+      completedPlayerIds,
+    });
+  }
+
+  async #findPlayerFinish(
+    room: StoredRoom,
+    playerId: string,
+  ): Promise<CanonicalEvent | undefined> {
+    return this.#storage.findCanonicalByIdempotency(
+      room.roomId,
+      room.roomEpoch,
+      "finish",
+      playerId,
+    );
+  }
+
+  async #participantIds(room: StoredRoom): Promise<readonly string[]> {
+    if (room.participantIds !== undefined) {
+      return [...new Set(room.participantIds)];
+    }
+    const range = await this.#storage.readCanonical(
+      room.roomId,
+      room.roomEpoch,
+      0,
+      this.#config.room.eventLogCapacity,
+    );
+    const start = range.events.find((event) => event.kind === "start");
+    if (start !== undefined && isPlainObject(start.payload) && Array.isArray(start.payload.players)) {
+      const players = start.payload.players.filter(
+        (playerId): playerId is string =>
+          typeof playerId === "string" && IDENTIFIER_PATTERN.test(playerId),
+      );
+      if (players.length > 0) {
+        return [...new Set(players)];
+      }
+    }
+    return (await this.#storage.listSessions(room.roomId)).map((candidate) => candidate.playerId);
+  }
+
+  async #completedPlayerIds(
+    room: StoredRoom,
+    participantIds: readonly string[],
+  ): Promise<readonly string[]> {
+    const finishes = await Promise.all(
+      participantIds.map(async (playerId) => ({
+        playerId,
+        event: await this.#findPlayerFinish(room, playerId),
+      })),
+    );
+    return finishes
+      .filter((finish) => finish.event !== undefined)
+      .map((finish) => finish.playerId);
+  }
+
+  async #commitPlayerFinish(input: {
+    readonly room: StoredRoom;
+    readonly session: StoredSession;
+    readonly now: number;
+    readonly elapsedMs: number;
+    readonly placement: number;
+    readonly reason: "completed" | "disconnect-timeout";
+    readonly resultPayload: JsonValue;
+    readonly participantIds: readonly string[];
+    readonly completedPlayerIds: readonly string[];
+  }): Promise<CanonicalCommitResult> {
+    const completedPlayerIds = [...new Set([...input.completedPlayerIds, input.session.playerId])];
+    const status = input.participantIds.every((playerId) => completedPlayerIds.includes(playerId))
+      ? "finished"
+      : input.room.status;
+    const payload: JsonValue = {
+      reason: input.reason,
+      elapsedMs: input.elapsedMs,
+      placement: input.placement,
+      ...(input.reason === "completed" ? { result: input.resultPayload } : {}),
+    };
+    assertPayload(payload, this.#config.security.maxPayloadBytes);
+    const committed = await this.#storage.commitCanonical({
+      roomId: input.room.roomId,
+      roomEpoch: input.room.roomEpoch,
+      eventId: this.#newEventId(),
+      kind: "finish",
+      createdAt: input.now,
+      playerId: input.session.playerId,
+      payload,
+      idempotencyScope: "finish",
+      idempotencyKey: input.session.playerId,
+      roomUpdate: {
+        status,
+        participantIds: input.participantIds,
+        completedPlayerIds,
+        updatedAt: input.now,
+      },
+      eventLogCapacity: this.#config.room.eventLogCapacity,
+    });
+    if (committed.duplicate) {
+      await this.#sendDuplicate(input.session.connectionId, committed.event);
+    } else {
+      await this.#broadcastCommitted(input.room.roomId, committed);
+    }
+    if (status === "finished") {
+      await this.#deleteExpiredDisconnectedSessions(input.room.roomId, input.now);
+    }
+    return committed;
+  }
+
+  async #deleteExpiredDisconnectedSessions(roomId: string, now: number): Promise<void> {
+    const sessions = await this.#storage.listSessions(roomId);
+    for (const candidate of sessions) {
+      if (
+        !candidate.connected &&
+        candidate.disconnectedAt !== undefined &&
+        candidate.disconnectedAt + this.#config.room.disconnectGraceMs <= now
+      ) {
+        await this.#storage.deleteSession(roomId, candidate.playerId);
+      }
+    }
   }
 
   async #handleEvidence(session: StoredSession, command: EvidenceCommand): Promise<void> {
@@ -822,15 +1138,10 @@ export class RoomEngine {
       command.idempotencyKey,
     );
     if (previous !== undefined) {
-      await this.#broadcaster.broadcast(room.roomId, {
-        version: 1,
-        type: "canonical",
-        event: previous,
-        duplicate: true,
-      });
+      await this.#sendDuplicate(session.connectionId, previous);
       return;
     }
-    await this.#consumeRateLimit(session, command.evidenceType, "replay_chunk");
+    await this.#consumeActionRateLimit(session, command.evidenceType, "replay_chunk");
     if (command.evidenceType === "result" && this.#verifyReplay === undefined) {
       throw new RoomEngineError(
         "EVIDENCE_REJECTED",
@@ -864,7 +1175,11 @@ export class RoomEngine {
       idempotencyKey: command.idempotencyKey,
       eventLogCapacity: this.#config.room.eventLogCapacity,
     });
-    await this.#broadcastCommitted(room.roomId, result);
+    if (result.duplicate) {
+      await this.#sendDuplicate(session.connectionId, result.event);
+    } else {
+      await this.#broadcastCommitted(room.roomId, result);
+    }
   }
 
   async #handleAcknowledgement(session: StoredSession, sequence: number): Promise<void> {
@@ -926,7 +1241,10 @@ export class RoomEngine {
         "resume belongs to a different room epoch",
       );
     }
-    if (!this.#config.features.reconnect.enabled) {
+    if (
+      !this.#config.features.reconnect.enabled ||
+      !this.#config.features.reconnect.replayCanonicalEvents
+    ) {
       throw new RoomEngineError("FEATURE_DISABLED", "room resume is disabled");
     }
     if (afterSequence > room.lastSequence) {
@@ -950,11 +1268,30 @@ export class RoomEngine {
         "requested canonical history is outside the retained replay window",
       );
     }
+    let expectedSequence = afterSequence + 1;
+    for (const event of range.events) {
+      if (event.sequence !== expectedSequence) {
+        throw new RoomEngineError(
+          "REPLAY_UNAVAILABLE",
+          "canonical replay storage returned a non-contiguous page",
+        );
+      }
+      expectedSequence += 1;
+    }
+    const throughSequence = range.events.at(-1)?.sequence ?? afterSequence;
+    if (throughSequence < range.latestSequence && range.events.length === 0) {
+      throw new RoomEngineError(
+        "REPLAY_UNAVAILABLE",
+        "canonical replay storage returned an empty page before the latest event",
+      );
+    }
     return {
       version: 1,
       type: "replay",
       roomEpoch,
       afterSequence,
+      throughSequence,
+      hasMore: throughSequence < range.latestSequence,
       events: range.events,
     };
   }
@@ -970,6 +1307,15 @@ export class RoomEngine {
       ...(result.duplicate ? { duplicate: true as const } : {}),
     };
     await this.#broadcaster.broadcast(roomId, signal);
+  }
+
+  async #sendDuplicate(connectionId: string, event: CanonicalEvent): Promise<void> {
+    await this.#broadcaster.send(connectionId, {
+      version: 1,
+      type: "canonical",
+      event,
+      duplicate: true,
+    });
   }
 }
 

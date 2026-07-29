@@ -18,6 +18,8 @@ export interface WebSocketEventMap {
 /** The browser WebSocket surface used by the SDK; intentionally easy to mock. */
 export interface WebSocketLike {
   readonly readyState: number;
+  /** Bytes queued by the browser but not yet written to the network. */
+  readonly bufferedAmount: number;
   addEventListener<Key extends keyof WebSocketEventMap>(
     type: Key,
     listener: (event: WebSocketEventMap[Key]) => void,

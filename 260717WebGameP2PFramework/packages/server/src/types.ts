@@ -2,6 +2,7 @@ import type {
   CanonicalEvent as CoreCanonicalEvent,
   ClientAcknowledgeMessage,
   ClientEvidenceMessage,
+  ClientFinishMessage,
   ClientInteractionMessage,
   ClientMessage,
   ClientPingMessage,
@@ -23,6 +24,7 @@ import type {
   ServerProgressMessage,
   ServerReadyMessage,
   ServerReplayMessage,
+  ServerRoomSnapshotMessage,
   ServerSessionMessage,
 } from "@relayplay/core";
 
@@ -40,6 +42,10 @@ export interface StoredRoom {
   readonly updatedAt: number;
   readonly startAt?: number;
   readonly lastSequence: number;
+  /** Locked participant roster for the current epoch when the storage supports it. */
+  readonly participantIds?: readonly string[];
+  /** Players with a canonical finish/forfeit in the current epoch. */
+  readonly completedPlayerIds?: readonly string[];
 }
 
 export interface StoredSession {
@@ -60,6 +66,7 @@ export interface StoredSession {
 }
 
 export interface RoomSnapshot {
+  /** Server-only administrative view. Do not serialize session credentials to clients. */
   readonly room: StoredRoom;
   readonly players: readonly Pick<
     StoredSession,
@@ -86,12 +93,22 @@ export interface AuthRequest {
 
 export interface AuthResult {
   readonly playerId: string;
+  /** Required when reconnecting to an existing player session. */
   readonly sessionId?: string;
   readonly roles?: readonly string[];
   readonly metadata?: Readonly<Record<string, JsonValue>>;
 }
 
 export type RoomAuthenticator = (request: AuthRequest) => Awaitable<AuthResult>;
+
+/**
+ * Transport port invoked after the session is persisted and before any signal
+ * is sent. Adapters should bind the new socket and evict the replaced one here.
+ */
+export type ConnectionActivator = (
+  session: RoomSession,
+  replacedConnectionId?: string,
+) => Awaitable<void>;
 
 export interface ConnectRequest {
   readonly roomId: string;
@@ -101,7 +118,13 @@ export interface ConnectRequest {
   readonly requestedSessionId?: string;
   readonly resumeEpoch?: number;
   readonly afterSequence?: number;
+  /** Untrusted transport context for the authenticator; never stored as auth metadata. */
   readonly metadata?: Readonly<Record<string, JsonValue>>;
+  /**
+   * Lets a transport bind the authenticated session before the engine emits any
+   * private or room signals. Reconnects identify the transport being replaced.
+   */
+  readonly activateConnection?: ConnectionActivator;
 }
 
 export type ReadyCommand = ClientReadyMessage;
@@ -111,7 +134,42 @@ export type AcknowledgeCommand = ClientAcknowledgeMessage;
 export type ResumeCommand = ClientResumeMessage;
 export type PingCommand = ClientPingMessage;
 export type EvidenceCommand = ClientEvidenceMessage;
+export type FinishCommand = ClientFinishMessage;
 export type RoomCommand = ClientMessage;
+
+export interface ProgressContext {
+  readonly room: StoredRoom;
+  readonly session: StoredSession;
+  readonly now: number;
+  readonly config: RelayPlayConfig;
+}
+
+export type ProgressValidationResult =
+  | { readonly accepted: true; readonly payload?: JsonValue }
+  | { readonly accepted: false; readonly code?: string; readonly message: string };
+
+export type ProgressValidator = (
+  command: ProgressCommand,
+  context: ProgressContext,
+) => Awaitable<ProgressValidationResult>;
+
+export interface FinishContext {
+  readonly room: StoredRoom;
+  readonly session: StoredSession;
+  readonly now: number;
+  readonly elapsedMs: number;
+  readonly placement: number;
+  readonly config: RelayPlayConfig;
+}
+
+export type FinishValidationResult =
+  | { readonly accepted: true; readonly payload?: JsonValue }
+  | { readonly accepted: false; readonly code?: string; readonly message: string };
+
+export type FinishValidator = (
+  command: FinishCommand,
+  context: FinishContext,
+) => Awaitable<FinishValidationResult>;
 
 export interface InteractionContext {
   readonly room: StoredRoom;
@@ -157,6 +215,8 @@ export type ReplayVerifier = (
 export interface RoomUpdate {
   readonly status?: RoomStatus;
   readonly startAt?: number;
+  readonly participantIds?: readonly string[];
+  readonly completedPlayerIds?: readonly string[];
   readonly updatedAt: number;
 }
 
@@ -238,6 +298,7 @@ export interface RoomBroadcaster {
 }
 
 export type SessionSignal = ServerSessionMessage;
+export type SnapshotSignal = ServerRoomSnapshotMessage;
 export type PresenceSignal = ServerPresenceMessage;
 export type ReadySignal = ServerReadyMessage;
 export type ProgressSignal = ServerProgressMessage;
@@ -265,7 +326,9 @@ export type RoomErrorCode =
   | "TARGET_REQUIRED"
   | "TARGET_NOT_FOUND"
   | "TARGET_NOT_ALLOWED"
+  | "PROGRESS_REJECTED"
   | "INTERACTION_REJECTED"
+  | "FINISH_REJECTED"
   | "EVIDENCE_REJECTED"
   | "RATE_LIMITED"
   | "INTERNAL_ERROR";
@@ -287,6 +350,8 @@ export interface RoomEngineOptions {
   readonly clock?: Clock;
   readonly ids?: IdGenerator;
   readonly validateInteraction?: InteractionValidator;
+  readonly validateProgress?: ProgressValidator;
+  readonly validateFinish?: FinishValidator;
   readonly verifyReplay?: ReplayVerifier;
   readonly minimumPlayersToStart?: number;
   readonly replayBatchSize?: number;

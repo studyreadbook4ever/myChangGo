@@ -4,6 +4,7 @@
     { "path": "./packages/core" },
     { "path": "./packages/client" },
     { "path": "./packages/server" },
+    { "path": "./packages/node" },
     { "path": "./packages/cloudflare" },
     { "path": "./examples/live-race" }
   ]

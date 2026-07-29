@@ -23,20 +23,40 @@
 
       <section class="panel join-panel" id="join-panel">
         <div>
-          <h2>Join a two-player room</h2>
+          <h2>Join a 2–4 player room</h2>
           <p>
-            Open this page in two tabs with the same room and different player IDs.
+            Open this page in up to four tabs with the same room and different player IDs.
+            At least two players are required, and every connected player must be ready.
             Development credentials are deliberately simple.
           </p>
         </div>
         <form id="join-form">
           <label>
             Room
-            <input id="room-id" name="room" value="demo-room" maxlength="48" required />
+            <input
+              id="room-id"
+              name="room"
+              value="demo-room"
+              minlength="8"
+              maxlength="128"
+              pattern="[A-Za-z0-9_-]{8,128}"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
           </label>
           <label>
             Player
-            <input id="player-id" name="player" maxlength="48" required />
+            <input
+              id="player-id"
+              name="player"
+              minlength="8"
+              maxlength="128"
+              pattern="[A-Za-z0-9_-]{8,128}"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
           </label>
           <label class="wide">
             WebSocket endpoint
@@ -44,6 +64,41 @@
           </label>
           <button class="primary" type="submit">Connect</button>
         </form>
+        <section class="guest-controls" aria-labelledby="guest-controls-title">
+          <div>
+            <h3 id="guest-controls-title">On-prem accountless room</h3>
+            <p>
+              Create a room or join with an invite. The guest credential stays in an
+              HttpOnly cookie; the invite is never placed in a request URL.
+            </p>
+          </div>
+          <div class="guest-actions">
+            <button class="secondary" id="create-room-button" type="button">
+              Create room
+            </button>
+            <label>
+              Invite
+              <input
+                id="invite-code"
+                name="invite"
+                minlength="24"
+                maxlength="128"
+                pattern="[A-Za-z0-9_-]{24,128}"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <button class="secondary" id="join-invite-button" type="button">
+              Join invite
+            </button>
+          </div>
+          <div class="invite-result" id="invite-result" hidden>
+            <span>Share this invite out of band:</span>
+            <code id="created-invite"></code>
+            <button class="secondary" id="copy-invite-button" type="button">Copy</button>
+          </div>
+          <output class="guest-status" id="guest-status" aria-live="polite"></output>
+        </section>
       </section>
 
       <section class="race-grid" aria-labelledby="race-title">
@@ -63,26 +118,13 @@
           <div class="metrics">
             <span><b id="local-percent">0%</b> distance</span>
             <span><b id="local-combo">0</b> combo</span>
+            <span><b id="local-placement">—</b> place</span>
           </div>
         </article>
 
-        <article class="panel racer remote-racer">
-          <div class="racer-heading">
-            <div>
-              <p class="eyebrow">Opponent</p>
-              <h3 id="remote-name">Waiting…</h3>
-            </div>
-            <strong id="remote-score">0</strong>
-          </div>
-          <div class="track" aria-label="Opponent progress">
-            <div class="track-fill remote-fill" id="remote-progress"></div>
-            <span class="runner remote" id="remote-runner" aria-hidden="true">●</span>
-          </div>
-          <div class="metrics">
-            <span><b id="remote-percent">0%</b> distance</span>
-            <span><b id="remote-freshness">—</b> update age</span>
-          </div>
-        </article>
+        <div class="opponent-list" id="opponent-list" aria-label="Opponents">
+          <p class="panel opponent-empty" id="opponent-empty">Waiting for opponents…</p>
+        </div>
       </section>
 
       <section class="panel play-panel">
@@ -96,6 +138,7 @@
           <span>Send freeze</span>
           <small id="freeze-detail">Needs a connected opponent</small>
         </button>
+        <p class="finish-status" id="finish-status" aria-live="polite" hidden></p>
         <p class="hint" id="game-hint">
           Progress is reported once per second. Your local button never waits for the network.
         </p>

@@ -153,6 +153,16 @@ export class InMemoryRoomStorage implements RoomStorage {
           ? {}
           : { startAt: room.startAt }
         : { startAt: roomUpdate.startAt }),
+      ...(roomUpdate?.participantIds === undefined
+        ? room.participantIds === undefined
+          ? {}
+          : { participantIds: room.participantIds }
+        : { participantIds: [...roomUpdate.participantIds] }),
+      ...(roomUpdate?.completedPlayerIds === undefined
+        ? room.completedPlayerIds === undefined
+          ? {}
+          : { completedPlayerIds: room.completedPlayerIds }
+        : { completedPlayerIds: [...roomUpdate.completedPlayerIds] }),
     };
 
     const key = roomKey(commit.roomId, commit.roomEpoch);

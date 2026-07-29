@@ -15,16 +15,17 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run test",
-    "verify": "npm run check && npm run build && npm run test:cloudflare",
+    "verify": "npm run check && npm run build && npm run test:cloudflare && npm run test:node",
     "configure": "tsx tooling/configure.ts",
     "validate:config": "tsx tooling/validate-config.ts",
     "smoke:cloudflare": "tsx tooling/smoke-cloudflare.ts",
     "dev:worker": "npm run dev:worker --workspace @relayplay/example-live-race",
     "test:cloudflare": "start-server-and-test dev:worker http://127.0.0.1:8787/health smoke:cloudflare",
-    "dev:example": "concurrently --kill-others --names worker,web --prefix-colors magenta,cyan \"npm run dev:worker --workspace @relayplay/example-live-race\" \"npm run dev --workspace @relayplay/example-live-race\""
+    "dev:example": "concurrently --kill-others --names worker,web --prefix-colors magenta,cyan \"npm run dev:worker --workspace @relayplay/example-live-race\" \"npm run dev --workspace @relayplay/example-live-race\"",
+    "test:node": "vitest run packages/node/test"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=24.15.0"
   },
   "keywords": [
     "typescript",
@@ -39,6 +40,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260717.1",
     "@types/node": "^22.20.1",
+    "@types/ws": "^8.18.1",
     "ajv": "^8.20.0",
     "concurrently": "^10.0.3",
     "start-server-and-test": "^3.0.11",

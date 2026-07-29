@@ -106,21 +106,28 @@ export function createRelayPlayDurableObject<Env>(
     implements RelayPlayDurableObjectInstance
   {
     readonly #state: DurableObjectState;
+    readonly #broadcaster: DurableObjectBroadcaster;
     readonly #engine: RoomEngine;
 
     public constructor(state: DurableObjectState, env: Env) {
       super(state, env);
       this.#state = state;
       const storage = new CloudflareRoomStorage(state.storage);
-      const broadcaster = new DurableObjectBroadcaster(state);
+      this.#broadcaster = new DurableObjectBroadcaster(state);
       this.#engine = new RoomEngine({
         storage,
-        broadcaster,
+        broadcaster: this.#broadcaster,
         authenticate: (request) => options.authenticate(request, env),
         ...(options.config === undefined ? {} : { config: options.config }),
         ...(options.validateInteraction === undefined
           ? {}
           : { validateInteraction: options.validateInteraction }),
+        ...(options.validateProgress === undefined
+          ? {}
+          : { validateProgress: options.validateProgress }),
+        ...(options.validateFinish === undefined
+          ? {}
+          : { validateFinish: options.validateFinish }),
         ...(options.verifyReplay === undefined
           ? {}
           : { verifyReplay: options.verifyReplay }),
@@ -185,7 +192,7 @@ export function createRelayPlayDurableObject<Env>(
             cause: error,
           });
         }
-        const session = await this.#engine.connect({
+        await this.#engine.connect({
           roomId,
           credential,
           connectionId,
@@ -193,14 +200,20 @@ export function createRelayPlayDurableObject<Env>(
           ...(requestedSessionId === null ? {} : { requestedSessionId }),
           ...(resumeEpoch === undefined ? {} : { resumeEpoch }),
           ...(afterSequence === undefined ? {} : { afterSequence }),
+          activateConnection: (activatedSession, replacedConnectionId) => {
+            this.#broadcaster.activateConnection(
+              server,
+              {
+                version: 1,
+                roomId,
+                connectionId,
+                playerId: activatedSession.playerId,
+                session: activatedSession,
+              } satisfies WebSocketAttachment,
+              replacedConnectionId,
+            );
+          },
         });
-        server.serializeAttachment({
-          version: 1,
-          roomId,
-          connectionId,
-          playerId: session.playerId,
-          session,
-        } satisfies WebSocketAttachment);
         await this.#state.storage.put(ROOM_ID_STORAGE_KEY, roomId);
         await this.#scheduleAlarm(roomId);
         return new Response(null, { status: 101, webSocket: client });

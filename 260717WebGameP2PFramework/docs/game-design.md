@@ -1,5 +1,10 @@
 # Designing a loosely coupled multiplayer game
 
+The included small-room harness supports one to four players, accountless guest
+invites, no chat, and no persistent ranking by default. Keep those constraints
+unless the product deliberately adds the identity, verification, moderation,
+retention, and operations that a broader social/competitive surface requires.
+
 ## Classify the game before choosing netcode
 
 RelayPlay targets games where participants are simultaneous but their moment to
@@ -99,5 +104,6 @@ or scoring to compensate for controls; use matchmaking/ruleset policy instead.
 2. Add one named interaction with a visible warning and future boundary.
 3. Add reconnect/resume and explicit disconnected state.
 4. Record canonical replays and result hashes.
-5. Add a verifier before ranked rewards have value.
+5. Add stable identity and a verifier before enabling ranking or valuable
+   rewards; per-match placement alone is not proof.
 6. Tune update frequency and matchmaking from measurements, not intuition.

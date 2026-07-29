@@ -9,6 +9,13 @@ import {
 } from "../src/presets.js";
 
 describe("configuration presets", () => {
+  it.each(["live-race", "soft-battle", "falling-block-battle", "rhythm-race"] as const)(
+    "caps the %s preset at four players",
+    (preset) => {
+      expect(createPresetConfig(preset).room.maxPlayers).toBe(4);
+    },
+  );
+
   it("keeps the basic live race at the documented 1000 ms cadence", () => {
     const config = createPresetConfig("live-race");
     expect(config.progress.intervalMs).toBe(1_000);

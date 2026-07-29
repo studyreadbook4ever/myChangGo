@@ -24,6 +24,9 @@ export interface FeatureFlags {
   readonly progress: {
     readonly enabled: boolean;
   };
+  readonly ranking: {
+    readonly enabled: boolean;
+  };
   readonly interactions: {
     readonly enabled: boolean;
     readonly targeted: boolean;
@@ -122,12 +125,13 @@ export type RelayPlayConfigInput = DeepPartial<RelayPlayConfig>;
 const defaultConfigValue: RelayPlayConfig = {
   protocolVersion: 1,
   room: {
-    maxPlayers: 8,
+    maxPlayers: 4,
     disconnectGraceMs: 15_000,
     eventLogCapacity: 4_096,
   },
   features: {
     progress: { enabled: true },
+    ranking: { enabled: false },
     interactions: {
       enabled: true,
       targeted: true,
@@ -382,13 +386,17 @@ function validateConfigInputShape(input: unknown): ValidationIssue[] {
     input,
     "features",
     "$.features",
-    ["progress", "interactions", "reconnect", "evidence", "verification"],
+    ["progress", "ranking", "interactions", "reconnect", "evidence", "verification"],
     issues,
   );
   if (features !== undefined) {
     const progressFeature = optionalObject(features, "progress", "$.features.progress", ["enabled"], issues);
     if (progressFeature !== undefined) {
       optionalBoolean(progressFeature, "enabled", "$.features.progress.enabled", issues);
+    }
+    const ranking = optionalObject(features, "ranking", "$.features.ranking", ["enabled"], issues);
+    if (ranking !== undefined) {
+      optionalBoolean(ranking, "enabled", "$.features.ranking.enabled", issues);
     }
     const interactions = optionalObject(
       features,

@@ -28,7 +28,7 @@ class TestClock implements Clock {
 class TestIds implements ClientIdGenerator {
   #sequence = 0;
 
-  next(prefix: "ping" | "interaction" | "ready" | "evidence"): string {
+  next(prefix: "ping" | "interaction" | "ready" | "evidence" | "finish"): string {
     this.#sequence += 1;
     return `${prefix}_test_${String(this.#sequence).padStart(4, "0")}`;
   }
@@ -37,6 +37,7 @@ class TestIds implements ClientIdGenerator {
 class MockWebSocket implements WebSocketLike {
   readonly url: string;
   readonly sent: string[] = [];
+  bufferedAmount = 0;
   #readyState: number = WebSocketReadyState.CONNECTING;
   readonly #listeners = new Map<
     keyof WebSocketEventMap,
@@ -105,6 +106,10 @@ class MockWebSocket implements WebSocketLike {
     this.#emit("message", { data } as MessageEvent<unknown>);
   }
 
+  receiveData(data: unknown): void {
+    this.#emit("message", { data } as MessageEvent<unknown>);
+  }
+
   serverClose(code = 1006, reason = "network lost"): void {
     this.#readyState = WebSocketReadyState.CLOSED;
     this.#emit("close", { code, reason, wasClean: false } as CloseEvent);
@@ -145,8 +150,10 @@ const session: ServerMessage = {
   playerId: "player_0001",
   sessionId: "session_0001",
   resumeEpoch: 1,
+  resumed: false,
   status: "waiting",
   lastSequence: 0,
+  lastProgressSequence: -1,
 };
 
 function canonical(
@@ -165,7 +172,9 @@ function canonical(
       : {}),
     ...(kind === "interaction"
       ? { playerId: "player_0002", action: "freeze" }
-      : {}),
+      : kind === "finish"
+        ? { playerId: "player_0002" }
+        : {}),
     payload: kind === "interaction" ? { durationMs: 500 } : {},
   };
 }
@@ -229,6 +238,8 @@ describe("RelayPlayClient", () => {
     expect(url.protocol).toBe("wss:");
     expect(url.searchParams.get("token")).toBe("test-token");
     expect(client.state).toBe("connected");
+    socket.bufferedAmount = 128;
+    expect(client.bufferedAmount).toBe(128);
 
     expect(client.setReady(true)).toBe(true);
     expect(client.reportProgress({ score: 9 })).toBe(true);
@@ -246,7 +257,7 @@ describe("RelayPlayClient", () => {
         ready: true,
         idempotencyKey: "ready_test_0001",
       },
-      { version: 1, type: "progress", sequence: 1, payload: { score: 9 } },
+      { version: 1, type: "progress", sequence: 0, payload: { score: 9 } },
       {
         version: 1,
         type: "interaction",
@@ -308,6 +319,8 @@ describe("RelayPlayClient", () => {
       type: "replay",
       roomEpoch: 1,
       afterSequence: 0,
+      throughSequence: 1,
+      hasMore: false,
       events: [canonical(1)],
     });
     await settle();
@@ -319,6 +332,50 @@ describe("RelayPlayClient", () => {
       type: "ack",
       sequence: 2,
     });
+  });
+
+  it("keeps gap recovery alive across replay pages without racing its timeout", async () => {
+    vi.useFakeTimers();
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    const received: number[] = [];
+    client.on("canonical", (event) => received.push(event.sequence));
+    const socket = await connectClient(client, factory);
+
+    socket.receive({ version: 1, type: "canonical", event: canonical(3) });
+    await settle();
+    await vi.advanceTimersByTimeAsync(250);
+
+    socket.receive({
+      version: 1,
+      type: "replay",
+      roomEpoch: 1,
+      afterSequence: 0,
+      throughSequence: 1,
+      hasMore: true,
+      events: [canonical(1)],
+    });
+    await settle();
+    expect(messages(socket)).toContainEqual({
+      version: 1,
+      type: "resume",
+      roomEpoch: 1,
+      afterSequence: 1,
+    });
+
+    socket.receive({
+      version: 1,
+      type: "replay",
+      roomEpoch: 1,
+      afterSequence: 1,
+      throughSequence: 2,
+      hasMore: false,
+      events: [canonical(2)],
+    });
+    await settle();
+
+    expect(received).toEqual([1, 2, 3]);
+    expect(socket.readyState).toBe(WebSocketReadyState.OPEN);
   });
 
   it("estimates server time from ping and pong", async () => {
@@ -347,7 +404,96 @@ describe("RelayPlayClient", () => {
     );
   });
 
-  it("reconnects with session resume parameters and replays the canonical tail", async () => {
+  it("emits authoritative snapshots and supports explicit finish intent and event", async () => {
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    const snapshots = vi.fn();
+    const finishes = vi.fn();
+    client.on("snapshot", snapshots);
+    client.on("finish", finishes);
+    const socket = await connectClient(client, factory);
+    const snapshot: ServerMessage = {
+      version: 1,
+      type: "snapshot",
+      roomId: "room_0001",
+      roomEpoch: 1,
+      status: "waiting",
+      serverTime: 2_000,
+      lastSequence: 0,
+      players: [
+        {
+          playerId: "player_0001",
+          connected: true,
+          ready: false,
+          lastProgressSequence: -1,
+        },
+      ],
+    };
+
+    socket.receive(snapshot);
+    await settle();
+    const finishId = client.finish({ score: 99 });
+    socket.receive({
+      version: 1,
+      type: "canonical",
+      event: canonical(1, "finish"),
+    });
+    await settle();
+
+    expect(snapshots).toHaveBeenCalledWith(snapshot);
+    expect(messages(socket)).toContainEqual({
+      version: 1,
+      type: "finish",
+      idempotencyKey: finishId,
+      payload: { score: 99 },
+    });
+    expect(finishes).toHaveBeenCalledWith(canonical(1, "finish"));
+  });
+
+  it("rejects evidence when its configured channel is disabled", async () => {
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    await connectClient(client, factory);
+
+    expect(() =>
+      client.sendEvidence({ evidenceType: "state-hash", payload: { hash: "abc" } }),
+    ).toThrow(/disabled/u);
+    expect(() =>
+      client.sendEvidence({ evidenceType: "result", payload: { score: 1 } }),
+    ).toThrow(/disabled/u);
+  });
+
+  it("isolates application listener failures without closing the socket", async () => {
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    const healthy = vi.fn();
+    const errors = vi.fn();
+    client.on("progress", () => {
+      throw new Error("render failed");
+    });
+    client.on("progress", healthy);
+    client.on("error", errors);
+    const socket = await connectClient(client, factory);
+
+    const progress: ServerMessage = {
+      version: 1,
+      type: "progress",
+      playerId: "player_0002",
+      sequence: 1,
+      serverTime: 2_000,
+      payload: { checkpoint: 3 },
+    };
+    socket.receive(progress);
+    await settle();
+
+    expect(healthy).toHaveBeenCalledWith(progress);
+    expect(errors).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "listener" }),
+    );
+    expect(socket.readyState).toBe(WebSocketReadyState.OPEN);
+  });
+
+  it("reconnects with session resume parameters and follows paginated canonical replay", async () => {
     vi.useFakeTimers();
     const factory = new MockSocketFactory();
     const client = createClient(factory, new TestClock());
@@ -367,21 +513,197 @@ describe("RelayPlayClient", () => {
     expect(resumeUrl.searchParams.get("afterSequence")).toBe("1");
 
     second.open();
-    second.receive({ ...session, resumeEpoch: 2, lastSequence: 2 });
+    second.receive({
+      ...session,
+      resumeEpoch: 2,
+      resumed: true,
+      lastSequence: 3,
+      lastProgressSequence: 7,
+    });
     await settle();
     second.receive({
       version: 1,
       type: "replay",
       roomEpoch: 1,
       afterSequence: 1,
+      throughSequence: 2,
+      hasMore: true,
       events: [canonical(2)],
     });
     await settle();
 
+    expect(messages(second)).toContainEqual({
+      version: 1,
+      type: "resume",
+      roomEpoch: 1,
+      afterSequence: 2,
+    });
+    second.receive({
+      version: 1,
+      type: "replay",
+      roomEpoch: 1,
+      afterSequence: 2,
+      throughSequence: 3,
+      hasMore: false,
+      events: [canonical(3)],
+    });
+    await settle();
+
+    client.reportProgress({ score: 20 });
+
     expect(client.state).toBe("connected");
-    expect(client.lastEventSequence).toBe(2);
+    expect(client.lastEventSequence).toBe(3);
+    expect(messages(second)).toContainEqual({
+      version: 1,
+      type: "progress",
+      sequence: 8,
+      payload: { score: 20 },
+    });
     expect(resumed).toHaveBeenCalledWith(
-      expect.objectContaining({ resumed: true, replayedEvents: 1 }),
+      expect.objectContaining({ resumed: true, replayedEvents: 2 }),
     );
+  });
+
+  it("cancels an automatic reconnect timer when connect is requested manually", async () => {
+    vi.useFakeTimers();
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    const first = await connectClient(client, factory);
+
+    first.serverClose();
+    const connecting = client.connect();
+    await settle();
+    expect(factory.sockets).toHaveLength(2);
+
+    const second = factory.latest;
+    second.open();
+    second.receive({ ...session, resumed: true, resumeEpoch: 2 });
+    await connecting;
+    second.receive({
+      version: 1,
+      type: "replay",
+      roomEpoch: 1,
+      afterSequence: 0,
+      throughSequence: 0,
+      hasMore: false,
+      events: [],
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(factory.sockets).toHaveLength(2);
+    expect(second.readyState).toBe(WebSocketReadyState.OPEN);
+  });
+
+  it("trusts an explicit fresh session instead of inferring resume from local state", async () => {
+    vi.useFakeTimers();
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    const connections = vi.fn();
+    client.on("connected", connections);
+    const first = await connectClient(client, factory);
+    first.receive({ version: 1, type: "canonical", event: canonical(1) });
+    await settle();
+
+    first.serverClose();
+    await vi.advanceTimersByTimeAsync(250);
+    const second = factory.latest;
+    second.open();
+    second.receive({
+      ...session,
+      sessionId: "session_0002",
+      resumed: false,
+      lastSequence: 1,
+    });
+    await settle();
+
+    expect(client.lastEventSequence).toBe(0);
+    expect(connections).toHaveBeenLastCalledWith(
+      expect.objectContaining({ resumed: false, sessionId: "session_0002" }),
+    );
+  });
+
+  it("clears canonical gap recovery when the affected socket closes", async () => {
+    vi.useFakeTimers();
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    const first = await connectClient(client, factory);
+    first.receive({ version: 1, type: "canonical", event: canonical(2) });
+    await settle();
+
+    first.serverClose();
+    await vi.advanceTimersByTimeAsync(250);
+    const second = factory.latest;
+    second.open();
+    second.receive({
+      ...session,
+      resumed: true,
+      resumeEpoch: 2,
+      lastSequence: 2,
+    });
+    await settle();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(second.readyState).toBe(WebSocketReadyState.OPEN);
+  });
+
+  it("drops an asynchronously decoded message from a replaced socket generation", async () => {
+    vi.useFakeTimers();
+    const factory = new MockSocketFactory();
+    const client = createClient(factory, new TestClock());
+    const progress = vi.fn();
+    client.on("progress", progress);
+    const first = await connectClient(client, factory);
+    let releaseText: ((text: string) => void) | undefined;
+    const staleBlob = new Blob(["stale"]);
+    vi.spyOn(staleBlob, "text").mockImplementation(
+      () => new Promise<string>((resolve) => {
+        releaseText = resolve;
+      }),
+    );
+    first.receiveData(staleBlob);
+    await settle();
+
+    first.serverClose();
+    await vi.advanceTimersByTimeAsync(250);
+    const second = factory.latest;
+    second.open();
+    second.receive({ ...session, resumed: true, resumeEpoch: 2 });
+    await settle();
+    expect(client.state).toBe("connected");
+
+    releaseText?.(JSON.stringify({
+      version: 1,
+      type: "progress",
+      playerId: "player_0002",
+      sequence: 1,
+      serverTime: 2_000,
+      payload: { checkpoint: 99 },
+    }));
+    await settle();
+
+    expect(progress).not.toHaveBeenCalled();
+    expect(client.state).toBe("connected");
+    expect(second.readyState).toBe(WebSocketReadyState.OPEN);
+  });
+
+  it("does not resurrect a connection after an asynchronous endpoint resolves late", async () => {
+    const factory = new MockSocketFactory();
+    let resolveEndpoint: ((endpoint: string) => void) | undefined;
+    const endpoint = new Promise<string>((resolve) => {
+      resolveEndpoint = resolve;
+    });
+    const client = createClient(factory, new TestClock(), {
+      url: () => endpoint,
+    });
+    const connecting = client.connect().catch((error: unknown) => error);
+    await settle();
+
+    await client.disconnect();
+    resolveEndpoint?.("https://relay.test/rooms/{roomId}/ws");
+    await settle();
+
+    expect(await connecting).toBeInstanceOf(Error);
+    expect(factory.sockets).toHaveLength(0);
+    expect(client.state).toBe("closed");
   });
 });
