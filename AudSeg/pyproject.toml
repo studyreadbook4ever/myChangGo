@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "audseg"
+version = "0.1.0"
+description = "Model-free audio activity segmentation and blank subtitle cue planning"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+  { name = "AudSeg contributors" },
+]
+keywords = [
+  "audio",
+  "segmentation",
+  "silence-detection",
+  "subtitles",
+  "vad",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Multimedia :: Sound/Audio :: Analysis",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.8,<1",
+]
+
+[project.scripts]
+audseg = "audseg.cli:main"
+
+[project.urls]
+Repository = "https://github.com/studyreadbook4ever/myChangGo/tree/main/AudSeg"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audseg"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
