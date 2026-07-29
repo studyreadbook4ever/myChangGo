@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CAPTION_HARNESS_FINGERPRINT,
+  CAPTION_QUALITY_PROFILE_ID
+} from "../src/caption-agent/caption-quality-harness.js";
+import {
+  captionEditorialContextFingerprint
+} from "../src/caption-agent/editorial-context.js";
+import {
   CAPTION_AGENT_REQUEST_SCHEMA,
   CAPTION_AGENT_RESPONSE_SCHEMA,
   CAPTION_AGENT_SESSION_SCHEMA,
@@ -58,6 +65,22 @@ function agentRequest({
 }
 
 function completedAgentResponse(request, overrides = {}) {
+  const qualityEnvelope = {
+    qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+    harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+    editorialContextFingerprint: captionEditorialContextFingerprint(
+      request.editorialContext
+    ),
+    qualityReport: {
+      profileId: CAPTION_QUALITY_PROFILE_ID,
+      harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+      valid: true,
+      disposition: "accepted",
+      violations: [],
+      cueReviews: [],
+      metrics: {}
+    }
+  };
   return {
     schema: CAPTION_AGENT_RESPONSE_SCHEMA,
     requestId: request.requestId,
@@ -71,6 +94,7 @@ function completedAgentResponse(request, overrides = {}) {
     status: "completed",
     cues: [],
     warnings: [],
+    ...qualityEnvelope,
     ...overrides
   };
 }
@@ -321,12 +345,21 @@ test("재개 체크포인트는 현재 자막 품질 하네스 프로필과 일�
   );
   const legacyCheckpoint = { ...matchingCheckpoint };
   delete legacyCheckpoint.qualityProfile;
+  delete legacyCheckpoint.harnessFingerprint;
   const differentCheckpoint = {
     ...matchingCheckpoint,
     qualityProfile: "legacy-unharnessed-v0"
   };
+  const staleHarnessCheckpoint = {
+    ...matchingCheckpoint,
+    harnessFingerprint: "kr-vtuber-clean-v1:old-logic"
+  };
 
   assert.equal(matchingCheckpoint.qualityProfile, "kr-vtuber-clean-v1");
+  assert.match(
+    matchingCheckpoint.harnessFingerprint,
+    /^kr-vtuber-clean-v1:/u
+  );
   assert.deepEqual(
     captionAgentResumePlan(
       [clip],
@@ -339,7 +372,11 @@ test("재개 체크포인트는 현재 자막 품질 하네스 프로필과 일�
       skippedClipIds: ["clip-harness"]
     }
   );
-  for (const staleCheckpoint of [legacyCheckpoint, differentCheckpoint]) {
+  for (const staleCheckpoint of [
+    legacyCheckpoint,
+    differentCheckpoint,
+    staleHarnessCheckpoint
+  ]) {
     assert.deepEqual(
       captionAgentResumePlan(
         [clip],
@@ -353,6 +390,32 @@ test("재개 체크포인트는 현재 자막 품질 하네스 프로필과 일�
       }
     );
   }
+});
+
+test("편집 문맥 지문이 달라지면 완료 컷을 낡은 문맥으로 재사용하지 않는다", () => {
+  const clip = {
+    id: "clip-context-fingerprint",
+    sourceStartMs: 1_000,
+    sourceEndMs: 5_000
+  };
+  const checkpoint = createCaptionAgentCheckpoint(clip, "solar-pro3", {
+    editorialContextFingerprint: "ctx-v1-1111111111111111"
+  });
+
+  assert.deepEqual(
+    captionAgentResumePlan([clip], [checkpoint], "solar-pro3", {
+      resume: true,
+      editorialContextFingerprint: "ctx-v1-1111111111111111"
+    }).skippedClipIds,
+    ["clip-context-fingerprint"]
+  );
+  assert.deepEqual(
+    captionAgentResumePlan([clip], [checkpoint], "solar-pro3", {
+      resume: true,
+      editorialContextFingerprint: "ctx-v1-2222222222222222"
+    }).skippedClipIds,
+    []
+  );
 });
 
 test("새 전체 실행은 대상 컷의 이전 체크포인트만 먼저 폐기한다", () => {
@@ -566,6 +629,12 @@ test("요청은 실제 컷 메모·길이와 한국어 키리누키 4초 정책�
   assert.equal(request.policy.terminalPeriod, "omit");
   assert.equal(request.visual.framesShared, false);
   assert.equal(request.visual.samples[0].preferredPlacement, "bottom");
+  assert.equal(request.editorialContext.style.maxWidthUnits, 20);
+  assert.equal(request.editorialContext.style.placement, "bottom");
+  assert.equal(request.editorialContext.speakers[0].id, "main");
+  assert(
+    request.editorialContext.speakers[0].aliases.includes("스트리머")
+  );
   assert.equal(request.audio.data, "UklGRg==");
   assert.throws(
     () => createCaptionAgentRequest({
@@ -660,6 +729,29 @@ test("원격 cue는 정렬·경계·4초를 검증하고 동시 발화와 표시
     simultaneous.map((cue) => cue.remoteMeta.speakerId),
     ["main", "guest"]
   );
+});
+
+test("cue별 품질 사유는 remoteMeta에 남고 review-required를 강제한다", () => {
+  const [cue] = normalizeCaptionAgentCues([{
+    startMs: 0,
+    endMs: 1_000,
+    text: "다시 들어볼 자막",
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom",
+    quality: {
+      status: "review-required",
+      codes: ["HARNESS_TRANSCRIPT_COVERAGE_LOW"]
+    }
+  }], 2_000);
+
+  assert.deepEqual(cue.remoteMeta, {
+    speakerId: "main",
+    reviewRequired: true,
+    placement: "bottom",
+    qualityStatus: "review-required",
+    qualityCodes: ["HARNESS_TRANSCRIPT_COVERAGE_LOW"]
+  });
 });
 
 test("오디오 추출 전에 컷 길이와 WAV 메모리 상한을 검사한다", () => {
@@ -931,6 +1023,25 @@ test("완료 응답은 요청 ID·컷 ID와 모든 필수 필드 타입을 검�
       name: "제공자 계약 위반",
       response: completedAgentResponse(request, { provider: "unknown" }),
       pattern: /Upstage/u
+    },
+    {
+      name: "품질 envelope 전체 누락",
+      response: (() => {
+        const response = completedAgentResponse(request);
+        delete response.qualityProfile;
+        delete response.harnessFingerprint;
+        delete response.editorialContextFingerprint;
+        delete response.qualityReport;
+        return response;
+      })(),
+      pattern: /품질 하네스 지문/u
+    },
+    {
+      name: "다른 요청의 편집 문맥 지문",
+      response: completedAgentResponse(request, {
+        editorialContextFingerprint: "ctx-v1-1111111111111111"
+      }),
+      pattern: /현재 요청/u
     },
     {
       name: "cue 필수 필드 타입 위반",

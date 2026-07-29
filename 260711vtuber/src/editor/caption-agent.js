@@ -1,6 +1,11 @@
 import {
+  CAPTION_HARNESS_FINGERPRINT,
   CAPTION_QUALITY_PROFILE_ID
 } from "../caption-agent/caption-quality-harness.js";
+import {
+  buildProjectCaptionEditorialContext,
+  captionEditorialContextFingerprint
+} from "../caption-agent/editorial-context.js";
 
 export const CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v1";
 export const CAPTION_AGENT_REQUEST_SCHEMA = "chzzk-kirinuki-caption-request/v1";
@@ -294,19 +299,31 @@ export function captionAgentRunEstimate(clips = []) {
   };
 }
 
+export function captionAgentEditorialContextFingerprint(project) {
+  return captionEditorialContextFingerprint(
+    buildProjectCaptionEditorialContext(project, {
+      includeUnreviewedSpeakers: false
+    })
+  );
+}
+
 function captionCheckpointKey({
   clipId,
   sourceStartMs,
   sourceEndMs,
   model,
-  qualityProfile
+  qualityProfile,
+  harnessFingerprint,
+  editorialContextFingerprint
 }) {
   return [
     String(clipId || ""),
     Math.round(finiteNumber(sourceStartMs, -1)),
     Math.round(finiteNumber(sourceEndMs, -1)),
     String(model || ""),
-    String(qualityProfile || "legacy-unharnessed-v0")
+    String(qualityProfile || "legacy-unharnessed-v0"),
+    String(harnessFingerprint || "legacy-harness-fingerprint-v0"),
+    String(editorialContextFingerprint || "legacy-context-v0")
   ].join("\u0000");
 }
 
@@ -315,7 +332,8 @@ export function createCaptionAgentCheckpoint(
   model,
   {
     requestId = "",
-    completedAt = new Date().toISOString()
+    completedAt = new Date().toISOString(),
+    editorialContextFingerprint = "legacy-context-v0"
   } = {}
 ) {
   if (!ALLOWED_SOLAR_MODELS.has(model)) {
@@ -328,6 +346,10 @@ export function createCaptionAgentCheckpoint(
     sourceEndMs: Math.round(finiteNumber(clip?.sourceEndMs, -1)),
     model: normalizedModel,
     qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+    harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+    editorialContextFingerprint: String(
+      editorialContextFingerprint || "legacy-context-v0"
+    ).trim().slice(0, 128),
     requestId: String(requestId || "").trim().slice(0, 128),
     completedAt: String(completedAt || "").trim().slice(0, 64)
   };
@@ -405,7 +427,10 @@ export function captionAgentResumePlan(
   clips,
   checkpoints,
   model,
-  { resume = false } = {}
+  {
+    resume = false,
+    editorialContextFingerprint = "legacy-context-v0"
+  } = {}
 ) {
   const enabled = (Array.isArray(clips) ? clips : []).filter(
     (clip) => clip?.enabled !== false
@@ -427,7 +452,9 @@ export function captionAgentResumePlan(
       sourceStartMs: clip.sourceStartMs,
       sourceEndMs: clip.sourceEndMs,
       model,
-      qualityProfile: CAPTION_QUALITY_PROFILE_ID
+      qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+      harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+      editorialContextFingerprint
     }));
     if (completed) {
       skippedClipIds.push(String(clip.id));
@@ -581,6 +608,7 @@ export function createCaptionAgentRequest({
       preferredPlacement: sample.preferredPlacement
     };
   });
+  const editorialContext = buildProjectCaptionEditorialContext(project);
   return {
     schema: CAPTION_AGENT_REQUEST_SCHEMA,
     requestId: globalThis.crypto.randomUUID(),
@@ -596,6 +624,7 @@ export function createCaptionAgentRequest({
       projectName: String(project?.name || ""),
       streamerName: String(project?.source?.streamerName || "")
     },
+    editorialContext,
     policy: {
       audience: "korean-vtuber-kirinuki",
       includeAllRecognizableSpeech: true,
@@ -634,13 +663,29 @@ function normalizedColor(value) {
 }
 
 function normalizedRemoteMeta(raw, placement) {
+  const rawQuality = raw?.quality;
+  const qualityCodes = Array.isArray(rawQuality?.codes)
+    ? [...new Set(rawQuality.codes
+      .map((code) => String(code || "").trim().slice(0, 128))
+      .filter(Boolean))]
+      .slice(0, 32)
+    : [];
+  const qualityStatus = rawQuality?.status === "review-required"
+    ? "review-required"
+    : "accepted";
   return {
     speakerId: String(raw?.speakerId ?? raw?.speaker_id ?? "unknown")
       .replace(/\s+/gu, " ")
       .trim()
       .slice(0, 80) || "unknown",
-    reviewRequired: Boolean(raw?.reviewRequired ?? raw?.review_required),
-    placement
+    reviewRequired: (
+      Boolean(raw?.reviewRequired ?? raw?.review_required)
+      || qualityStatus === "review-required"
+    ),
+    placement,
+    ...(isPlainObject(rawQuality)
+      ? { qualityStatus, qualityCodes }
+      : {})
   };
 }
 
@@ -859,6 +904,93 @@ function assertExactResponseFields(value, allowedFields, label) {
   }
 }
 
+function validateRemoteCueQuality(quality, index) {
+  if (
+    !isPlainObject(quality)
+    || !["accepted", "review-required"].includes(quality.status)
+    || !Array.isArray(quality.codes)
+    || quality.codes.length > 32
+    || quality.codes.some((code) => (
+      typeof code !== "string"
+      || !code.trim()
+      || code.length > 128
+    ))
+  ) {
+    throw new Error(`${index + 1}번째 자막 품질 검수 정보가 올바르지 않습니다.`);
+  }
+  assertExactResponseFields(
+    quality,
+    ["status", "codes"],
+    `${index + 1}번째 자막 품질 검수 정보`
+  );
+}
+
+function validateRemoteQualityReport(report, cues) {
+  if (
+    !isPlainObject(report)
+    || report.profileId !== CAPTION_QUALITY_PROFILE_ID
+    || report.harnessFingerprint !== CAPTION_HARNESS_FINGERPRINT
+    || typeof report.valid !== "boolean"
+    || !["accepted", "review-required"].includes(report.disposition)
+    || !Array.isArray(report.violations)
+    || report.violations.length > MAX_REMOTE_WARNINGS
+    || !Array.isArray(report.cueReviews)
+    || report.cueReviews.length !== cues.length
+    || !isPlainObject(report.metrics)
+  ) {
+    throw new Error("자막 에이전트 응답의 품질 보고서가 올바르지 않습니다.");
+  }
+  assertExactResponseFields(report, [
+    "profileId",
+    "harnessFingerprint",
+    "valid",
+    "disposition",
+    "violations",
+    "cueReviews",
+    "metrics"
+  ], "자막 에이전트 품질 보고서");
+  for (const [index, violation] of report.violations.entries()) {
+    if (
+      !isPlainObject(violation)
+      || typeof violation.code !== "string"
+      || !violation.code.trim()
+      || violation.code.length > 128
+      || !Number.isInteger(violation.cueIndex)
+      || violation.cueIndex < 0
+      || !["error", "warning"].includes(violation.severity)
+    ) {
+      throw new Error(`${index + 1}번째 품질 위반 정보가 올바르지 않습니다.`);
+    }
+    assertExactResponseFields(
+      violation,
+      ["code", "cueIndex", "severity"],
+      `${index + 1}번째 품질 위반 정보`
+    );
+  }
+  for (const [index, review] of report.cueReviews.entries()) {
+    if (
+      !isPlainObject(review)
+      || review.cueIndex !== index
+      || !["accepted", "review-required"].includes(review.status)
+      || !Array.isArray(review.codes)
+      || review.codes.length > 32
+      || review.codes.some((code) => (
+        typeof code !== "string"
+        || !code.trim()
+        || code.length > 128
+      ))
+      || !isPlainObject(review.metrics)
+    ) {
+      throw new Error(`${index + 1}번째 cue 품질 보고서가 올바르지 않습니다.`);
+    }
+    assertExactResponseFields(
+      review,
+      ["cueIndex", "status", "codes", "metrics"],
+      `${index + 1}번째 cue 품질 보고서`
+    );
+  }
+}
+
 function validateCompletedCaptionAgentResponse(payload, request) {
   if (!isPlainObject(payload)) {
     throw new Error("자막 에이전트 완료 응답이 JSON 객체가 아닙니다.");
@@ -875,7 +1007,11 @@ function validateCompletedCaptionAgentResponse(payload, request) {
     "provider",
     "status",
     "cues",
-    "warnings"
+    "warnings",
+    "qualityProfile",
+    "harnessFingerprint",
+    "editorialContextFingerprint",
+    "qualityReport"
   ], "자막 에이전트 완료 응답");
   if (payload.schema !== CAPTION_AGENT_RESPONSE_SCHEMA) {
     throw new Error("자막 에이전트 응답 스키마 버전이 맞지 않습니다.");
@@ -930,7 +1066,8 @@ function validateCompletedCaptionAgentResponse(payload, request) {
       !cue.speakerId.trim() ||
       cue.speakerId.length > 80 ||
       typeof cue.reviewRequired !== "boolean" ||
-      !["top", "center", "bottom"].includes(cue.placement)
+      !["top", "center", "bottom"].includes(cue.placement) ||
+      (cue.quality != null && !isPlainObject(cue.quality))
     ) {
       throw new Error(`${index + 1}번째 자막 에이전트 응답 cue가 올바르지 않습니다.`);
     }
@@ -940,8 +1077,12 @@ function validateCompletedCaptionAgentResponse(payload, request) {
       "text",
       "speakerId",
       "reviewRequired",
-      "placement"
+      "placement",
+      "quality"
     ], `${index + 1}번째 자막 에이전트 응답 cue`);
+    if (cue.quality != null) {
+      validateRemoteCueQuality(cue.quality, index);
+    }
   }
   if (
     !Array.isArray(payload.warnings)
@@ -966,6 +1107,17 @@ function validateCompletedCaptionAgentResponse(payload, request) {
       `${index + 1}번째 자막 에이전트 응답 warning`
     );
   }
+  const expectedEditorialContextFingerprint =
+    captionEditorialContextFingerprint(request?.editorialContext);
+  if (
+    payload.qualityProfile !== CAPTION_QUALITY_PROFILE_ID
+    || payload.harnessFingerprint !== CAPTION_HARNESS_FINGERPRINT
+    || payload.editorialContextFingerprint
+      !== expectedEditorialContextFingerprint
+  ) {
+    throw new Error("자막 에이전트 품질 하네스 지문이 현재 요청과 다릅니다.");
+  }
+  validateRemoteQualityReport(payload.qualityReport, payload.cues);
   return payload;
 }
 

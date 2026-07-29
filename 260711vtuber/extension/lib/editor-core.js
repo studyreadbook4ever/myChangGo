@@ -132,6 +132,12 @@ export function normalizeAiCaptionCheckpoints(value, clips = []) {
     const qualityProfile = String(
       raw.qualityProfile || "legacy-unharnessed-v0"
     ).trim().slice(0, 128);
+    const harnessFingerprint = String(
+      raw.harnessFingerprint || "legacy-harness-fingerprint-v0"
+    ).trim().slice(0, 128);
+    const editorialContextFingerprint = String(
+      raw.editorialContextFingerprint || "legacy-context-v0"
+    ).trim().slice(0, 128);
     if (
       !clipId
       || !clipIds.has(clipId)
@@ -149,6 +155,8 @@ export function normalizeAiCaptionCheckpoints(value, clips = []) {
       sourceEndMs,
       model,
       qualityProfile,
+      harnessFingerprint,
+      editorialContextFingerprint,
       ...(requestId ? { requestId } : {}),
       ...(completedAt ? { completedAt } : {})
     };
@@ -158,7 +166,9 @@ export function normalizeAiCaptionCheckpoints(value, clips = []) {
         sourceStartMs,
         sourceEndMs,
         model,
-        qualityProfile
+        qualityProfile,
+        harnessFingerprint,
+        editorialContextFingerprint
       ].join("\u0000"),
       checkpoint
     );
@@ -1018,7 +1028,22 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
       reviewRequired: Boolean(cue.remoteMeta.reviewRequired),
       placement: ["top", "center", "bottom"].includes(remotePlacement)
         ? remotePlacement
-        : "bottom"
+        : "bottom",
+      ...(cue.remoteMeta.qualityStatus != null
+        || Array.isArray(cue.remoteMeta.qualityCodes)
+        ? {
+          qualityStatus: cue.remoteMeta.qualityStatus === "review-required"
+            ? "review-required"
+            : "accepted",
+          qualityCodes: [...new Set(
+            (Array.isArray(cue.remoteMeta.qualityCodes)
+              ? cue.remoteMeta.qualityCodes
+              : [])
+              .map((code) => String(code || "").trim().slice(0, 128))
+              .filter(Boolean)
+          )].slice(0, 32)
+        }
+        : {})
     }
     : null;
   return {

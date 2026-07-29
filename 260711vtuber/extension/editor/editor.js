@@ -341,6 +341,12 @@ function normalizeAiCaptionCheckpoints(value, clips = []) {
     const qualityProfile = String(
       raw.qualityProfile || "legacy-unharnessed-v0"
     ).trim().slice(0, 128);
+    const harnessFingerprint = String(
+      raw.harnessFingerprint || "legacy-harness-fingerprint-v0"
+    ).trim().slice(0, 128);
+    const editorialContextFingerprint = String(
+      raw.editorialContextFingerprint || "legacy-context-v0"
+    ).trim().slice(0, 128);
     if (!clipId || !clipIds.has(clipId) || sourceStartMs < 0 || sourceEndMs <= sourceStartMs || !["solar-pro3", "solar-mini"].includes(model)) {
       continue;
     }
@@ -352,6 +358,8 @@ function normalizeAiCaptionCheckpoints(value, clips = []) {
       sourceEndMs,
       model,
       qualityProfile,
+      harnessFingerprint,
+      editorialContextFingerprint,
       ...requestId ? { requestId } : {},
       ...completedAt ? { completedAt } : {}
     };
@@ -361,7 +369,9 @@ function normalizeAiCaptionCheckpoints(value, clips = []) {
         sourceStartMs,
         sourceEndMs,
         model,
-        qualityProfile
+        qualityProfile,
+        harnessFingerprint,
+        editorialContextFingerprint
       ].join("\0"),
       checkpoint
     );
@@ -1076,7 +1086,13 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
   const remoteMeta = cue.remoteMeta && typeof cue.remoteMeta === "object" ? {
     speakerId: String(cue.remoteMeta.speakerId || "unknown").replace(/\s+/gu, " ").trim().slice(0, 80) || "unknown",
     reviewRequired: Boolean(cue.remoteMeta.reviewRequired),
-    placement: ["top", "center", "bottom"].includes(remotePlacement) ? remotePlacement : "bottom"
+    placement: ["top", "center", "bottom"].includes(remotePlacement) ? remotePlacement : "bottom",
+    ...cue.remoteMeta.qualityStatus != null || Array.isArray(cue.remoteMeta.qualityCodes) ? {
+      qualityStatus: cue.remoteMeta.qualityStatus === "review-required" ? "review-required" : "accepted",
+      qualityCodes: [...new Set(
+        (Array.isArray(cue.remoteMeta.qualityCodes) ? cue.remoteMeta.qualityCodes : []).map((code) => String(code || "").trim().slice(0, 128)).filter(Boolean)
+      )].slice(0, 32)
+    } : {}
   } : null;
   return {
     id: cue.id || makeId("cue"),
@@ -33764,6 +33780,453 @@ async function pruneImageAssetBlobs(projectId, keepAssetIds = []) {
   return Number(deletedCount) || 0;
 }
 
+// src/caption-agent/editorial-context.js
+var CAPTION_EDITORIAL_CONTEXT_SCHEMA = "kr-vtuber-editorial-context/v1";
+var MAX_CAPTION_GLOSSARY_ENTRIES = 48;
+var MAX_CAPTION_GLOSSARY_VARIANTS = 8;
+var MAX_CAPTION_SPEAKERS = 16;
+var MAX_CAPTION_SPEAKER_ALIASES = 12;
+var MAX_CAPTION_STYLE_EXAMPLES = 8;
+var MAX_CAPTION_EDITORIAL_CONTEXT_BYTES = 24 * 1024;
+var PRIMARY_SPEAKER_ALIASES = Object.freeze([
+  "host",
+  "main",
+  "primary",
+  "speaker",
+  "speaker-0",
+  "speaker_0",
+  "streamer",
+  "unknown",
+  "\uD654\uC7900",
+  "\uD654\uC790-0",
+  "\uD654\uC790_0"
+]);
+var HANGUL_INITIALS = Object.freeze([
+  "g",
+  "kk",
+  "n",
+  "d",
+  "tt",
+  "r",
+  "m",
+  "b",
+  "pp",
+  "s",
+  "ss",
+  "",
+  "j",
+  "jj",
+  "ch",
+  "k",
+  "t",
+  "p",
+  "h"
+]);
+var HANGUL_MEDIALS = Object.freeze([
+  "a",
+  "ae",
+  "ya",
+  "yae",
+  "eo",
+  "e",
+  "yeo",
+  "ye",
+  "o",
+  "wa",
+  "wae",
+  "oe",
+  "yo",
+  "u",
+  "wo",
+  "we",
+  "wi",
+  "yu",
+  "eu",
+  "ui",
+  "i"
+]);
+var HANGUL_FINALS = Object.freeze([
+  "",
+  "k",
+  "k",
+  "ks",
+  "n",
+  "n",
+  "nh",
+  "t",
+  "l",
+  "lk",
+  "lm",
+  "lb",
+  "ls",
+  "lt",
+  "lp",
+  "lh",
+  "m",
+  "p",
+  "ps",
+  "t",
+  "t",
+  "ng",
+  "t",
+  "t",
+  "k",
+  "t",
+  "p",
+  "h"
+]);
+function isPlainObject(value) {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+function compactText(value, maximum) {
+  return String(value ?? "").replace(/\s+/gu, " ").trim().slice(0, maximum);
+}
+function uniqueBoundedStrings(values, maximumItems, maximumLength) {
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = compactText(value, maximumLength);
+    const key = normalized.toLocaleLowerCase("ko-KR");
+    if (!normalized || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(normalized);
+    if (result.length >= maximumItems) {
+      break;
+    }
+  }
+  return result;
+}
+function romanizeHangulForIdentity(value) {
+  let output = "";
+  for (const character of String(value ?? "").normalize("NFKC")) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint < 44032 || codePoint > 55203) {
+      output += character;
+      continue;
+    }
+    const syllable = codePoint - 44032;
+    const initial = Math.floor(syllable / 588);
+    const medial = Math.floor(syllable % 588 / 28);
+    const final = syllable % 28;
+    output += HANGUL_INITIALS[initial] + HANGUL_MEDIALS[medial] + HANGUL_FINALS[final];
+  }
+  return output;
+}
+function identityKey(value) {
+  return String(value ?? "").normalize("NFKC").toLocaleLowerCase("ko-KR").replace(/[^\p{L}\p{N}]+/gu, "");
+}
+function speakerIdentityKeys(value) {
+  const direct = identityKey(value);
+  const romanized = identityKey(romanizeHangulForIdentity(value));
+  return [...new Set([direct, romanized].filter(Boolean))];
+}
+function aliasesIntersect(left, right) {
+  const rightKeys = new Set(right.flatMap(speakerIdentityKeys));
+  return left.some((alias) => speakerIdentityKeys(alias).some((key) => rightKeys.has(key)));
+}
+function strictObject(value, field, allowedFields) {
+  if (!isPlainObject(value)) {
+    throw new TypeError(`${field} must be an object`);
+  }
+  const unknown = Object.keys(value).filter(
+    (candidate) => !allowedFields.includes(candidate)
+  );
+  if (unknown.length > 0) {
+    throw new TypeError(`${field} contains unsupported fields`);
+  }
+  return value;
+}
+function normalizeCaptionEditorialContext(raw, {
+  strict = false
+} = {}) {
+  if (raw == null || raw === "") {
+    return {
+      schema: CAPTION_EDITORIAL_CONTEXT_SCHEMA,
+      glossary: [],
+      speakers: [{
+        id: "main",
+        aliases: [...PRIMARY_SPEAKER_ALIASES]
+      }],
+      style: {
+        terminalPeriod: "omit",
+        placement: "bottom",
+        maxWidthUnits: 20,
+        examples: []
+      }
+    };
+  }
+  const source = strict ? strictObject(raw, "editorialContext", [
+    "schema",
+    "glossary",
+    "speakers",
+    "style"
+  ]) : isPlainObject(raw) ? raw : {};
+  if (strict && source.schema !== CAPTION_EDITORIAL_CONTEXT_SCHEMA) {
+    throw new TypeError("editorialContext.schema is unsupported");
+  }
+  const rawGlossary = Array.isArray(source.glossary) ? source.glossary : [];
+  if (strict && rawGlossary.length > MAX_CAPTION_GLOSSARY_ENTRIES) {
+    throw new TypeError("editorialContext.glossary is too large");
+  }
+  const glossary = [];
+  const glossaryKeys = /* @__PURE__ */ new Set();
+  for (const [index, rawEntry] of rawGlossary.entries()) {
+    const entry = strict ? strictObject(rawEntry, `editorialContext.glossary.${index}`, [
+      "term",
+      "variants"
+    ]) : isPlainObject(rawEntry) ? rawEntry : {};
+    const term = compactText(entry.term, 64);
+    if (!term) {
+      if (strict) {
+        throw new TypeError("editorialContext glossary term is empty");
+      }
+      continue;
+    }
+    const key = term.toLocaleLowerCase("ko-KR");
+    if (glossaryKeys.has(key)) {
+      continue;
+    }
+    const variants = uniqueBoundedStrings(
+      entry.variants,
+      MAX_CAPTION_GLOSSARY_VARIANTS,
+      64
+    ).filter((variant) => variant.toLocaleLowerCase("ko-KR") !== key);
+    if (strict && (!Array.isArray(entry.variants) || entry.variants.length > MAX_CAPTION_GLOSSARY_VARIANTS)) {
+      throw new TypeError("editorialContext glossary variants are invalid");
+    }
+    glossaryKeys.add(key);
+    glossary.push({ term, variants });
+    if (glossary.length >= MAX_CAPTION_GLOSSARY_ENTRIES) {
+      break;
+    }
+  }
+  const rawSpeakers = Array.isArray(source.speakers) ? source.speakers : [];
+  if (strict && rawSpeakers.length > MAX_CAPTION_SPEAKERS) {
+    throw new TypeError("editorialContext.speakers is too large");
+  }
+  const speakers = [];
+  const speakerIds = /* @__PURE__ */ new Set();
+  for (const [index, rawSpeaker] of rawSpeakers.entries()) {
+    const speaker = strict ? strictObject(rawSpeaker, `editorialContext.speakers.${index}`, [
+      "id",
+      "aliases"
+    ]) : isPlainObject(rawSpeaker) ? rawSpeaker : {};
+    const id = compactText(speaker.id, 80).toLocaleLowerCase("ko-KR");
+    if (!id) {
+      if (strict) {
+        throw new TypeError("editorialContext speaker id is empty");
+      }
+      continue;
+    }
+    if (strict && (!Array.isArray(speaker.aliases) || speaker.aliases.length > MAX_CAPTION_SPEAKER_ALIASES)) {
+      throw new TypeError("editorialContext speaker aliases are invalid");
+    }
+    if (speakerIds.has(id)) {
+      continue;
+    }
+    speakerIds.add(id);
+    speakers.push({
+      id,
+      aliases: uniqueBoundedStrings(
+        [id, ...Array.isArray(speaker.aliases) ? speaker.aliases : []],
+        MAX_CAPTION_SPEAKER_ALIASES,
+        80
+      )
+    });
+    if (speakers.length >= MAX_CAPTION_SPEAKERS) {
+      break;
+    }
+  }
+  const primaryAliases = uniqueBoundedStrings(
+    [
+      "main",
+      ...speakers.find(({ id }) => id === "main")?.aliases || [],
+      ...PRIMARY_SPEAKER_ALIASES
+    ],
+    MAX_CAPTION_SPEAKER_ALIASES,
+    80
+  );
+  const withoutMain = speakers.filter(({ id }) => id !== "main");
+  speakers.splice(0, speakers.length, {
+    id: "main",
+    aliases: primaryAliases
+  }, ...withoutMain);
+  const styleSource = strict ? strictObject(source.style, "editorialContext.style", [
+    "terminalPeriod",
+    "placement",
+    "maxWidthUnits",
+    "examples"
+  ]) : isPlainObject(source.style) ? source.style : {};
+  if (strict && (styleSource.terminalPeriod !== "omit" || styleSource.placement !== "bottom" || styleSource.maxWidthUnits !== 20 || !Array.isArray(styleSource.examples) || styleSource.examples.length > MAX_CAPTION_STYLE_EXAMPLES)) {
+    throw new TypeError("editorialContext.style violates the caption contract");
+  }
+  const style = {
+    terminalPeriod: "omit",
+    placement: "bottom",
+    maxWidthUnits: 20,
+    examples: uniqueBoundedStrings(
+      styleSource.examples,
+      MAX_CAPTION_STYLE_EXAMPLES,
+      80
+    )
+  };
+  const normalized = {
+    schema: CAPTION_EDITORIAL_CONTEXT_SCHEMA,
+    glossary,
+    speakers,
+    style
+  };
+  if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > MAX_CAPTION_EDITORIAL_CONTEXT_BYTES) {
+    throw new TypeError("editorialContext exceeds its byte limit");
+  }
+  return normalized;
+}
+function captionSpeakerId(cue) {
+  return compactText(
+    cue?.remoteMeta?.speakerId ?? cue?.speakerId ?? cue?.speaker,
+    80
+  ).toLocaleLowerCase("ko-KR");
+}
+function captionText(cue) {
+  return compactText(cue?.text, 80).replace(/[.\u3002\uff0e]+$/gu, "").trim();
+}
+function projectTimelineOrder(project2, cue) {
+  const clipIndex = (project2?.clips || []).findIndex(
+    (clip) => clip?.id === cue?.clipId
+  );
+  return Math.max(0, clipIndex) * 1e7 + Math.max(0, Number(cue?.startOffsetMs) || 0);
+}
+function trustedStyleExamples(project2) {
+  return (Array.isArray(project2?.subtitles) ? project2.subtitles : []).filter((cue) => cue?.origin === "ai" && cue?.humanEdited === true && captionText(cue) && !/\[불명확\]/u.test(captionText(cue))).sort((first, second) => projectTimelineOrder(project2, first) - projectTimelineOrder(project2, second)).map(captionText).filter((text) => text.length <= 80);
+}
+function trustedGlossaryTerms(project2) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const example of trustedStyleExamples(project2)) {
+    const tokens = example.match(/[\p{L}\p{N}][\p{L}\p{N}_-]{1,31}/gu) || [];
+    for (const token of new Set(tokens)) {
+      const key = token.toLocaleLowerCase("ko-KR");
+      counts.set(key, {
+        term: token,
+        count: (counts.get(key)?.count || 0) + 1
+      });
+    }
+  }
+  return [...counts.values()].filter(({ count }) => count >= 2).sort((first, second) => second.count - first.count || first.term.localeCompare(second.term, "ko")).map(({ term }) => ({ term, variants: [] }));
+}
+function explicitContext(project2) {
+  const raw = project2?.ai?.captionContext;
+  try {
+    return normalizeCaptionEditorialContext(raw);
+  } catch {
+    return normalizeCaptionEditorialContext();
+  }
+}
+function buildProjectCaptionEditorialContext(project2, {
+  includeUnreviewedSpeakers = true
+} = {}) {
+  const explicit = explicitContext(project2);
+  const streamerName = compactText(project2?.source?.streamerName, 120);
+  const streamerAliases = uniqueBoundedStrings([
+    streamerName,
+    ...streamerName.split(/[\s·|/]+/gu),
+    ...streamerName.split(/[\s·|/]+/gu).map(romanizeHangulForIdentity)
+  ], MAX_CAPTION_SPEAKER_ALIASES, 80);
+  const primaryAliases = uniqueBoundedStrings([
+    "main",
+    ...streamerAliases,
+    ...explicit.speakers.find(({ id }) => id === "main")?.aliases || [],
+    ...PRIMARY_SPEAKER_ALIASES
+  ], MAX_CAPTION_SPEAKER_ALIASES, 80);
+  const speakerCounts = /* @__PURE__ */ new Map();
+  for (const cue of Array.isArray(project2?.subtitles) ? project2.subtitles : []) {
+    if (!includeUnreviewedSpeakers && cue?.humanEdited !== true && cue?.origin !== "human") {
+      continue;
+    }
+    const speakerId = captionSpeakerId(cue);
+    if (speakerId) {
+      speakerCounts.set(speakerId, (speakerCounts.get(speakerId) || 0) + 1);
+    }
+  }
+  const speakers = [{
+    id: "main",
+    aliases: primaryAliases
+  }];
+  const explicitNonPrimary = explicit.speakers.filter(({ id }) => id !== "main");
+  for (const speaker of explicitNonPrimary) {
+    if (!aliasesIntersect(speaker.aliases, primaryAliases)) {
+      speakers.push(speaker);
+    }
+  }
+  for (const [speakerId] of [...speakerCounts.entries()].sort(
+    (first, second) => second[1] - first[1] || first[0].localeCompare(second[0], "ko")
+  )) {
+    if (speakers.length >= MAX_CAPTION_SPEAKERS || speakers.some((speaker) => aliasesIntersect([speakerId], [speaker.id, ...speaker.aliases]))) {
+      continue;
+    }
+    if (aliasesIntersect([speakerId], primaryAliases)) {
+      speakers[0].aliases = uniqueBoundedStrings(
+        [...speakers[0].aliases, speakerId],
+        MAX_CAPTION_SPEAKER_ALIASES,
+        80
+      );
+      continue;
+    }
+    speakers.push({ id: speakerId, aliases: [speakerId] });
+  }
+  const projectTerms = [
+    streamerName,
+    ...streamerName.split(/[\s·|/]+/gu)
+  ].filter((term) => term.length >= 2).map((term) => ({
+    term,
+    variants: []
+  }));
+  return normalizeCaptionEditorialContext({
+    schema: CAPTION_EDITORIAL_CONTEXT_SCHEMA,
+    glossary: [
+      ...explicit.glossary,
+      ...projectTerms,
+      ...trustedGlossaryTerms(project2)
+    ],
+    speakers,
+    style: {
+      terminalPeriod: "omit",
+      placement: "bottom",
+      maxWidthUnits: 20,
+      examples: [
+        ...explicit.style.examples,
+        ...trustedStyleExamples(project2)
+      ]
+    }
+  });
+}
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map(
+      (key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`
+    ).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+function captionEditorialContextFingerprint(editorialContext) {
+  const bytes2 = new TextEncoder().encode(stableStringify(
+    normalizeCaptionEditorialContext(editorialContext)
+  ));
+  let first = 2166136261;
+  let second = 2654435769;
+  for (const byte of bytes2) {
+    first = Math.imul(first ^ byte, 16777619) >>> 0;
+    second = Math.imul(second ^ byte, 2246822507) >>> 0;
+  }
+  return `ctx-v1-${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
+}
+
 // src/caption-agent/caption-quality-harness.js
 var DEFAULT_SPEAKER_PALETTE = Object.freeze([
   "#FFFFFF",
@@ -33798,6 +34261,7 @@ var KR_VTUBER_CLEAN_PROFILE = Object.freeze({
   speakerPalette: DEFAULT_SPEAKER_PALETTE
 });
 var CAPTION_QUALITY_PROFILE_ID = KR_VTUBER_CLEAN_PROFILE.id;
+var CAPTION_HARNESS_FINGERPRINT = "kr-vtuber-clean-v1:segment-word-v2:context-v1:quality-gate-v1";
 
 // src/editor/caption-agent.js
 var CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v1";
@@ -34039,24 +34503,36 @@ function captionAgentRunEstimate(clips = []) {
     maximumSolarRequests: enabled.length
   };
 }
+function captionAgentEditorialContextFingerprint(project2) {
+  return captionEditorialContextFingerprint(
+    buildProjectCaptionEditorialContext(project2, {
+      includeUnreviewedSpeakers: false
+    })
+  );
+}
 function captionCheckpointKey({
   clipId,
   sourceStartMs,
   sourceEndMs,
   model,
-  qualityProfile
+  qualityProfile,
+  harnessFingerprint,
+  editorialContextFingerprint
 }) {
   return [
     String(clipId || ""),
     Math.round(finiteNumber2(sourceStartMs, -1)),
     Math.round(finiteNumber2(sourceEndMs, -1)),
     String(model || ""),
-    String(qualityProfile || "legacy-unharnessed-v0")
+    String(qualityProfile || "legacy-unharnessed-v0"),
+    String(harnessFingerprint || "legacy-harness-fingerprint-v0"),
+    String(editorialContextFingerprint || "legacy-context-v0")
   ].join("\0");
 }
 function createCaptionAgentCheckpoint(clip, model, {
   requestId = "",
-  completedAt = (/* @__PURE__ */ new Date()).toISOString()
+  completedAt = (/* @__PURE__ */ new Date()).toISOString(),
+  editorialContextFingerprint = "legacy-context-v0"
 } = {}) {
   if (!ALLOWED_SOLAR_MODELS.has(model)) {
     throw new Error("\uC790\uB9C9 \uC7AC\uAC1C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uC758 Solar \uBAA8\uB378\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
@@ -34068,6 +34544,10 @@ function createCaptionAgentCheckpoint(clip, model, {
     sourceEndMs: Math.round(finiteNumber2(clip?.sourceEndMs, -1)),
     model: normalizedModel,
     qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+    harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+    editorialContextFingerprint: String(
+      editorialContextFingerprint || "legacy-context-v0"
+    ).trim().slice(0, 128),
     requestId: String(requestId || "").trim().slice(0, 128),
     completedAt: String(completedAt || "").trim().slice(0, 64)
   };
@@ -34121,7 +34601,10 @@ function sameCaptionMediaIdentity(left, right) {
     (field) => String(left[field] ?? "") === String(right[field] ?? "")
   );
 }
-function captionAgentResumePlan(clips, checkpoints, model, { resume = false } = {}) {
+function captionAgentResumePlan(clips, checkpoints, model, {
+  resume = false,
+  editorialContextFingerprint = "legacy-context-v0"
+} = {}) {
   const enabled = (Array.isArray(clips) ? clips : []).filter(
     (clip) => clip?.enabled !== false
   );
@@ -34141,7 +34624,9 @@ function captionAgentResumePlan(clips, checkpoints, model, { resume = false } = 
       sourceStartMs: clip.sourceStartMs,
       sourceEndMs: clip.sourceEndMs,
       model,
-      qualityProfile: CAPTION_QUALITY_PROFILE_ID
+      qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+      harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+      editorialContextFingerprint
     }));
     if (completed) {
       skippedClipIds.push(String(clip.id));
@@ -34271,6 +34756,7 @@ function createCaptionAgentRequest({
       preferredPlacement: sample.preferredPlacement
     };
   });
+  const editorialContext = buildProjectCaptionEditorialContext(project2);
   return {
     schema: CAPTION_AGENT_REQUEST_SCHEMA,
     requestId: globalThis.crypto.randomUUID(),
@@ -34286,6 +34772,7 @@ function createCaptionAgentRequest({
       projectName: String(project2?.name || ""),
       streamerName: String(project2?.source?.streamerName || "")
     },
+    editorialContext,
     policy: {
       audience: "korean-vtuber-kirinuki",
       includeAllRecognizableSpeech: true,
@@ -34317,10 +34804,14 @@ function normalizedColor(value) {
   return /^#[0-9a-f]{6}$/iu.test(color) ? color.toLowerCase() : void 0;
 }
 function normalizedRemoteMeta(raw, placement) {
+  const rawQuality = raw?.quality;
+  const qualityCodes = Array.isArray(rawQuality?.codes) ? [...new Set(rawQuality.codes.map((code) => String(code || "").trim().slice(0, 128)).filter(Boolean))].slice(0, 32) : [];
+  const qualityStatus = rawQuality?.status === "review-required" ? "review-required" : "accepted";
   return {
     speakerId: String(raw?.speakerId ?? raw?.speaker_id ?? "unknown").replace(/\s+/gu, " ").trim().slice(0, 80) || "unknown",
-    reviewRequired: Boolean(raw?.reviewRequired ?? raw?.review_required),
-    placement
+    reviewRequired: Boolean(raw?.reviewRequired ?? raw?.review_required) || qualityStatus === "review-required",
+    placement,
+    ...isPlainObject2(rawQuality) ? { qualityStatus, qualityCodes } : {}
   };
 }
 function normalizeCaptionAgentCues(cues, clipDurationMs2) {
@@ -34480,7 +34971,7 @@ function createDeadlineSignal(parentSignal, timeoutMs) {
     }
   };
 }
-function isPlainObject(value) {
+function isPlainObject2(value) {
   return Boolean(
     value && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
   );
@@ -34501,8 +34992,52 @@ function assertExactResponseFields(value, allowedFields, label) {
     );
   }
 }
+function validateRemoteCueQuality(quality, index) {
+  if (!isPlainObject2(quality) || !["accepted", "review-required"].includes(quality.status) || !Array.isArray(quality.codes) || quality.codes.length > 32 || quality.codes.some((code) => typeof code !== "string" || !code.trim() || code.length > 128)) {
+    throw new Error(`${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uD488\uC9C8 \uAC80\uC218 \uC815\uBCF4\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+  }
+  assertExactResponseFields(
+    quality,
+    ["status", "codes"],
+    `${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uD488\uC9C8 \uAC80\uC218 \uC815\uBCF4`
+  );
+}
+function validateRemoteQualityReport(report, cues) {
+  if (!isPlainObject2(report) || report.profileId !== CAPTION_QUALITY_PROFILE_ID || report.harnessFingerprint !== CAPTION_HARNESS_FINGERPRINT || typeof report.valid !== "boolean" || !["accepted", "review-required"].includes(report.disposition) || !Array.isArray(report.violations) || report.violations.length > MAX_REMOTE_WARNINGS || !Array.isArray(report.cueReviews) || report.cueReviews.length !== cues.length || !isPlainObject2(report.metrics)) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 \uD488\uC9C8 \uBCF4\uACE0\uC11C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  assertExactResponseFields(report, [
+    "profileId",
+    "harnessFingerprint",
+    "valid",
+    "disposition",
+    "violations",
+    "cueReviews",
+    "metrics"
+  ], "\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uD488\uC9C8 \uBCF4\uACE0\uC11C");
+  for (const [index, violation] of report.violations.entries()) {
+    if (!isPlainObject2(violation) || typeof violation.code !== "string" || !violation.code.trim() || violation.code.length > 128 || !Number.isInteger(violation.cueIndex) || violation.cueIndex < 0 || !["error", "warning"].includes(violation.severity)) {
+      throw new Error(`${index + 1}\uBC88\uC9F8 \uD488\uC9C8 \uC704\uBC18 \uC815\uBCF4\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+    }
+    assertExactResponseFields(
+      violation,
+      ["code", "cueIndex", "severity"],
+      `${index + 1}\uBC88\uC9F8 \uD488\uC9C8 \uC704\uBC18 \uC815\uBCF4`
+    );
+  }
+  for (const [index, review] of report.cueReviews.entries()) {
+    if (!isPlainObject2(review) || review.cueIndex !== index || !["accepted", "review-required"].includes(review.status) || !Array.isArray(review.codes) || review.codes.length > 32 || review.codes.some((code) => typeof code !== "string" || !code.trim() || code.length > 128) || !isPlainObject2(review.metrics)) {
+      throw new Error(`${index + 1}\uBC88\uC9F8 cue \uD488\uC9C8 \uBCF4\uACE0\uC11C\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+    }
+    assertExactResponseFields(
+      review,
+      ["cueIndex", "status", "codes", "metrics"],
+      `${index + 1}\uBC88\uC9F8 cue \uD488\uC9C8 \uBCF4\uACE0\uC11C`
+    );
+  }
+}
 function validateCompletedCaptionAgentResponse(payload, request) {
-  if (!isPlainObject(payload)) {
+  if (!isPlainObject2(payload)) {
     throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC644\uB8CC \uC751\uB2F5\uC774 JSON \uAC1D\uCCB4\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
   }
   assertExactResponseFields(payload, [
@@ -34517,7 +35052,11 @@ function validateCompletedCaptionAgentResponse(payload, request) {
     "provider",
     "status",
     "cues",
-    "warnings"
+    "warnings",
+    "qualityProfile",
+    "harnessFingerprint",
+    "editorialContextFingerprint",
+    "qualityReport"
   ], "\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC644\uB8CC \uC751\uB2F5");
   if (payload.schema !== CAPTION_AGENT_RESPONSE_SCHEMA) {
     throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC2A4\uD0A4\uB9C8 \uBC84\uC804\uC774 \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
@@ -34556,7 +35095,7 @@ function validateCompletedCaptionAgentResponse(payload, request) {
   }
   const clipDurationMs2 = Number(request?.clip?.durationMs);
   for (const [index, cue] of payload.cues.entries()) {
-    if (!isPlainObject(cue) || !Number.isInteger(cue.startMs) || !Number.isInteger(cue.endMs) || cue.startMs < 0 || cue.endMs <= cue.startMs || cue.endMs > clipDurationMs2 || cue.endMs - cue.startMs > MAX_REMOTE_CUE_DURATION_MS || typeof cue.text !== "string" || !cue.text.trim() || cue.text.length > 300 || typeof cue.speakerId !== "string" || !cue.speakerId.trim() || cue.speakerId.length > 80 || typeof cue.reviewRequired !== "boolean" || !["top", "center", "bottom"].includes(cue.placement)) {
+    if (!isPlainObject2(cue) || !Number.isInteger(cue.startMs) || !Number.isInteger(cue.endMs) || cue.startMs < 0 || cue.endMs <= cue.startMs || cue.endMs > clipDurationMs2 || cue.endMs - cue.startMs > MAX_REMOTE_CUE_DURATION_MS || typeof cue.text !== "string" || !cue.text.trim() || cue.text.length > 300 || typeof cue.speakerId !== "string" || !cue.speakerId.trim() || cue.speakerId.length > 80 || typeof cue.reviewRequired !== "boolean" || !["top", "center", "bottom"].includes(cue.placement) || cue.quality != null && !isPlainObject2(cue.quality)) {
       throw new Error(`${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 cue\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
     }
     assertExactResponseFields(cue, [
@@ -34565,14 +35104,18 @@ function validateCompletedCaptionAgentResponse(payload, request) {
       "text",
       "speakerId",
       "reviewRequired",
-      "placement"
+      "placement",
+      "quality"
     ], `${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 cue`);
+    if (cue.quality != null) {
+      validateRemoteCueQuality(cue.quality, index);
+    }
   }
   if (!Array.isArray(payload.warnings) || payload.warnings.length > MAX_REMOTE_WARNINGS) {
     throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 warnings \uD544\uB4DC\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
   }
   for (const [index, warning] of payload.warnings.entries()) {
-    if (!isPlainObject(warning) || typeof warning.code !== "string" || !warning.code.trim() || warning.code.length > 128 || !Number.isInteger(warning.cueIndex) || warning.cueIndex < 0) {
+    if (!isPlainObject2(warning) || typeof warning.code !== "string" || !warning.code.trim() || warning.code.length > 128 || !Number.isInteger(warning.cueIndex) || warning.cueIndex < 0) {
       throw new Error(`${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 warning\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
     }
     assertExactResponseFields(
@@ -34581,6 +35124,11 @@ function validateCompletedCaptionAgentResponse(payload, request) {
       `${index + 1}\uBC88\uC9F8 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 warning`
     );
   }
+  const expectedEditorialContextFingerprint = captionEditorialContextFingerprint(request?.editorialContext);
+  if (payload.qualityProfile !== CAPTION_QUALITY_PROFILE_ID || payload.harnessFingerprint !== CAPTION_HARNESS_FINGERPRINT || payload.editorialContextFingerprint !== expectedEditorialContextFingerprint) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uD488\uC9C8 \uD558\uB124\uC2A4 \uC9C0\uBB38\uC774 \uD604\uC7AC \uC694\uCCAD\uACFC \uB2E4\uB985\uB2C8\uB2E4.");
+  }
+  validateRemoteQualityReport(payload.qualityReport, payload.cues);
   return payload;
 }
 function assertSafeStatusUrl(statusUrl, endpoint) {
@@ -34615,7 +35163,7 @@ async function pairCaptionAgent({
       redirect: "error"
     });
     const payload = await parseResponse(response);
-    if (!isPlainObject(payload)) {
+    if (!isPlainObject2(payload)) {
       throw new Error("\uB85C\uCEEC companion \uC5F0\uACB0 \uC751\uB2F5\uC774 JSON \uAC1D\uCCB4\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
     }
     assertExactResponseFields(payload, [
@@ -35038,7 +35586,9 @@ var mediaHandle = null;
 var mediaUrl = null;
 var sourceBindingConnected = false;
 var pixelsPerSecond = 70;
-var saveTimer = null;
+var saveDispatchPending = false;
+var pendingSaveSnapshot = null;
+var projectSaveSequence = 0;
 var imageAssetPruneTimer = null;
 var toastTimer = null;
 var activeClipId = null;
@@ -35165,24 +35715,49 @@ function showToast(message, type = "info", timeout = 3600) {
     }, timeout);
   }
 }
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    void saveProject(project).then(() => scheduleImageAssetBlobPrune()).catch((error) => {
-      showToast(`\uD504\uB85C\uC81D\uD2B8 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
-    });
-  }, 180);
-}
-function flushSave() {
-  clearTimeout(saveTimer);
-  saveTimer = null;
-  if (!project) {
-    return Promise.resolve();
-  }
-  return saveProject(project).then((savedProject) => {
+function startProjectSnapshotSave(snapshot) {
+  const sequence = ++projectSaveSequence;
+  const operation = saveProject(snapshot).then((savedProject) => {
     scheduleImageAssetBlobPrune();
     return savedProject;
   });
+  void operation.catch((error) => {
+    if (sequence === projectSaveSequence) {
+      showToast(`\uD504\uB85C\uC81D\uD2B8 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
+    }
+  });
+  return operation;
+}
+function discardPendingProjectSave() {
+  pendingSaveSnapshot = null;
+  saveDispatchPending = false;
+}
+function dispatchPendingProjectSave() {
+  saveDispatchPending = false;
+  const snapshot = pendingSaveSnapshot;
+  pendingSaveSnapshot = null;
+  if (snapshot) {
+    startProjectSnapshotSave(snapshot);
+  }
+}
+function scheduleSave() {
+  if (!project) {
+    return;
+  }
+  pendingSaveSnapshot = cloneProject(project);
+  if (saveDispatchPending) {
+    return;
+  }
+  saveDispatchPending = true;
+  queueMicrotask(dispatchPendingProjectSave);
+}
+function flushSave() {
+  if (!project) {
+    return Promise.resolve();
+  }
+  const snapshot = cloneProject(project);
+  discardPendingProjectSave();
+  return startProjectSnapshotSave(snapshot);
 }
 var localDraftDateFormatter = new Intl.DateTimeFormat("ko-KR", {
   year: "numeric",
@@ -35298,8 +35873,7 @@ async function saveCurrentLocalDraft(reason, {
   if (reason !== "auto") {
     fieldEditSession = null;
   }
-  clearTimeout(saveTimer);
-  saveTimer = null;
+  discardPendingProjectSave();
   const snapshot = cloneProject(project);
   const draft = await saveLocalDraft(snapshot, {
     reason,
@@ -35426,8 +36000,7 @@ async function restoreSelectedLocalDraft() {
     closeTimelineContextMenu();
     lockProjectMutations();
     try {
-      clearTimeout(saveTimer);
-      saveTimer = null;
+      discardPendingProjectSave();
       await restoreLocalDraft(currentProject, draft, {
         now: Date.now(),
         id: crypto.randomUUID()
@@ -38303,6 +38876,7 @@ async function generateCaptions() {
     return;
   }
   const selectedModel = elements.caption_model.value;
+  const trustedContextFingerprint = captionAgentEditorialContextFingerprint(project);
   const resumeEligible = ["running", "error", "canceled"].includes(
     project.ai?.status
   );
@@ -38310,7 +38884,10 @@ async function generateCaptions() {
     allEnabledClips,
     project.ai?.captionCheckpoints,
     selectedModel,
-    { resume: resumeEligible }
+    {
+      resume: resumeEligible,
+      editorialContextFingerprint: trustedContextFingerprint
+    }
   );
   const enabledClips = resumePlan.clips;
   if (enabledClips.length === 0 && resumePlan.skippedClipIds.length > 0) {
@@ -38510,7 +39087,8 @@ async function generateCaptions() {
           captionCheckpoints: upsertCaptionAgentCheckpoint(
             project.ai?.captionCheckpoints,
             createCaptionAgentCheckpoint(clip, model, {
-              requestId: result.requestId
+              requestId: result.requestId,
+              editorialContextFingerprint: trustedContextFingerprint
             })
           ),
           status: "running",
@@ -39888,13 +40466,28 @@ function bindActions() {
 async function loadSeed() {
   const params = new URLSearchParams(location.search);
   const requestedProjectId = params.get("project");
+  const resumeSavedSession = params.get("session") === "resume";
+  const openRecoveryDrafts = resumeSavedSession && params.get("recovery") === "drafts";
+  if (resumeSavedSession) {
+    if (!requestedProjectId) {
+      throw new Error("\uB2E4\uC2DC \uC5F4 \uD3B8\uC9D1 \uD504\uB85C\uC81D\uD2B8 ID\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+    }
+    return {
+      projectId: requestedProjectId,
+      captureState: null,
+      resumeSavedSession: true,
+      openRecoveryDrafts
+    };
+  }
   if (requestedProjectId) {
     const key = `${EDITOR_SEED_PREFIX}${requestedProjectId}`;
     const stored2 = await chrome.storage.local.get(key);
     if (stored2[key]?.captureState) {
       return {
         projectId: requestedProjectId,
-        captureState: stored2[key].captureState
+        captureState: stored2[key].captureState,
+        resumeSavedSession: false,
+        openRecoveryDrafts: false
       };
     }
   }
@@ -39902,7 +40495,9 @@ async function loadSeed() {
   const captureState = stored[STORAGE_KEY] || {};
   return {
     projectId: requestedProjectId || captureProjectId(captureState),
-    captureState
+    captureState,
+    resumeSavedSession: false,
+    openRecoveryDrafts: false
   };
 }
 async function restoreMedia() {
@@ -39956,16 +40551,27 @@ async function initialize() {
       );
     });
   }
-  const { projectId, captureState } = await loadSeed();
+  const {
+    projectId,
+    captureState,
+    resumeSavedSession,
+    openRecoveryDrafts
+  } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;
   if (storedProject) {
-    try {
-      project = mergeCaptureIntoEditorProject(storedProject, captureState);
-    } catch (error) {
+    if (resumeSavedSession) {
       project = storedProject;
-      seedMergeError = error;
+    } else {
+      try {
+        project = mergeCaptureIntoEditorProject(storedProject, captureState);
+      } catch (error) {
+        project = storedProject;
+        seedMergeError = error;
+      }
     }
+  } else if (resumeSavedSession) {
+    throw new Error("\uC774 \uAE30\uAE30\uC5D0\uC11C \uB2E4\uC2DC \uC5F4 \uD3B8\uC9D1 \uD504\uB85C\uC81D\uD2B8\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
   } else {
     project = createEditorProjectFromCapture(captureState, { id: projectId });
   }
@@ -40016,6 +40622,9 @@ async function initialize() {
     elements.local_draft_status.textContent = "\uC784\uC2DC\uC800\uC7A5 \uBAA9\uB85D \uD655\uC778 \uC2E4\uD328";
   }
   startLocalDraftAutosave();
+  if (openRecoveryDrafts) {
+    await openLocalDraftDialog();
+  }
 }
 function applyCaptureSeedUpdate(captureState) {
   try {
@@ -40191,6 +40800,8 @@ chrome.runtime.onMessage.addListener((message) => {
     } else {
       applyCaptureSeedUpdate(message.captureState);
     }
+  } else if (message?.type === "KIRINUKI_OPEN_RECOVERY_DRAFTS" && message.projectId === project?.id) {
+    void openLocalDraftDialog();
   }
 });
 window.addEventListener("beforeunload", () => {

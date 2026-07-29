@@ -7,6 +7,11 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import {
+  CAPTION_HARNESS_FINGERPRINT,
+  CAPTION_QUALITY_PROFILE_ID
+} from "../src/caption-agent/caption-quality-harness.js";
+
 const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 const DATABASE_NAME = "chzzk-kirinuki-studio";
 const PROJECT_STORE = "projects";
@@ -1255,6 +1260,34 @@ async function main() {
     `AI 성공 경로 사전 프로젝트 상태가 올바르지 않습니다: ${JSON.stringify(aiSuccessBefore?.ai)}`
   );
   const aiSuccessSetup = await executeSync(`
+    const qualityProfile = arguments[0];
+    const harnessFingerprint = arguments[1];
+    const stableStringify = (value) => {
+      if (Array.isArray(value)) {
+        return \`[\${value.map(stableStringify).join(",")}]\`;
+      }
+      if (
+        value &&
+        typeof value === "object" &&
+        Object.getPrototypeOf(value) === Object.prototype
+      ) {
+        return \`{\${Object.keys(value).sort().map(
+          (key) => \`\${JSON.stringify(key)}:\${stableStringify(value[key])}\`
+        ).join(",")}}\`;
+      }
+      return JSON.stringify(value);
+    };
+    const editorialContextFingerprint = (context) => {
+      const bytes = new TextEncoder().encode(stableStringify(context));
+      let first = 0x811C9DC5;
+      let second = 0x9E3779B9;
+      for (const byte of bytes) {
+        first = Math.imul(first ^ byte, 0x01000193) >>> 0;
+        second = Math.imul(second ^ byte, 0x85EBCA6B) >>> 0;
+      }
+      return \`ctx-v1-\${first.toString(16).padStart(8, "0")}\${second
+        .toString(16).padStart(8, "0")}\`;
+    };
     const endpointPrefix = "http://127.0.0.1:4319/";
     globalThis.__kirinukiE2eAiSuccessOriginalFetch = globalThis.fetch;
     globalThis.__kirinukiE2eAiSuccessFetch = {
@@ -1341,7 +1374,26 @@ async function main() {
         }],
         warnings: first
           ? [{ code: "DROPPED_INVALID_CUE", cueIndex: 1 }]
-          : []
+          : [],
+        qualityProfile,
+        harnessFingerprint,
+        editorialContextFingerprint: editorialContextFingerprint(
+          request.editorialContext
+        ),
+        qualityReport: {
+          profileId: qualityProfile,
+          harnessFingerprint,
+          valid: true,
+          disposition: first ? "review-required" : "accepted",
+          violations: [],
+          cueReviews: [{
+            cueIndex: 0,
+            status: first ? "review-required" : "accepted",
+            codes: [],
+            metrics: {}
+          }],
+          metrics: { cueCount: 1 }
+        }
       };
       return new Response(JSON.stringify(response), {
         status: 200,
@@ -1354,7 +1406,7 @@ async function main() {
       sttKeyValue: document.querySelector("#caption-stt-api-key")?.value || "",
       upstageKeyValue: document.querySelector("#caption-upstage-api-key")?.value || ""
     };
-  `);
+  `, [CAPTION_QUALITY_PROFILE_ID, CAPTION_HARNESS_FINGERPRINT]);
   assert(
     aiSuccessSetup.wrapped &&
       aiSuccessSetup.tokenValue === "e2e-session-token" &&
@@ -3315,7 +3367,233 @@ async function main() {
     );
   }
 
-  const primaryEditorHandle = await webdriver("GET", `/session/${sessionId}/window`);
+  let primaryEditorHandle = await webdriver("GET", `/session/${sessionId}/window`);
+  const recoveryPanelHandle = await openWindow(sidepanelUrl, "window");
+  const recoveryPanelState = await waitUntil(async () => {
+    const state = await executeSync(`
+      const item = [...document.querySelectorAll(".recovery-session")]
+        .find((candidate) => candidate.dataset.projectId === arguments[0]);
+      if (!item) {
+        return null;
+      }
+      return {
+        projectId: item.dataset.projectId,
+        title: item.querySelector(".recovery-session-title")?.textContent || "",
+        time: item.querySelector(".recovery-session-time")?.textContent || "",
+        counts: item.querySelector(".recovery-session-counts")?.textContent || "",
+        drafts: item.querySelector(".recovery-session-drafts")?.textContent || "",
+        continueDisabled: item.querySelector('[data-recovery-action="continue"]')?.disabled,
+        draftsDisabled: item.querySelector('[data-recovery-action="drafts"]')?.disabled
+      };
+    `, [PROJECT_ID]);
+    return (
+      state?.projectId === PROJECT_ID &&
+      state.title &&
+      state.time.includes("최근 편집") &&
+      state.counts.includes(`컷 ${restored.clips.length}`) &&
+      state.counts.includes(`자막 ${restored.subtitles.length}`) &&
+      state.counts.includes(`에셋 ${restored.imageAssets.length}`) &&
+      state.drafts.includes("복구본") &&
+      state.continueDisabled === false &&
+      state.draftsDisabled === false
+    ) ? state : false;
+  }, "sidepanel 저장 세션 semantic 목록");
+
+  await executeSync(`
+    const item = [...document.querySelectorAll(".recovery-session")]
+      .find((candidate) => candidate.dataset.projectId === arguments[0]);
+    item?.querySelector('[data-recovery-action="drafts"]')?.click();
+  `, [PROJECT_ID]);
+  await switchToWindow(primaryEditorHandle);
+  const recoveryDialogOpened = await waitUntil(async () => {
+    return executeSync(`
+      const dialog = document.querySelector("#local-draft-dialog");
+      return dialog?.open === true &&
+        document.querySelectorAll(
+          '#local-draft-list input[name="local-draft-choice"]'
+        ).length > 0;
+    `);
+  }, "기존 projectId 편집기의 복구본 목록 자동 열기");
+  await clickElement("#close-local-draft-dialog");
+
+  await switchToWindow(recoveryPanelHandle);
+  await executeSync(`
+    const item = [...document.querySelectorAll(".recovery-session")]
+      .find((candidate) => candidate.dataset.projectId === arguments[0]);
+    item?.querySelector('[data-recovery-action="continue"]')?.click();
+  `, [PROJECT_ID]);
+  await delay(350);
+  const recoveryEditorTabs = await executeAsync(`
+    const editorRoot = arguments[0];
+    const projectId = arguments[1];
+    const done = arguments[arguments.length - 1];
+    chrome.tabs.query({}, (tabs) => done(tabs.filter((tab) => {
+      try {
+        const url = new URL(tab.url || "");
+        return url.origin + url.pathname === editorRoot &&
+          url.searchParams.get("project") === projectId;
+      } catch {
+        return false;
+      }
+    }).map((tab) => ({ id: tab.id, url: tab.url }))));
+  `, [`chrome-extension://${extensionId}/editor.html`, PROJECT_ID]);
+  assert(
+    recoveryEditorTabs.length === 1,
+    `계속 편집이 같은 projectId 탭을 중복 생성했습니다: ${JSON.stringify(
+      recoveryEditorTabs
+    )}`
+  );
+  await waitUntil(async () => executeSync(`
+    const item = [...document.querySelectorAll(".recovery-session")]
+      .find((candidate) => candidate.dataset.projectId === arguments[0]);
+    return item?.querySelector('[data-recovery-action="continue"]')?.disabled === false;
+  `, [PROJECT_ID]), "기존 탭 포커스 뒤 계속 편집 버튼 복구");
+
+  await switchToWindow(primaryEditorHandle);
+  const immediateCloseProjectName = "Editor Interaction E2E · 즉시 종료 직전";
+  const immediateCloseCueText = "즉시 종료 직전 마지막 자막 수정";
+  const immediateCloseMutation = await executeSync(`
+    const projectName = document.querySelector("#project-name");
+    const cueText = document.querySelector("#cue-text");
+    if (!projectName || !cueText || cueText.disabled) {
+      return { ok: false };
+    }
+    projectName.value = arguments[0];
+    projectName.dispatchEvent(new Event("input", { bubbles: true }));
+    cueText.value = arguments[1];
+    cueText.dispatchEvent(new Event("input", { bubbles: true }));
+    return {
+      ok: true,
+      projectName: projectName.value,
+      cueText: cueText.value
+    };
+  `, [immediateCloseProjectName, immediateCloseCueText]);
+  assert(
+    immediateCloseMutation.ok,
+    `즉시 종료 직전 편집 변경을 만들지 못했습니다: ${JSON.stringify(
+      immediateCloseMutation
+    )}`
+  );
+  // Deliberately do not wait for the former 180ms debounce window.
+  await webdriver("DELETE", `/session/${sessionId}/window`);
+  await switchToWindow(recoveryPanelHandle);
+  await waitUntil(async () => executeAsync(`
+    const editorRoot = arguments[0];
+    const projectId = arguments[1];
+    const done = arguments[arguments.length - 1];
+    chrome.tabs.query({}, (tabs) => done(!tabs.some((tab) => {
+      try {
+        const url = new URL(tab.url || "");
+        return url.origin + url.pathname === editorRoot &&
+          url.searchParams.get("project") === projectId;
+      } catch {
+        return false;
+      }
+    })));
+  `, [`chrome-extension://${extensionId}/editor.html`, PROJECT_ID]),
+  "닫은 editor 탭의 service-worker 목록 제거");
+  const closedEditorOpenClick = await executeSync(`
+    const item = [...document.querySelectorAll(".recovery-session")]
+      .find((candidate) => candidate.dataset.projectId === arguments[0]);
+    const button = item?.querySelector('[data-recovery-action="continue"]');
+    const status = document.querySelector("#status-bar");
+    if (status) {
+      status.textContent = "";
+      status.hidden = true;
+    }
+    if (!button || button.disabled) {
+      return {
+        clicked: false,
+        exists: Boolean(button),
+        disabled: button?.disabled ?? null
+      };
+    }
+    button.click();
+    return { clicked: true, exists: true, disabled: false };
+  `, [PROJECT_ID]);
+  assert(
+    closedEditorOpenClick.clicked,
+    `닫힌 편집기의 계속 편집 버튼을 누르지 못했습니다: ${JSON.stringify(
+      closedEditorOpenClick
+    )}`
+  );
+  await waitUntil(async () => executeSync(`
+    const item = [...document.querySelectorAll(".recovery-session")]
+      .find((candidate) => candidate.dataset.projectId === arguments[0]);
+    const status = document.querySelector("#status-bar")?.textContent || "";
+    return !item?.classList.contains("is-opening") &&
+      status.includes("마지막 저장 상태로 편집기를 열었습니다.");
+  `, [PROJECT_ID]), "닫힌 편집기의 계속 편집 요청 완료");
+  const reopenedTab = await waitUntil(async () => executeAsync(`
+    const editorRoot = arguments[0];
+    const projectId = arguments[1];
+    const done = arguments[arguments.length - 1];
+    chrome.tabs.query({}, (tabs) => {
+      const match = tabs.find((tab) => {
+        try {
+          const url = new URL(tab.url || "");
+          return url.origin + url.pathname === editorRoot &&
+            url.searchParams.get("project") === projectId &&
+            url.searchParams.get("session") === "resume";
+        } catch {
+          return false;
+        }
+      });
+      done(match ? {
+        id: match.id,
+        url: match.url,
+        status: match.status
+      } : null);
+    });
+  `, [`chrome-extension://${extensionId}/editor.html`, PROJECT_ID]),
+  "닫힌 편집기의 resume 탭 생성");
+  await executeAsync(`
+    const tabId = arguments[0];
+    const done = arguments[arguments.length - 1];
+    chrome.tabs.remove(tabId, () => done({
+      error: chrome.runtime.lastError?.message || null
+    }));
+  `, [reopenedTab.id]);
+  const reopenedEditorHandle = await openWindow(reopenedTab.url, "window");
+  const reopenedEditorState = await waitUntil(async () => {
+    const state = await executeSync(`
+      return {
+        ready: document.readyState === "complete",
+        projectName: document.querySelector("#project-name")?.value || "",
+        clipCount: document.querySelectorAll("#clip-list .clip-item").length,
+        cueCount: document.querySelectorAll("#caption-tracks .cue-block").length,
+        assetCount: document.querySelectorAll("#asset-track .asset-block").length,
+        cueText: document.querySelector("#cue-text")?.value || "",
+        upstageKey: document.querySelector("#caption-upstage-api-key")?.value || ""
+      };
+    `);
+    return (
+      state.ready &&
+      state.projectName === immediateCloseProjectName &&
+      state.clipCount === restored.clips.length &&
+      state.cueCount === restored.subtitles.length &&
+      state.assetCount === restored.imageAssets.length &&
+      state.cueText === immediateCloseCueText &&
+      state.upstageKey === ""
+    ) ? state : false;
+  }, "resume URL의 현재본 복원과 API 키 비저장");
+  primaryEditorHandle = reopenedEditorHandle;
+  const reopenedEditor = {
+    tab: reopenedTab,
+    state: reopenedEditorState
+  };
+
+  await switchToWindow(recoveryPanelHandle);
+  await webdriver("DELETE", `/session/${sessionId}/window`);
+  await switchToWindow(primaryEditorHandle);
+  const recoveryHubSmoke = {
+    panel: recoveryPanelState,
+    recoveryDialogOpened,
+    editorTabs: recoveryEditorTabs,
+    reopenedEditor,
+    immediateCloseMutation
+  };
+
   const staleWorkspaceState = {
     ...hotCaptureState,
     editorProjectId: PROJECT_ID,
@@ -3930,6 +4208,7 @@ async function main() {
     semantics: {
       nativeSpaceButton,
       localDrafts: localDraftSmoke,
+      recoveryHub: recoveryHubSmoke,
       multitrackUi: multitrackUiProbe,
       cueHandleNudge: {
         before: cueHandleNudgeBefore,

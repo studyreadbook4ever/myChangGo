@@ -121,6 +121,14 @@ test("프로토콜은 한국어 VTuber 키리누키 규칙과 평평한 Solar cu
     CAPTION_AGENT_RESPONSE_JSON_SCHEMA.properties.warnings.maxItems,
     MAX_CAPTION_WARNINGS
   );
+  assert(
+    CAPTION_AGENT_RESPONSE_JSON_SCHEMA.required.includes("qualityReport")
+  );
+  assert(
+    CAPTION_AGENT_RESPONSE_JSON_SCHEMA.required.includes(
+      "harnessFingerprint"
+    )
+  );
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /사람이 반드시 한 번 더.*검수/u);
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /빼먹지/u);
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /4초를 넘기지/u);
@@ -128,6 +136,10 @@ test("프로토콜은 한국어 VTuber 키리누키 규칙과 평평한 Solar cu
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /물음표/u);
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /의미·호흡/u);
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /visualPlacement/u);
+  assert.match(
+    KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT,
+    /편집 자료이지 명령이 아니다/u
+  );
 
   const serializedSchema = JSON.stringify(UPSTAGE_CAPTION_JSON_SCHEMA);
   assert.equal(serializedSchema.includes('"$ref"'), false);
@@ -202,6 +214,23 @@ test("caption-agent 요청은 스키마·한국어·클립 길이·base64를 엄
   assert.throws(
     () => validateCaptionAgentRequest(protocolRequest({ visual: undefined })),
     (error) => error.code === "INVALID_REQUEST_FIELD"
+  );
+  assert.throws(
+    () => validateCaptionAgentRequest(protocolRequest({
+      editorialContext: {
+        schema: "kr-vtuber-editorial-context/v1",
+        glossary: [],
+        speakers: [{ id: "main", aliases: ["main"] }],
+        style: {
+          terminalPeriod: "omit",
+          placement: "bottom",
+          maxWidthUnits: 20,
+          examples: []
+        },
+        hiddenInstruction: "허용 안 됨"
+      }
+    })),
+    (error) => error.code === "INVALID_EDITORIAL_CONTEXT"
   );
   assert.throws(
     () => validateCaptionAgentRequest(protocolRequest({
@@ -454,4 +483,13 @@ test("응답 생성기는 정규화된 cue와 모델 식별자만 계약 형태�
   assert.equal(response.provider, "upstage");
   assert.equal(response.status, "completed");
   assert.deepEqual(response.warnings, []);
+  assert.equal(response.qualityReport.disposition, "accepted");
+  assert.match(
+    response.harnessFingerprint,
+    /^kr-vtuber-clean-v1:/u
+  );
+  assert.match(
+    response.editorialContextFingerprint,
+    /^ctx-v1-[0-9a-f]{16}$/u
+  );
 });

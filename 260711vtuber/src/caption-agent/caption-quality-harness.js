@@ -1,3 +1,8 @@
+import {
+  canonicalCaptionSpeakerId,
+  normalizeCaptionEditorialContext
+} from "./editorial-context.js";
+
 const DEFAULT_SPEAKER_PALETTE = Object.freeze([
   "#FFFFFF",
   "#00E6A3",
@@ -33,6 +38,8 @@ export const KR_VTUBER_CLEAN_PROFILE = Object.freeze({
 });
 
 export const CAPTION_QUALITY_PROFILE_ID = KR_VTUBER_CLEAN_PROFILE.id;
+export const CAPTION_HARNESS_FINGERPRINT =
+  "kr-vtuber-clean-v1:segment-word-v2:context-v1:quality-gate-v1";
 
 const WIDE_GRAPHEME_PATTERN =
   /[\p{Script=Hangul}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Extended_Pictographic}\uFF01-\uFF60\uFFE0-\uFFE6]/u;
@@ -93,11 +100,8 @@ function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
-function normalizeSpeaker(value) {
-  return String(value ?? "")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 80) || "unknown";
+function normalizeSpeaker(value, editorialContext) {
+  return canonicalCaptionSpeakerId(value, editorialContext);
 }
 
 export function normalizeCaptionDisplayText(value) {
@@ -197,67 +201,49 @@ function candidateTranscriptRange(candidate, clipDurationMs) {
   };
 }
 
-function transcriptCandidates(transcript) {
-  if (Array.isArray(transcript)) {
-    return transcript;
+function normalizeTranscriptCandidate(
+  candidate,
+  unitIndex,
+  duration,
+  collector,
+  editorialContext
+) {
+  const range = candidateTranscriptRange(candidate, duration);
+  const originalText = String(candidate?.text ?? candidate?.word ?? "");
+  const text = normalizeCaptionDisplayText(originalText);
+  if (!range || range.endMs <= range.startMs || !text) {
+    collector.add("HARNESS_DROPPED_INVALID_TRANSCRIPT_UNIT", unitIndex);
+    return null;
   }
-  if (Array.isArray(transcript?.words) && transcript.words.length > 0) {
-    return transcript.words;
+  if (range.wasClamped) {
+    collector.add("HARNESS_CLAMPED_TRANSCRIPT_UNIT", unitIndex);
   }
-  if (Array.isArray(transcript?.segments)) {
-    return transcript.segments;
+  if (text !== originalText.replace(/\s+/gu, " ").trim()) {
+    collector.add("HARNESS_NORMALIZED_TRANSCRIPT_TEXT", unitIndex);
   }
-  if (Array.isArray(transcript?.units)) {
-    return transcript.units;
-  }
-  return [];
+  return {
+    startMs: range.startMs,
+    endMs: range.endMs,
+    text,
+    speakerId: normalizeSpeaker(
+      candidate?.speakerId
+      ?? candidate?.speaker_id
+      ?? candidate?.speaker
+      ?? candidate?.speakerLabel
+      ?? candidate?.speaker_label,
+      editorialContext
+    )
+  };
 }
 
-export function canonicalizeTranscriptUnits(transcript, {
-  clipDurationMs
-} = {}) {
-  const duration = finiteInteger(clipDurationMs);
-  if (duration == null || duration < 1) {
-    throw new TypeError("clipDurationMs must be a positive integer");
-  }
-
-  const collector = warningCollector();
-  const units = [];
-  for (const [unitIndex, candidate] of transcriptCandidates(transcript).entries()) {
-    const range = candidateTranscriptRange(candidate, duration);
-    const originalText = String(candidate?.text ?? candidate?.word ?? "");
-    const text = normalizeCaptionDisplayText(originalText);
-    if (!range || range.endMs <= range.startMs || !text) {
-      collector.add("HARNESS_DROPPED_INVALID_TRANSCRIPT_UNIT", unitIndex);
-      continue;
-    }
-    if (range.wasClamped) {
-      collector.add("HARNESS_CLAMPED_TRANSCRIPT_UNIT", unitIndex);
-    }
-    if (text !== originalText.replace(/\s+/gu, " ").trim()) {
-      collector.add("HARNESS_NORMALIZED_TRANSCRIPT_TEXT", unitIndex);
-    }
-    units.push({
-      startMs: range.startMs,
-      endMs: range.endMs,
-      text,
-      speakerId: normalizeSpeaker(
-        candidate?.speakerId
-        ?? candidate?.speaker_id
-        ?? candidate?.speaker
-        ?? candidate?.speakerLabel
-        ?? candidate?.speaker_label
-      )
-    });
-  }
-
+function sortAndDeduplicateTranscriptUnits(units, collector) {
   units.sort((first, second) => (
     first.startMs - second.startMs
     || first.endMs - second.endMs
     || first.text.localeCompare(second.text, "ko")
     || first.speakerId.localeCompare(second.speakerId, "ko")
   ));
-  const deduplicated = units.filter((unit, index, all) => {
+  return units.filter((unit, index, all) => {
     const previous = all[index - 1];
     const duplicate = previous && (
       previous.startMs === unit.startMs
@@ -270,13 +256,108 @@ export function canonicalizeTranscriptUnits(transcript, {
     }
     return !duplicate;
   });
+}
+
+function transcriptAnchorCoverage(segmentUnits, wordUnits) {
+  const expected = graphemes(textSignature(
+    segmentUnits.map(({ text }) => text).join(" ")
+  ));
+  const anchored = graphemes(textSignature(
+    wordUnits.map(({ text }) => text).join(" ")
+  ));
+  if (expected.length === 0 || anchored.length === 0) {
+    return {
+      segmentTextCoverage: expected.length === 0 ? 1 : 0,
+      wordTextPrecision: anchored.length === 0 ? 1 : 0
+    };
+  }
+  const common = longestCommonSubsequenceLength(expected, anchored);
+  return {
+    segmentTextCoverage: common / expected.length,
+    wordTextPrecision: common / anchored.length
+  };
+}
+
+export function canonicalizeTranscriptUnits(transcript, {
+  clipDurationMs,
+  editorialContext
+} = {}) {
+  const duration = finiteInteger(clipDurationMs);
+  if (duration == null || duration < 1) {
+    throw new TypeError("clipDurationMs must be a positive integer");
+  }
+
+  const collector = warningCollector();
+  const context = normalizeCaptionEditorialContext(editorialContext);
+  const source = Array.isArray(transcript)
+    ? { units: transcript }
+    : transcript && typeof transcript === "object" ? transcript : {};
+  const rawSegments = Array.isArray(source.segments) && source.segments.length > 0
+    ? source.segments
+    : Array.isArray(source.units) ? source.units : [];
+  const rawWords = Array.isArray(source.wordUnits) && source.wordUnits.length > 0
+    ? source.wordUnits
+    : Array.isArray(source.words) ? source.words : [];
+  const segmentUnits = sortAndDeduplicateTranscriptUnits(
+    rawSegments.map((candidate, unitIndex) => normalizeTranscriptCandidate(
+      candidate,
+      unitIndex,
+      duration,
+      collector,
+      context
+    )).filter(Boolean),
+    collector
+  );
+  const wordUnits = sortAndDeduplicateTranscriptUnits(
+    rawWords.map((candidate, unitIndex) => normalizeTranscriptCandidate(
+      candidate,
+      unitIndex,
+      duration,
+      collector,
+      context
+    )).filter(Boolean),
+    collector
+  );
+  const primaryUnits = segmentUnits.length > 0 ? segmentUnits : wordUnits;
+  const units = primaryUnits.map((unit) => {
+    if (segmentUnits.length === 0 || wordUnits.length === 0) {
+      return unit;
+    }
+    const anchors = wordUnits.filter((word) => {
+      const midpoint = (word.startMs + word.endMs) / 2;
+      return midpoint >= unit.startMs && midpoint <= unit.endMs;
+    }).map(({ startMs, endMs }) => [startMs, endMs]);
+    return anchors.length > 0
+      ? { ...unit, wordAnchors: anchors }
+      : unit;
+  });
+  const anchorCoverage = transcriptAnchorCoverage(segmentUnits, wordUnits);
+  if (
+    segmentUnits.length > 0
+    && wordUnits.length > 0
+    && (
+      anchorCoverage.segmentTextCoverage < 0.7
+      || anchorCoverage.wordTextPrecision < 0.7
+    )
+  ) {
+    collector.add("HARNESS_WORD_ANCHOR_COVERAGE_LOW", 0);
+  }
 
   const fullText = normalizeCaptionDisplayText(
     transcript && !Array.isArray(transcript) ? transcript.text : ""
   );
   return {
-    units: deduplicated,
-    text: fullText || deduplicated.map((unit) => unit.text).join(" "),
+    units,
+    wordUnits,
+    text: fullText || units.map((unit) => unit.text).join(" "),
+    anchorCoverage: {
+      segmentTextCoverage: Math.round(
+        anchorCoverage.segmentTextCoverage * 10_000
+      ) / 10_000,
+      wordTextPrecision: Math.round(
+        anchorCoverage.wordTextPrecision * 10_000
+      ) / 10_000
+    },
     warnings: collector.values()
   };
 }
@@ -461,7 +542,99 @@ function distributeDurations(totalDurationMs, minimumDurations, maximumDurationM
   return durations;
 }
 
-function splitRawCue(rawCue, cueIndex, clipDurationMs, profile, collector) {
+function wordBoundaryAlignedDurations(
+  parts,
+  startMs,
+  endMs,
+  minimumDurations,
+  wordUnits
+) {
+  if (
+    parts.length < 2
+    || !Array.isArray(wordUnits)
+    || wordUnits.length < parts.length
+  ) {
+    return null;
+  }
+  const anchors = wordUnits.filter((word) => (
+    word.endMs > startMs
+    && word.startMs < endMs
+    && word.endMs > word.startMs
+    && normalizeCaptionDisplayText(word.text)
+  )).sort((first, second) => (
+    first.startMs - second.startMs
+    || first.endMs - second.endMs
+  ));
+  if (anchors.length < parts.length) {
+    return null;
+  }
+  const totalPartWidth = parts.reduce(
+    (sum, part) => sum + Math.max(0.01, measureKoreanWidthUnits(part)),
+    0
+  );
+  const anchorWidths = anchors.map(
+    (anchor) => Math.max(0.01, measureKoreanWidthUnits(anchor.text))
+  );
+  const totalAnchorWidth = anchorWidths.reduce((sum, width) => sum + width, 0);
+  const boundaries = [startMs];
+  let partWidthCursor = 0;
+  for (let partIndex = 0; partIndex < parts.length - 1; partIndex += 1) {
+    partWidthCursor += Math.max(
+      0.01,
+      measureKoreanWidthUnits(parts[partIndex])
+    );
+    const targetRatio = partWidthCursor / totalPartWidth;
+    const minimumBoundary = boundaries.at(-1) + minimumDurations[partIndex];
+    const remainingMinimum = minimumDurations
+      .slice(partIndex + 1)
+      .reduce((sum, value) => sum + value, 0);
+    const maximumBoundary = endMs - remainingMinimum;
+    let anchorWidthCursor = 0;
+    const candidates = [];
+    for (let anchorIndex = 0; anchorIndex < anchors.length - 1; anchorIndex += 1) {
+      anchorWidthCursor += anchorWidths[anchorIndex];
+      const boundary = clamp(
+        Math.round(
+          (anchors[anchorIndex].endMs + anchors[anchorIndex + 1].startMs) / 2
+        ),
+        startMs + 1,
+        endMs - 1
+      );
+      if (boundary < minimumBoundary || boundary > maximumBoundary) {
+        continue;
+      }
+      candidates.push({
+        boundary,
+        score: Math.abs(anchorWidthCursor / totalAnchorWidth - targetRatio),
+        anchorIndex
+      });
+    }
+    const selected = candidates.sort((first, second) => (
+      first.score - second.score
+      || first.anchorIndex - second.anchorIndex
+    ))[0];
+    if (!selected) {
+      return null;
+    }
+    boundaries.push(selected.boundary);
+  }
+  boundaries.push(endMs);
+  return boundaries.slice(0, -1).map(
+    (boundary, index) => boundaries[index + 1] - boundary
+  );
+}
+
+function splitRawCue(
+  rawCue,
+  cueIndex,
+  clipDurationMs,
+  profile,
+  collector,
+  {
+    wordUnits = [],
+    editorialContext
+  } = {}
+) {
   const originalText = String(rawCue?.text ?? "");
   const text = normalizeCaptionDisplayText(originalText);
   if (!text) {
@@ -514,11 +687,21 @@ function splitRawCue(rawCue, cueIndex, clipDurationMs, profile, collector) {
     };
     collector.add("HARNESS_TRIMMED_EXCESSIVE_CUE_RANGE", cueIndex);
   }
-  const distributed = distributeDurations(
+  const wordAligned = wordBoundaryAlignedDurations(
+    parts,
+    expanded.startMs,
+    expanded.endMs,
+    minimumDurations,
+    wordUnits
+  );
+  const distributed = wordAligned || distributeDurations(
     expanded.endMs - expanded.startMs,
     minimumDurations,
     profile.maxCueDurationMs
   );
+  if (wordAligned) {
+    collector.add("HARNESS_ALIGNED_SPLIT_TO_WORD_BOUNDARY", cueIndex);
+  }
 
   let cursor = expanded.startMs;
   return parts.map((part, partIndex) => {
@@ -538,7 +721,8 @@ function splitRawCue(rawCue, cueIndex, clipDurationMs, profile, collector) {
       speakerId: normalizeSpeaker(
         rawCue?.speakerId
         ?? rawCue?.speaker_id
-        ?? rawCue?.speaker
+        ?? rawCue?.speaker,
+        editorialContext
       ),
       reviewRequired: (
         rawCue?.reviewRequired === true
@@ -752,10 +936,39 @@ function appendViolation(violations, code, cueIndex, severity = "error") {
   }
 }
 
+const REJECTED_QUALITY_CODES = new Set([
+  "HARNESS_EMPTY_TEXT",
+  "HARNESS_TERMINAL_PERIOD",
+  "HARNESS_CUE_OUT_OF_RANGE",
+  "HARNESS_CUE_TOO_LONG",
+  "HARNESS_TOO_MANY_LINES",
+  "HARNESS_LINE_TOO_WIDE",
+  "HARNESS_CUE_TEXT_TOO_WIDE",
+  "HARNESS_UNSTABLE_PLACEMENT",
+  "HARNESS_SAME_SPEAKER_OVERLAP"
+]);
+
+function cueTranscriptMetrics(cue, transcriptUnits) {
+  const expectedText = transcriptUnits.filter((unit) => (
+    unit.endMs > cue.startMs && unit.startMs < cue.endMs
+  )).map(({ text }) => text).join(" ");
+  const expected = graphemes(textSignature(expectedText));
+  const actual = graphemes(textSignature(cue.text));
+  if (expected.length === 0 && actual.length === 0) {
+    return { coverage: 1, precision: 1 };
+  }
+  const common = longestCommonSubsequenceLength(expected, actual);
+  return {
+    coverage: expected.length > 0 ? common / expected.length : 0,
+    precision: actual.length > 0 ? common / actual.length : 0
+  };
+}
+
 export function evaluateSolarCaptionCues(cues, {
   clipDurationMs,
   transcript,
   visualPlacement,
+  editorialContext,
   profile = KR_VTUBER_CLEAN_PROFILE
 } = {}) {
   const duration = finiteInteger(clipDurationMs);
@@ -775,6 +988,13 @@ export function evaluateSolarCaptionCues(cues, {
   let maximumTotalWidthUnits = 0;
   let maximumReadingRate = 0;
   const rangesBySpeaker = new Map();
+  const perCueMetrics = [];
+  const canonicalTranscript = transcript == null
+    ? null
+    : canonicalizeTranscriptUnits(transcript, {
+      clipDurationMs: duration,
+      editorialContext
+    });
 
   for (const [cueIndex, cue] of cues.entries()) {
     const startMs = finiteInteger(cue?.startMs);
@@ -794,6 +1014,15 @@ export function evaluateSolarCaptionCues(cues, {
     maximumLineWidthUnits = Math.max(maximumLineWidthUnits, ...widths, 0);
     maximumTotalWidthUnits = Math.max(maximumTotalWidthUnits, totalWidth);
     maximumReadingRate = Math.max(maximumReadingRate, readingRate);
+    perCueMetrics[cueIndex] = {
+      durationMs: cueDuration,
+      widthUnits: Math.round(totalWidth * 100) / 100,
+      readingRate: Number.isFinite(readingRate)
+        ? Math.round(readingRate * 100) / 100
+        : null,
+      transcriptCoverage: null,
+      transcriptPrecision: null
+    };
 
     if (!text) {
       appendViolation(violations, "HARNESS_EMPTY_TEXT", cueIndex);
@@ -841,7 +1070,7 @@ export function evaluateSolarCaptionCues(cues, {
     }
 
     if (startMs != null && endMs != null) {
-      const speakerId = normalizeSpeaker(cue?.speakerId);
+      const speakerId = normalizeSpeaker(cue?.speakerId, editorialContext);
       const ranges = rangesBySpeaker.get(speakerId) || [];
       ranges.push({ startMs, endMs, cueIndex });
       rangesBySpeaker.set(speakerId, ranges);
@@ -866,8 +1095,8 @@ export function evaluateSolarCaptionCues(cues, {
 
   let transcriptCoverage = null;
   let transcriptPrecision = null;
-  if (transcript != null) {
-    const expected = transcriptSignature(transcript, duration).signature;
+  if (canonicalTranscript != null) {
+    const expected = textSignature(canonicalTranscript.text);
     const actual = textSignature(cues.map((cue) => cue?.text || "").join(" "));
     if (expected || actual) {
       const commonLength = longestCommonSubsequenceLength(
@@ -881,18 +1110,58 @@ export function evaluateSolarCaptionCues(cues, {
         ? commonLength / graphemes(actual).length
         : expected ? 0 : 1;
       if (transcriptCoverage < profile.minimumTranscriptCoverage) {
-        appendViolation(
-          violations,
-          "HARNESS_TRANSCRIPT_COVERAGE_LOW",
-          0
-        );
+        let assigned = false;
+        for (const [cueIndex, cue] of cues.entries()) {
+          const local = cueTranscriptMetrics(cue, canonicalTranscript.units);
+          perCueMetrics[cueIndex].transcriptCoverage = Math.round(
+            local.coverage * 10_000
+          ) / 10_000;
+          perCueMetrics[cueIndex].transcriptPrecision = Math.round(
+            local.precision * 10_000
+          ) / 10_000;
+          if (local.coverage < profile.minimumTranscriptCoverage) {
+            appendViolation(
+              violations,
+              "HARNESS_TRANSCRIPT_COVERAGE_LOW",
+              cueIndex
+            );
+            assigned = true;
+          }
+        }
+        if (!assigned) {
+          appendViolation(
+            violations,
+            "HARNESS_TRANSCRIPT_COVERAGE_LOW",
+            0
+          );
+        }
       }
       if (transcriptPrecision < profile.minimumTranscriptPrecision) {
-        appendViolation(
-          violations,
-          "HARNESS_TRANSCRIPT_PRECISION_LOW",
-          0
-        );
+        let assigned = false;
+        for (const [cueIndex, cue] of cues.entries()) {
+          const local = cueTranscriptMetrics(cue, canonicalTranscript.units);
+          perCueMetrics[cueIndex].transcriptCoverage ??= Math.round(
+            local.coverage * 10_000
+          ) / 10_000;
+          perCueMetrics[cueIndex].transcriptPrecision ??= Math.round(
+            local.precision * 10_000
+          ) / 10_000;
+          if (local.precision < profile.minimumTranscriptPrecision) {
+            appendViolation(
+              violations,
+              "HARNESS_TRANSCRIPT_PRECISION_LOW",
+              cueIndex
+            );
+            assigned = true;
+          }
+        }
+        if (!assigned) {
+          appendViolation(
+            violations,
+            "HARNESS_TRANSCRIPT_PRECISION_LOW",
+            0
+          );
+        }
       }
     }
   }
@@ -900,10 +1169,38 @@ export function evaluateSolarCaptionCues(cues, {
   const errorCount = violations.filter(
     (violation) => violation.severity === "error"
   ).length;
+  const cueReviews = cues.map((cue, cueIndex) => {
+    const codes = violations
+      .filter((violation) => violation.cueIndex === cueIndex)
+      .map(({ code }) => code);
+    const rejected = codes.some((code) => REJECTED_QUALITY_CODES.has(code));
+    const reviewRequired = (
+      rejected
+      || codes.length > 0
+      || cue?.reviewRequired === true
+    );
+    return {
+      cueIndex,
+      status: rejected
+        ? "rejected"
+        : reviewRequired ? "review-required" : "accepted",
+      codes,
+      metrics: perCueMetrics[cueIndex]
+    };
+  });
+  const disposition = cueReviews.some(({ status }) => status === "rejected")
+    ? "rejected"
+    : cueReviews.some(({ status }) => status === "review-required")
+      || violations.length > 0
+      ? "review-required"
+      : "accepted";
   return {
     profileId: profile.id,
+    harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
     valid: errorCount === 0,
+    disposition,
     violations,
+    cueReviews,
     metrics: {
       cueCount: cues.length,
       maximumDurationMs,
@@ -918,6 +1215,7 @@ export function evaluateSolarCaptionCues(cues, {
       transcriptPrecision: transcriptPrecision == null
         ? null
         : Math.round(transcriptPrecision * 10_000) / 10_000,
+      wordAnchorCoverage: canonicalTranscript?.anchorCoverage || null,
       placement: desiredPlacement
     }
   };
@@ -950,6 +1248,7 @@ export function repairSolarCaptionCues(rawCues, {
   clipDurationMs,
   transcript,
   visualPlacement,
+  editorialContext,
   includeSpeakerColors = false,
   profile = KR_VTUBER_CLEAN_PROFILE
 } = {}) {
@@ -962,9 +1261,19 @@ export function repairSolarCaptionCues(rawCues, {
   }
 
   const collector = warningCollector();
+  const context = normalizeCaptionEditorialContext(editorialContext);
+  const canonicalTranscript = transcript == null
+    ? null
+    : canonicalizeTranscriptUnits(transcript, {
+      clipDurationMs: duration,
+      editorialContext: context
+    });
   const placement = chooseStableCaptionPlacement(visualPlacement, { profile });
   const cues = rawCues.flatMap((rawCue, cueIndex) => (
-    splitRawCue(rawCue, cueIndex, duration, profile, collector)
+    splitRawCue(rawCue, cueIndex, duration, profile, collector, {
+      wordUnits: canonicalTranscript?.wordUnits || [],
+      editorialContext: context
+    })
   ));
   cues.sort((first, second) => (
     first.startMs - second.startMs
@@ -988,20 +1297,33 @@ export function repairSolarCaptionCues(rawCues, {
   const finalizedCues = cues.map(({ sourceCueIndex, ...cue }) => cue);
   const evaluation = evaluateSolarCaptionCues(finalizedCues, {
     clipDurationMs: duration,
-    transcript,
+    transcript: canonicalTranscript,
     visualPlacement,
+    editorialContext: context,
     profile
   });
+  const reviewByCue = new Map(
+    evaluation.cueReviews.map((review) => [review.cueIndex, review])
+  );
+  const gatedCues = finalizedCues.map((cue, cueIndex) => ({
+    ...cue,
+    reviewRequired: (
+      cue.reviewRequired
+      || reviewByCue.get(cueIndex)?.status === "review-required"
+      || reviewByCue.get(cueIndex)?.status === "rejected"
+    )
+  }));
   return {
     profileId: profile.id,
-    cues: finalizedCues,
+    harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+    cues: gatedCues,
     warnings: collector.values(),
     evaluation,
     ...(includeSpeakerColors
       ? {
         metadata: {
           speakerColorPalette: "kr-vtuber-reference-v1",
-          speakerColors: deterministicSpeakerColors(finalizedCues, profile)
+          speakerColors: deterministicSpeakerColors(gatedCues, profile)
         }
       }
       : {})

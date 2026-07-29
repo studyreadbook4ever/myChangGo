@@ -8,6 +8,13 @@ import {
   validateCaptionAgentRequest
 } from "../src/caption-agent/protocol.js";
 import {
+  CAPTION_HARNESS_FINGERPRINT,
+  CAPTION_QUALITY_PROFILE_ID
+} from "../src/caption-agent/caption-quality-harness.js";
+import {
+  captionEditorialContextFingerprint
+} from "../src/caption-agent/editorial-context.js";
+import {
   DEFAULT_PIPELINE_TIMEOUT_MS,
   DEFAULT_SOLAR_MODEL,
   LOCAL_WHISPERCPP_TRANSCRIPTION_MODE,
@@ -288,8 +295,13 @@ test("파이프라인은 base64 WAV를 STT에만 보내고 Solar에는 중복 �
       captionRequest().visual.samples
     );
     assert.deepEqual(solarInput.timedUnits, [
-      { startMs: 100, endMs: 1_000, text: "안녕", speakerId: "unknown" },
-      { startMs: 4_200, endMs: 5_200, text: "반가워", speakerId: "unknown" }
+      {
+        startMs: 100,
+        endMs: 5_200,
+        text: "안녕 반가워",
+        speakerId: "main",
+        wordAnchors: [[100, 1_000], [4_200, 5_200]]
+      }
     ]);
     assert.equal(Object.hasOwn(solarInput, "transcript"), false);
     assert.equal(body.messages[1].content.includes("base64"), false);
@@ -324,6 +336,178 @@ test("파이프라인은 base64 WAV를 STT에만 보내고 Solar에는 중복 �
   assert(result.cues.every((cue) => cue.endMs - cue.startMs <= 4_000));
   assert.equal(result.cues.map((cue) => cue.text).join(" "), "안녕 반가워");
   assert(result.warnings.some((warning) => warning.code === "SPLIT_LONG_CUE"));
+});
+
+test("전사와 어긋난 Solar 결과는 추가 호출 없이 cue별 review gate로 전달한다", async () => {
+  const request = normalizedCaptionRequest({
+    clip: {
+      id: "quality-review-clip",
+      title: "",
+      durationMs: 3_000
+    }
+  });
+  let solarCalls = 0;
+  const result = await requestSolarCaptions(request, {
+    text: "안녕",
+    segments: [{ startMs: 100, endMs: 1_200, text: "안녕" }],
+    words: [{ startMs: 100, endMs: 1_200, text: "안녕" }]
+  }, {
+    upstageApiKey: "fake-upstage-key",
+    fetchImpl: async () => {
+      solarCalls += 1;
+      return jsonResponse({
+        model: "solar-pro3",
+        choices: [{
+          finish_reason: "stop",
+          message: {
+            content: JSON.stringify({
+              cues: [{
+                startMs: 100,
+                endMs: 1_200,
+                text: "오늘 날씨가 정말 좋네요",
+                speakerId: "main",
+                reviewRequired: false,
+                placement: "bottom"
+              }]
+            })
+          }
+        }]
+      });
+    }
+  });
+
+  assert.equal(solarCalls, 1);
+  assert.equal(result.qualityReport.valid, false);
+  assert.equal(result.qualityReport.disposition, "review-required");
+  assert.deepEqual(result.cues[0].quality, {
+    status: "review-required",
+    codes: [
+      "HARNESS_TRANSCRIPT_COVERAGE_LOW",
+      "HARNESS_TRANSCRIPT_PRECISION_LOW"
+    ]
+  });
+  assert.equal(result.cues[0].reviewRequired, true);
+});
+
+test("동시 cue가 화자 alias 정규화로 재정렬돼도 전사 review는 해당 cue에 유지된다", async () => {
+  const request = normalizedCaptionRequest({
+    clip: {
+      id: "quality-review-stable-identity",
+      title: "",
+      durationMs: 3_000
+    },
+    editorialContext: {
+      schema: "kr-vtuber-editorial-context/v1",
+      glossary: [],
+      speakers: [{
+        id: "main",
+        aliases: ["main", "z-main"]
+      }, {
+        id: "z-speaker",
+        aliases: ["z-speaker", "a-guest"]
+      }],
+      style: {
+        terminalPeriod: "omit",
+        placement: "bottom",
+        maxWidthUnits: 20,
+        examples: []
+      }
+    }
+  });
+  let solarCalls = 0;
+  const result = await requestSolarCaptions(request, {
+    text: "안녕 반가워",
+    segments: [{
+      startMs: 100,
+      endMs: 1_200,
+      text: "안녕"
+    }, {
+      startMs: 1_800,
+      endMs: 2_600,
+      text: "반가워"
+    }],
+    words: [{
+      startMs: 100,
+      endMs: 1_200,
+      text: "안녕"
+    }, {
+      startMs: 1_800,
+      endMs: 2_600,
+      text: "반가워"
+    }]
+  }, {
+    upstageApiKey: "fake-upstage-key",
+    fetchImpl: async () => {
+      solarCalls += 1;
+      return jsonResponse({
+        model: "solar-pro3",
+        choices: [{
+          finish_reason: "stop",
+          message: {
+            content: JSON.stringify({
+              cues: [{
+                startMs: 100,
+                endMs: 1_200,
+                text: "날씨가 좋네요",
+                speakerId: "a-guest",
+                reviewRequired: false,
+                placement: "bottom"
+              }, {
+                startMs: 100,
+                endMs: 1_200,
+                text: "안녕",
+                speakerId: "z-main",
+                reviewRequired: false,
+                placement: "bottom"
+              }]
+            })
+          }
+        }]
+      });
+    }
+  });
+
+  assert.equal(solarCalls, 1);
+  assert.deepEqual(
+    result.cues.map(({ text, speakerId }) => ({ text, speakerId })),
+    [{
+      text: "안녕",
+      speakerId: "main"
+    }, {
+      text: "날씨가 좋네요",
+      speakerId: "z-speaker"
+    }]
+  );
+  assert.deepEqual(result.cues[0].quality, {
+    status: "accepted",
+    codes: []
+  });
+  assert.equal(result.cues[0].reviewRequired, false);
+  assert.deepEqual(result.cues[1].quality, {
+    status: "review-required",
+    codes: [
+      "HARNESS_TRANSCRIPT_COVERAGE_LOW",
+      "HARNESS_TRANSCRIPT_PRECISION_LOW"
+    ]
+  });
+  assert.equal(result.cues[1].reviewRequired, true);
+  assert.deepEqual(
+    result.qualityReport.cueReviews.map(
+      ({ cueIndex, status, codes }) => ({ cueIndex, status, codes })
+    ),
+    [{
+      cueIndex: 0,
+      status: "accepted",
+      codes: []
+    }, {
+      cueIndex: 1,
+      status: "review-required",
+      codes: [
+        "HARNESS_TRANSCRIPT_COVERAGE_LOW",
+        "HARNESS_TRANSCRIPT_PRECISION_LOW"
+      ]
+    }]
+  );
 });
 
 test("Solar JSON 형식이 미지원이어도 승인 없는 유료 폴백 호출은 하지 않는다", async () => {
@@ -1103,7 +1287,31 @@ test("Extension 클라이언트는 loopback 게이트웨이의 인증 응답과 
           placement: "top"
         }
       ],
-      warnings: []
+      warnings: [],
+      qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+      harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+      editorialContextFingerprint: captionEditorialContextFingerprint(
+        body.editorialContext
+      ),
+      qualityReport: {
+        profileId: CAPTION_QUALITY_PROFILE_ID,
+        harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+        valid: true,
+        disposition: "review-required",
+        violations: [],
+        cueReviews: [{
+          cueIndex: 0,
+          status: "accepted",
+          codes: [],
+          metrics: {}
+        }, {
+          cueIndex: 1,
+          status: "review-required",
+          codes: [],
+          metrics: {}
+        }],
+        metrics: { cueCount: 2 }
+      }
     })
   });
   await new Promise((resolve, reject) => {

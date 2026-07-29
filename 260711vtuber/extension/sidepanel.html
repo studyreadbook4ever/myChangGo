@@ -20,6 +20,31 @@
     </header>
 
     <main>
+      <section class="card recovery-card" aria-labelledby="recovery-title">
+        <div class="section-heading">
+          <div>
+            <p class="step-label">CONTINUE</p>
+            <h2 id="recovery-title">이 기기의 최근 편집</h2>
+          </div>
+          <button id="refresh-recovery-sessions" class="icon-button" type="button" title="저장된 편집 다시 확인" aria-label="저장된 편집 다시 확인">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+          </button>
+        </div>
+        <p class="recovery-description">
+          원본 영상 탭을 다시 찾지 않아도 저장된 프로젝트를 정확히 이어서 엽니다.
+        </p>
+        <div id="recovery-sessions-loading" class="recovery-loading" role="status">
+          저장된 편집을 확인하는 중…
+        </div>
+        <div id="recovery-sessions-empty" class="empty-state small" hidden>
+          아직 이 기기에 저장된 편집 프로젝트가 없습니다.
+        </div>
+        <div id="recovery-sessions-list" class="recovery-sessions-list" aria-live="polite"></div>
+        <p class="recovery-security-note">
+          Solar API 키는 저장하거나 복구하지 않습니다. AI 자막을 다시 돌릴 때만 입력하세요.
+        </p>
+      </section>
+
       <section class="card source-card" aria-labelledby="source-title">
         <div class="section-heading">
           <div>
@@ -199,6 +224,21 @@
           <button type="button" data-action="down" title="아래로" aria-label="아래로 이동">↓</button>
           <button type="button" data-action="edit">수정</button>
           <button type="button" data-action="delete" class="danger">삭제</button>
+        </div>
+      </article>
+    </template>
+
+    <template id="recovery-session-template">
+      <article class="recovery-session">
+        <div class="recovery-session-heading">
+          <h3 class="recovery-session-title"></h3>
+          <time class="recovery-session-time"></time>
+        </div>
+        <p class="recovery-session-counts"></p>
+        <p class="recovery-session-drafts"></p>
+        <div class="recovery-session-actions">
+          <button type="button" class="button button-primary" data-recovery-action="continue">계속 편집</button>
+          <button type="button" class="button button-secondary" data-recovery-action="drafts">복구본 선택</button>
         </div>
       </article>
     </template>

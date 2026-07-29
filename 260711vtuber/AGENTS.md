@@ -37,7 +37,7 @@ npm run caption-stack:start
 1. 사용자가 찍은 컷 시작·끝은 사용자 권한 범위입니다. AI가 재미 판단으로 범위를 늘리거나 줄이지 않습니다.
 2. 로컬 STT에는 활성 컷의 오디오만 전달합니다. 원본 전체와 비활성 구간을 몰래 전사하지 않습니다.
 3. Upstage에는 오디오, WAV base64, 영상, 프레임 픽셀, 이미지 에셋을 보내지 않습니다.
-4. Upstage 입력은 timed transcript, 프로젝트명, 스트리머명, 컷 메모, 숫자형 화면 위치 요약으로 제한합니다.
+4. Upstage 입력은 timed transcript, 프로젝트명, 스트리머명, 컷 메모, 숫자형 화면 위치 요약과 최대 24KiB의 bounded 편집 문맥으로 제한합니다. 편집 문맥은 최대 48개 용어, 16명 화자·별칭, 사람이 검수한 예문 8개와 고정 스타일 계약만 포함하며 원본 자막 전체를 넣지 않습니다.
 5. 로컬 Whisper 모드는 STT API 키를 요구하지 않습니다.
 6. 로컬 STT 실패를 외부 유료 STT로 자동 폴백하지 않습니다.
 7. gateway와 whisper-server는 `127.0.0.1`에만 바인딩합니다. `0.0.0.0`은 금지합니다. whisper-server의 무인증 `/inference`·`/load`를 고정 경로에 노출하지 않고 매 기동 새 192-bit 비공개 `--request-path` 아래에 둡니다.
@@ -45,8 +45,8 @@ npm run caption-stack:start
 9. 사람이 만든 자막과 사람이 수정한 AI 자막은 AI 재실행으로 덮어쓰지 않습니다.
 10. `kr-vtuber-clean-v1` 자동 본문 cue는 한 줄·하단 고정, 최대 4초이고 650ms 이상을 목표로 합니다. 한국어 폭은 한 줄 20 단위를 상한으로 사용하며 읽기 속도는 초당 16 단위 이하를 목표로 합니다. 문장 끝 `.`은 제거하고 `?`, `!`, `…`, `~`는 유지합니다.
 11. Solar 유료 호출 상한은 컷당 정확히 1회입니다. 응답 형식·빈 결과를 고치기 위한 자동 유료 폴백이나 재호출을 추가하지 않습니다. 그 뒤 정규화·분할·시간 보정·품질 평가는 추가 유료 호출이 없는 로컬 하네스에서 합니다.
-12. 컷 하나가 끝날 때마다 결과와 체크포인트를 저장합니다. 실패 재개 시 같은 범위·같은 Solar 모델·같은 하네스 지문의 완료 컷만 건너뜁니다. 하네스 지문이 없거나 달라진 체크포인트는 재사용하지 않습니다.
-13. 기본 화자는 흰색, 다른 화자는 speaker ID에 따라 결정적인 고유 색을 사용합니다. 사람이 만든 자막, 사람이 수정한 AI 자막과 수동 강조 레인은 AI 재실행으로 덮어쓰지 않습니다.
+12. 컷 하나가 끝날 때마다 결과와 체크포인트를 저장합니다. 실패 재개 시 같은 범위·같은 Solar 모델·같은 하네스 지문·같은 신뢰 편집 문맥 지문의 완료 컷만 건너뜁니다. 지문이 없거나 달라진 체크포인트는 재사용하지 않습니다.
+13. 기본 화자는 흰색, 다른 화자는 speaker ID에 따라 결정적인 고유 색을 사용합니다. `main`과 스트리머명의 한글·결정적 로마자 별칭은 프로젝트 화자 registry에서 하나로 합칩니다. 사람이 만든 자막, 사람이 수정한 AI 자막과 수동 강조 레인은 AI 재실행으로 덮어쓰지 않습니다.
 14. 로컬 모델과 실행 파일은 Extension 패키지와 Git에 넣지 않습니다.
 15. 실제 가격 숫자를 코드에 고정하지 않습니다. 실행 전 요청 수를 보여 주고 최신 가격은 [Upstage 공식 가격표](https://www.upstage.ai/pricing/api)를 확인하게 합니다.
 
@@ -188,6 +188,20 @@ npm run caption-stack:start -- --foreground
 5. 필요한 메모를 쓰고 **구간 저장**을 누릅니다.
 6. 필요한 만큼 반복하고 **통합 편집기에서 열기**를 누릅니다.
 
+### 닫은 편집 세션 이어서 열기 (`CURRENT`)
+
+원본 영상 탭을 닫았거나 다른 페이지를 보고 있어도 저장된 편집은 다시 열 수 있습니다.
+
+1. 같은 Chrome/Chromium 프로필에서 Extension 사이드패널을 엽니다.
+2. 상단 **이 기기의 최근 편집**에서 프로젝트 제목, 최근 저장 시각과 `컷 · 자막 · 에셋 · 음성` 수를 확인합니다.
+3. IndexedDB의 마지막 현재본은 **계속 편집**으로 엽니다.
+4. 프로젝트별 최근 5개 임시저장을 고르려면 **복구본 선택**을 누릅니다. 편집기가 정확한 `projectId`의 저장 목록을 자동으로 엽니다.
+5. 저장본을 실제로 불러올 때는 기존 계약대로 불러오기 직전 현재본을 먼저 `pre-restore` 임시저장합니다.
+
+저장 세션 재개 URL은 `session=resume`으로 신규 source seed 전달과 분리합니다. 현재 사이드패널의 capture state나 활성 탭 source identity를 저장 프로젝트에 병합하지 않습니다. 같은 `projectId`의 편집기 탭이 이미 있으면 새 탭을 만들지 않고 기존 탭을 포커스하며, **복구본 선택**은 그 탭의 저장 목록만 엽니다.
+
+목록 응답은 제목·시각·개수·임시저장 사유만 허용하는 projection입니다. 프로젝트 본문, 자막 텍스트, 파일 핸들, 이미지 Blob, Upstage API 키, companion session token을 사이드패널 목록으로 전달하지 않습니다. API 키와 session token은 닫힌 탭에서 복구되지 않습니다.
+
 ### 3. 로컬 원본 연결
 
 1. **원본 연결**에서 본인이 소유하거나 편집 권한이 있는 파일을 선택합니다.
@@ -212,7 +226,9 @@ npm run caption-stack:start -- --foreground
 
 단일 컷 프로토콜 상한은 30분입니다. 저사양 로컬 전사를 고려해 managed pipeline 기본 deadline은 45분, 설정 가능한 상한은 60분이며 브라우저 요청 deadline은 그보다 5분 깁니다. STT 자체 timeout은 같은 pipeline deadline에서 파생되고 `STT_TIMEOUT` 또는 `PIPELINE_TIMEOUT`으로 안전하게 표시됩니다.
 
-각 컷은 로컬 STT 뒤 timed transcript를 canonical timed units 하나로 정규화해 중복 transcript·segment·word 본문을 Solar 프롬프트에 반복하지 않습니다. Solar 호출은 컷당 정확히 1회이며, 응답 형식이 맞지 않거나 빈 결과이면 다른 형식으로 유료 재호출하지 않고 안전한 오류로 멈춥니다. 한 번의 Solar 결과는 `kr-vtuber-clean-v1` 로컬 하네스가 추가 비용 없이 정리합니다.
+각 컷은 로컬 STT 뒤 sentence-like segment를 본문으로 보존하고 word timestamp는 중복 본문이 아닌 경계 anchor로 결합한 canonical timed units 하나로 정규화합니다. segment와 word의 텍스트 coverage가 낮으면 해당 cue를 검수 대상으로 표시합니다. Solar에는 최대 24KiB의 프로젝트 공통 용어·화자 registry·사람 검수 문체 예문도 함께 주되, 한 컷 프롬프트 상한과 개별 항목 수를 넘기지 않습니다.
+
+Solar 호출은 컷당 정확히 1회이며, 응답 형식이 맞지 않거나 빈 결과이면 다른 형식으로 유료 재호출하지 않고 안전한 오류로 멈춥니다. 한 번의 Solar 결과는 `kr-vtuber-clean-v1` 로컬 하네스가 추가 비용 없이 정리합니다. 긴 cue는 가능한 경우 실제 word anchor 경계에서 나누며, 구조 계약을 끝까지 만족하지 못한 결과는 `CAPTION_QUALITY_GATE_FAILED`로 격리해 저장하지 않습니다. STT coverage·precision처럼 사람이 판단해야 할 내용 문제는 cue별 `qualityCodes`와 `reviewRequired`로 저장해 타임라인에서 바로 구분합니다.
 
 하네스의 자동 본문 규칙:
 
@@ -248,6 +264,7 @@ AI 자막은 초안입니다.
 - 큰 변경 전 **지금 임시저장**
 - 5분마다 자동 임시저장
 - 최근 5개 중 불러오기 직전 현재 상태 자동 임시저장
+- `CURRENT` 편집 변경은 해당 사용자 이벤트가 끝나는 microtask에서 불변 스냅샷의 IndexedDB 쓰기를 시작하며, 탭 종료 시점의 비동기 `unload` 저장만 믿지 않음
 - 최종 확인 뒤 **영상 내보내기**
 
 프로젝트 JSON과 SRT를 영상과 함께 보관하면 후속 수정이 쉽습니다.
@@ -269,17 +286,18 @@ foreground 실행이었다면 해당 터미널에서 `Ctrl+C`를 누릅니다.
 - 프로젝트 안의 clip ID
 - 원본 시작·끝 밀리초
 - 선택한 Solar 모델
-- 품질 하네스 지문 `kr-vtuber-clean-v1`
+- 품질 프로필 `kr-vtuber-clean-v1`과 구현 하네스 지문
+- 사람이 검수한 용어·문체·화자 registry의 bounded 편집 문맥 지문
 - 완료 request ID와 완료 시각
 
 중간 실패, 취소, 또는 탭의 비정상 종료 뒤 같은 버튼을 다시 누르면:
 
-1. 같은 범위·같은 Solar 모델·같은 품질 하네스 지문으로 완료 저장된 컷을 찾습니다.
+1. 같은 범위·같은 Solar 모델·같은 품질 하네스 지문·같은 신뢰 편집 문맥 지문으로 완료 저장된 컷을 찾습니다.
 2. 완료 컷은 건너뜁니다.
 3. 실패한 컷부터 이어서 처리합니다.
 4. 이전 경고와 사람 수정 자막을 보존합니다.
 
-컷 범위나 Solar 모델을 바꾸거나 품질 하네스 지문이 바뀌면 해당 체크포인트는 일치하지 않으므로 그 컷은 새 요청으로 처리합니다. 지문이 없던 구버전 체크포인트도 재사용하지 않습니다. 정상 완료 상태에서 사용자가 새 실행을 시작한 경우에는 전체 활성 컷을 새 초벌로 간주합니다.
+컷 범위나 Solar 모델을 바꾸거나 품질 하네스 지문·신뢰 편집 문맥 지문이 바뀌면 해당 체크포인트는 일치하지 않으므로 그 컷은 새 요청으로 처리합니다. 지문이 없던 구버전 체크포인트도 재사용하지 않습니다. 실행 도중 새로 생긴 미검수 AI 화자 표식은 다음 컷의 화자 일관성에는 쓰지만 체크포인트 문맥 지문에는 넣지 않아 재개 지문이 실행 중 흔들리지 않게 합니다. 정상 완료 상태에서 사용자가 새 실행을 시작한 경우에는 전체 활성 컷을 새 초벌로 간주합니다.
 
 새 전체 실행은 대상 컷의 이전 체크포인트를 API 호출 전에 폐기합니다. 로컬 원본을 다시 연결할 때 이름·크기·수정 시각·길이·코덱 등 identity가 달라져도 체크포인트를 폐기하므로, 다른 영상의 같은 좌표를 완료 컷으로 오인하지 않습니다.
 
@@ -296,11 +314,11 @@ Chrome editor
        ├─ process-memory bearer session 검사
        ├─ http://127.0.0.1:4318/kirinuki-<매 기동 192-bit nonce>/inference
        │    └─ 한국어 timed transcript
-       ├─ canonical timed units로 단일 정규화
+       ├─ segment 본문 + word 경계 anchor의 canonical timed units로 단일 정규화
        ├─ https://api.upstage.ai/v1/chat/completions
-       │    └─ 컷당 1회, timed units와 제한 문맥만 전달
+       │    └─ 컷당 1회, timed units와 bounded 용어·화자·문체 문맥만 전달
        └─ 로컬 kr-vtuber-clean-v1 품질 하네스
-            └─ 추가 유료 호출 없이 정규화·분할·시간 보정·평가
+            └─ 추가 유료 호출 없이 word 경계 분할·화자 정규화·평가·cue별 검수 gate
 ```
 
 로컬 stack은 두 프로세스를 감독합니다.
@@ -392,10 +410,13 @@ npm run caption-stack:status -- --json
 - `scripts/solar-caption-gateway.mjs`: loopback HTTP, exact Origin, 자동 session, CORS, 요청 실행
 - `src/caption-agent/solar-gateway-core.js`: canonical timed units, 컷당 Solar 1회, 로컬 하네스 연결
 - `src/caption-agent/caption-quality-harness.js`: `kr-vtuber-clean-v1` 정규화·복구·품질 평가
+- `src/caption-agent/editorial-context.js`: bounded 용어·화자 alias·검수 문체 문맥과 결정적 지문
 - `src/caption-agent/protocol.js`: 요청·응답 스키마와 안전한 cue 경계
 - `src/editor/caption-agent.js`: 브라우저 자동 페어링, 비용 예상, 하네스 지문 체크포인트
 - `extension/lib/caption-style.js`: 측정 기반 기본 스타일, OFL 대안과 화자 색상
 - `src/editor/main.js`: 사용자 확인, 컷별 실행·저장·재개
+- `extension/lib/session-recovery.js`: 최근 편집의 비밀정보 없는 요약, resume URL, 동일 프로젝트 탭 판정
+- `extension/service-worker.js`: source 연결 신규 열기와 source 비의존 저장 세션 재개 중계
 - `extension/editor.html`: 일반 사용자용 키·모델·상태와 고급 설정
 - `tests/local-caption-stack.test.js`: 설치·프로필·보안 계약
 - `tests/solar-caption-gateway.test.js`: gateway·STT·Solar 통합 계약
@@ -449,10 +470,13 @@ npm run caption-stack:setup -- --dry-run
 - 진단·빌드·runtime child에 환경의 API secret을 전달하지 않고 loopback STT는 proxy를 우회
 - Solar 유료 호출이 컷당 1회를 넘지 않고 자동 유료 형식 폴백이 없음
 - canonical timed units만 Solar에 한 번 전달되고 중복 transcript 본문이 없음
+- segment 본문을 word 하나 때문에 폐기하지 않고 word는 실제 분할 경계 anchor로만 전달
+- bounded 편집 문맥이 허용 항목·크기 상한을 지키며 `main`·한글·로마자 스트리머 alias를 하나로 정규화
 - 로컬 하네스가 한 줄·하단, 폭 20 상한, 650ms 목표, 4초 상한, 초당 16폭 단위와 문장부호 계약을 결정적으로 적용
+- 구조 위반 결과는 저장 전 격리되고 내용 불확실성은 cue별 품질 사유와 review gate로 전달
 - 일반 자동 정리 경고와 사람 검수가 필요한 품질 경고를 구분
 - 취소 시 진행 중 STT/Solar 신호 중단
-- 컷별 저장 후 오류 상태에서 같은 범위·모델·하네스 지문만 자동 건너뜀
+- 컷별 저장 후 오류 상태에서 같은 범위·모델·하네스 지문·신뢰 편집 문맥 지문만 자동 건너뜀
 - fresh run과 다른 원본 연결은 낡은 대상 체크포인트를 폐기
 - 사람 cue와 human-edited AI cue 보존
 - 모델·binary·`.part`·env secret이 Extension package에 없음

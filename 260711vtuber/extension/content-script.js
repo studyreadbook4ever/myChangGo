@@ -469,12 +469,16 @@
       const rawPlayer = readPlayer(platform, {
         youtubeMetadataFresh
       });
-      const player = platform === SOURCE_PLATFORM_CHZZK && identifiers.contentType === "live" ? normalizeLivePlayerPosition(
+      const normalizedPlayer = platform === SOURCE_PLATFORM_CHZZK && identifiers.contentType === "live" ? normalizeLivePlayerPosition(
         rawPlayer,
         liveMetadata,
         capturedAt
       ) : rawPlayer;
-      const contentType = platform === SOURCE_PLATFORM_YOUTUBE && player.liveInProgress ? "live" : identifiers.contentType;
+      const contentType = platform === SOURCE_PLATFORM_YOUTUBE && normalizedPlayer.liveInProgress ? "live" : identifiers.contentType;
+      const player = contentType === "live" ? normalizedPlayer : {
+        ...normalizedPlayer,
+        liveEdgeOffsetSeconds: null
+      };
       if (platform === SOURCE_PLATFORM_YOUTUBE) {
         const activeVideoId = readActiveYouTubeVideoId();
         if (activeVideoId && activeVideoId !== identifiers.contentId) {

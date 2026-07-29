@@ -7,6 +7,8 @@ import {
   canonicalSourceUrl,
   inferSourceIdentifiers,
   isSupportedSourceUrl,
+  selectSupportedSourceTab,
+  sourcePlayerStatusText,
   sourcePlatformFromUrl
 } from "../extension/lib/source-platform.js";
 
@@ -103,5 +105,75 @@ test("치지직 VOD·LIVE 식별과 연결된 채널 ID 회귀를 보존한다",
       contentId: "",
       contentType: "live"
     }
+  );
+});
+
+test("SOURCE 패널은 활성 영상 탭을 우선하고 닫힌 편집 세션의 원본으로 안전하게 폴백한다", () => {
+  const chzzk = {
+    id: 11,
+    active: false,
+    url: "https://chzzk.naver.com/video/13583412"
+  };
+  const youtube = {
+    id: 12,
+    active: false,
+    url: "https://www.youtube.com/watch?v=abcdefghijk"
+  };
+  const editor = {
+    id: 13,
+    active: true,
+    url: "chrome-extension://example/editor.html"
+  };
+
+  assert.equal(
+    selectSupportedSourceTab([
+      chzzk,
+      { ...youtube, active: true }
+    ])?.id,
+    youtube.id,
+    "사용자가 보고 있는 지원 영상 탭이 최우선이어야 합니다."
+  );
+  assert.equal(
+    selectSupportedSourceTab([chzzk, youtube, editor], {
+      expectedSource: {
+        canonicalUrl: "https://chzzk.naver.com/video/13583412"
+      }
+    })?.id,
+    chzzk.id,
+    "편집기나 확장 화면이 활성화돼도 저장된 원본 영상 탭을 다시 찾아야 합니다."
+  );
+  assert.equal(
+    selectSupportedSourceTab([chzzk, editor])?.id,
+    chzzk.id,
+    "지원 영상 탭이 하나뿐이면 그 탭을 사용해야 합니다."
+  );
+  assert.equal(
+    selectSupportedSourceTab([chzzk, youtube, editor]),
+    null,
+    "여러 영상 탭 중 저장된 원본과 일치하는 탭이 없으면 추측하면 안 됩니다."
+  );
+});
+
+test("SOURCE 상태는 VOD 남은 시간을 라이브 지연으로 오표시하지 않는다", () => {
+  const player = {
+    found: true,
+    paused: false,
+    liveEdgeOffsetSeconds: 3_492.4
+  };
+  assert.equal(
+    sourcePlayerStatusText({
+      contentType: "vod",
+      clipActive: true,
+      player
+    }),
+    "재생 중 · 클립 허용"
+  );
+  assert.equal(
+    sourcePlayerStatusText({
+      contentType: "live",
+      clipActive: true,
+      player
+    }),
+    "재생 중 · 라이브 지연 3492.4초 · 클립 허용"
   );
 });

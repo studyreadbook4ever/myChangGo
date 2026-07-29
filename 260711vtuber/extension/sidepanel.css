@@ -248,15 +248,113 @@ svg {
   padding: 12px;
 }
 
+.recovery-description {
+  margin: -3px 0 10px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.recovery-loading {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 10px;
+  text-align: center;
+}
+
+.recovery-sessions-list {
+  display: grid;
+  gap: 8px;
+}
+
+.recovery-session {
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background:
+    linear-gradient(135deg, rgba(0, 232, 146, 0.055), transparent 55%),
+    rgba(8, 12, 11, 0.55);
+}
+
+.recovery-session.is-opening {
+  border-color: rgba(0, 232, 146, 0.42);
+}
+
+.recovery-session-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.recovery-session-title {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recovery-session-time {
+  color: var(--subtle);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.recovery-session-counts,
+.recovery-session-drafts {
+  margin: 7px 0 0;
+  color: #c2cfca;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.recovery-session-drafts {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.recovery-session-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.recovery-session-actions .button {
+  min-height: 34px;
+  padding: 0 8px;
+  font-size: 10px;
+}
+
+.recovery-session-actions button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.recovery-security-note {
+  margin: 9px 2px 0;
+  color: var(--subtle);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .source-details {
   display: grid;
   gap: 9px;
+  min-width: 0;
 }
 
 .source-row {
   display: flex;
   gap: 8px;
   align-items: center;
+  min-width: 0;
+}
+
+.source-row .subtle {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .player-position {
@@ -381,12 +479,14 @@ textarea::placeholder {
 }
 
 .compact-field {
-  grid-template-columns: 92px 1fr;
+  min-width: 0;
+  grid-template-columns: 92px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
 }
 
 .compact-field input {
+  min-width: 0;
   height: 34px;
 }
 
