@@ -54,7 +54,7 @@
         <button id="reset-tour" class="text-button" type="button">관람 기록 초기화</button>
       </nav>
 
-      <main id="main">
+      <main id="main" tabindex="-1">
         <section id="entrance" class="exhibit exhibit--hero" data-exhibit="entrance" tabindex="-1">
           <div class="hero-orbit" aria-hidden="true">
             <span class="orbit orbit--one"></span>
@@ -72,6 +72,21 @@
             AI는 아주 빠릅니다. 무엇을 믿고 어디에 힘을 쓸까요?
           </p>
 
+          <fieldset class="reading-mode">
+            <legend>
+              <span class="instruction-tag">설명 속도 고르기</span>
+              어느 길로 관람할까요?
+            </legend>
+            <label>
+              <input type="radio" name="explanation-mode" value="guided" checked />
+              <span><b>차근차근 · 약 25분</b><small>뜻·비유·숫자·오해까지 기본으로 펼쳐 보기</small></span>
+            </label>
+            <label>
+              <input type="radio" name="explanation-mode" value="quick" />
+              <span><b>핵심만 · 약 12분</b><small>체험은 그대로 두고 긴 해설 카드만 접어 보기</small></span>
+            </label>
+          </fieldset>
+
           <div class="museum-thesis" role="note">
             <span aria-hidden="true">현실</span><b aria-hidden="true">→</b>
             <span>데이터로 효과를 배움</span><b aria-hidden="true">→</b>
@@ -83,10 +98,10 @@
           <div class="ticket">
             <div>
               <span class="ticket__kicker">오늘의 관람권</span>
-              <strong>약 12분 · 9개 전시 · 정답보다 좋은 질문</strong>
+              <strong id="visit-duration">약 25분 · 9개 전시 + 출구 검표소 · 정답보다 좋은 질문</strong>
               <p>
-                외부 API·로그인·추적 없음. TT는 실시간 LLM이 아니라, 현재 선택을 읽는
-                로컬 상태기계형 도슨트입니다.
+                외부 API·로그인·추적 없음. TT는 실시간 대규모 언어모델(LLM)이 아니라,
+                현재 선택을 읽는 로컬 상태기계형 도슨트입니다.
               </p>
             </div>
             <span class="ticket__barcode" aria-hidden="true"></span>
@@ -99,21 +114,76 @@
             </legend>
             <label>
               <input type="radio" name="goal" value="balance" checked />
-              <span><b>균형</b><small>이해·검증·체험을 고르게</small></span>
+              <span><b>균형</b><small>세 효과에 같은 가중치</small></span>
             </label>
             <label>
               <input type="radio" name="goal" value="understanding" />
-              <span><b>이해 우선</b><small>한 명도 놓치지 않게</small></span>
+              <span><b>이해 우선</b><small>이해 효과에 1.45배 가중치</small></span>
             </label>
             <label>
               <input type="radio" name="goal" value="verification" />
-              <span><b>검증 우선</b><small>틀린 설명을 줄이게</small></span>
+              <span><b>검증 우선</b><small>검증 효과에 1.5배 가중치</small></span>
             </label>
           </fieldset>
 
           <p id="goal-explanation" class="result-sentence" aria-live="polite">
             균형을 골랐습니다. 이제 “가장 좋은 배분”은 이 목표를 기준으로 계산됩니다.
           </p>
+
+          <details class="concept-walkthrough concept-walkthrough--intro" data-walkthrough open>
+            <summary>
+              <h2 class="walkthrough-title">
+                <small>차근차근 해설 00</small>
+                <span>세 가지 질문이 한 바퀴로 이어지는 이유</span>
+              </h2>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">1 · 데이터로 배우기</span>
+                  <h3>계량경제학</h3>
+                  <p>
+                    “안내원을 늘리면 대기시간이 얼마나 줄까?”처럼 경제 질문을 자료로 재고,
+                    답이 얼마나 흔들릴지도 함께 말하는 방법입니다. 데이터는 답을 저절로
+                    말하지 않으므로 누구와 누구를 비교할지 사람이 설계합니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">2 · 부족한 것 나누기</span>
+                  <h3>칸토로비치식 최적화</h3>
+                  <p>
+                    배운 효과와 가진 시간·돈을 넣어 가능한 배분을 비교합니다. 계산은
+                    가장 높은 점수를 찾을 뿐, 무엇을 “좋다”고 부를지는 정하지 못합니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">3 · 책임 있게 움직이기</span>
+                  <h3>Agent in the Loop</h3>
+                  <p>
+                    에이전트는 자료를 읽고 계산 도구를 써 후보를 만듭니다. 사람은 목표와
+                    금지선을 정하고, 근거를 이해한 뒤 수정·거절·중단할 권한을 가집니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>한 장면으로 연결하기</span>
+                <ol>
+                  <li><b>배우기</b><p>지난 기록을 비교해 안내원 한 명의 효과를 추정합니다.</p></li>
+                  <li><b>배분하기</b><p>안내원 8명을 어느 부스에 둘지 목표와 제약 안에서 계산합니다.</p></li>
+                  <li><b>승인하기</b><p>AI 제안을 사람이 1시간만 시험하고 멈출 수 있게 승인합니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  AI는 내비게이션처럼 길을 계산할 수 있지만 목적지를 대신 정하지 않습니다.
+                  “성공”의 뜻과 꼭 지킬 최소선은 사람의 선택입니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> AI가 축제의 목표까지 혼자 정하면 안 되는 이유를 한 문장으로 말해 보세요.</p>
+            </div>
+          </details>
+
           <a class="primary-cta" href="#scarcity">
             관람 시작
             <span aria-hidden="true">↓</span>
@@ -123,11 +193,69 @@
         <section id="scarcity" class="exhibit" data-exhibit="scarcity" tabindex="-1">
           <header class="exhibit__header">
             <p class="exhibit__number">전시 01 · 부족함의 창고</p>
-            <h2>원하는 것은 셋, 작업칸은 여덟</h2>
+            <h2>원하는 것은 셋, 칸은 한정돼 있다</h2>
             <p class="exhibit__one-line">
               경제학은 “돈 이야기”보다 먼저, 부족한 것을 어디에 쓸지 묻는 공부입니다.
             </p>
           </header>
+
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 01</small><strong>희소성부터 한계효과까지</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">말뜻</span>
+                  <h3>희소성과 기회비용</h3>
+                  <p>
+                    하고 싶은 일보다 시간·돈·사람이 적으면 희소합니다. 한 칸을 이해에 쓰면
+                    그 칸을 검증이나 체험에는 못 씁니다. 이렇게 포기한 가장 좋은 다른 선택의
+                    가치가 <strong>기회비용</strong>입니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">문제의 세 부품</span>
+                  <h3>선택·목표·한계선</h3>
+                  <p>
+                    결정변수는 “각 활동에 몇 칸?”, 목적함수는 “어떤 점수를 크게?”, 제약조건은
+                    “정해진 합계를 넘지 않게”입니다. 기본 예시에서는 그 합계가 8칸입니다.
+                    이 셋 중 하나라도 빠지면 무엇이 좋은 배분인지 계산할 수 없습니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">다음 한 칸</span>
+                  <h3>한계효과</h3>
+                  <p>
+                    한계효과는 지금 한 단위를 더 썼을 때 새로 얻는 효과입니다. 첫 도움은
+                    급한 문제를 해결하지만, 뒤의 도움은 일이 겹쳐 효과가 작아질 수 있습니다.
+                    이 감소는 현실 측정값이 아니라 이 전시에 넣은 가정입니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>균형 목표의 기본 효과표로 따라가기</span>
+                <ol>
+                  <li><b>이해 1칸</b><p>첫 칸의 한계효과는 18점, 총점도 18점입니다.</p></li>
+                  <li><b>이해 2칸</b><p>둘째 칸은 14점이므로 총점은 18+14=32점입니다.</p></li>
+                  <li><b>다음 선택</b><p>이해의 셋째 11점보다 검증의 첫째 16점이 크다면 검증이 먼저입니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  이해 첫 칸이 18점이라고 모든 이해 칸이 18점은 아닙니다. 배분할 때는 이미
+                  쌓인 총점이 아니라 각 활동의 <strong>다음 한 칸 효과</strong>를 비교합니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> 방과 후 한 시간을 공부에 쓰는 선택의 기회비용은 무엇일까요?</p>
+              <div class="room-bridge">
+                <p><b>방금 안 것</b><span>부족하면 다음 한 칸끼리 비교한다.</span></p>
+                <p><b>아직 모르는 것</b><span>여덟 칸 전체의 최고 조합은 무엇일까?</span></p>
+                <p><b>다음 방</b><span>가능한 조합을 모두 비교한다.</span></p>
+              </div>
+            </div>
+          </details>
 
           <div class="concept-strip" aria-label="이 전시의 세 단어">
             <span><b>결정변수</b> 무엇을 얼마나?</span>
@@ -212,6 +340,66 @@
             </p>
           </header>
 
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 02</small><strong>‘최적’이라는 말의 정확한 범위</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">먼저 거르기</span>
+                  <h3>가능집합</h3>
+                  <p>
+                    모든 제약을 지키는 선택들의 모음입니다. 예산 8칸인 기본 예시에서는
+                    작업칸 합이 8 이하인 배분은 안쪽에 있고, 9칸을 쓴 배분은 점수가 아무리
+                    높아도 후보에서 빠집니다. 정원 담장을 넘지 않고 걸을 수 있는 길만
+                    남기는 셈입니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">그다음 비교</span>
+                  <h3>최적안</h3>
+                  <p>
+                    가능집합 안에서 현재 목적함수 점수가 가장 높은 선택입니다. “현재”가
+                    중요한 이유는 목표·제약·효과표 중 하나만 바뀌어도 최고 조합이 달라지기
+                    때문입니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">사람의 선택</span>
+                  <h3>가중치</h3>
+                  <p>
+                    가중치는 어떤 효과를 몇 배 중요하게 셀지 정한 점수판입니다. 균형은 세
+                    효과에 같은 가중치를 준다는 뜻이지, 세 활동의 칸 수가 반드시 같다는
+                    뜻은 아닙니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>균형 목표 · 예산 8칸 기본 예시</span>
+                <ol>
+                  <li><b>3·3·2 조합</b><p>이해 43 + 검증 43 + 체험 23 = 109점입니다.</p></li>
+                  <li><b>4·2·2 조합</b><p>이해 51 + 검증 31 + 체험 23 = 105점입니다.</p></li>
+                  <li><b>비교</b><p>둘 다 8칸이지만 균형 점수판에서는 첫 조합이 4점 높습니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  이해 우선 점수판의 130.8점과 균형 점수판의 109점은 점수를 재는 자가
+                  다르므로 직접 우열을 비교할 수 없습니다. 또한 수학적으로 최적이라고
+                  자동으로 공정하거나 도덕적인 것도 아닙니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> “이 배분이 최적이다”라는 문장 뒤에 반드시 붙여야 할 조건 세 가지는 무엇일까요?</p>
+              <div class="room-bridge">
+                <p><b>방금 안 것</b><span>가능한 선택 중 현재 점수판의 최고를 찾았다.</span></p>
+                <p><b>아직 모르는 것</b><span>자원 한 칸을 더 받으면 얼마나 좋아질까?</span></p>
+                <p><b>다음 방</b><span>추가 한 칸의 현재 가치를 잰다.</span></p>
+              </div>
+            </div>
+          </details>
+
           <div class="portrait-story">
             <div class="portrait-story__monogram" aria-hidden="true">ЛК</div>
             <div>
@@ -294,6 +482,65 @@
             </p>
           </header>
 
+          <details class="concept-walkthrough concept-walkthrough--dark" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 03</small><strong>총점·평균·다음 한 칸을 구별하기</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">총점</span>
+                  <h3>V(B)는 무엇인가요?</h3>
+                  <p>
+                    B칸을 가장 잘 배분했을 때 얻는 최고 점수를 V(B)라고 짧게 씁니다.
+                    아래 균형 목표·예산 8칸 기본 예시에서 V(8)=109는 “8칸 최적 총점이
+                    109”라는 뜻입니다. V는 value, B는 budget을 떠올리면 됩니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">다음 한 칸</span>
+                  <h3>이산 한계가치</h3>
+                  <p>
+                    8칸과 9칸의 최고 점수 차이인 V(9)−V(8)를 봅니다. 칸을 반으로 자르지 않는
+                    이 전시에서는 자원을 아주 조금 바꿀 때의 변화율을 구하는 대신, 앞뒤
+                    정수 점수를 직접 빼는 것입니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">제약의 급함</span>
+                  <h3>왜 ‘그림자’인가요?</h3>
+                  <p>
+                    시장에 가격표가 없어도, 부족한 자원을 조금 더 받았을 때 목표가 좋아지는
+                    양으로 숨은 가치를 볼 수 있기 때문입니다. 다만 여기의 정수 차이는 고전
+                    연속 선형계획법의 그림자가격에 대응하는 쉬운 친척입니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>균형 목표 · 예산 8→9칸 기본 예시</span>
+                <ol>
+                  <li><b>현재</b><p>V(8)=109점입니다.</p></li>
+                  <li><b>한 칸 추가</b><p>V(9)=118점입니다.</p></li>
+                  <li><b>차이</b><p>118−109=9점. 여덟 칸의 평균이 아니라 아홉 번째 칸의 현재 가치입니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception misconception--dark">
+                <b>헷갈림 방지</b>
+                <p>
+                  직전 여덟 번째 칸은 10점, 다음 아홉 번째 칸은 9점이라 서로 다릅니다.
+                  더 늘리면 값이 또 바뀌며, 더 개선할 활동이 없으면 추가 자원의 가치는 0이
+                  될 수도 있습니다. 9점은 실제 시장가격도 아닙니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> 왜 9점을 “8칸의 평균 효과”라고 부르면 틀릴까요?</p>
+              <div class="room-bridge room-bridge--dark">
+                <p><b>방금 안 것</b><span>추가 자원의 가치는 현재 배분 근처에서 잰다.</span></p>
+                <p><b>아직 모르는 것</b><span>효과표의 점수는 어디서 얻을까?</span></p>
+                <p><b>다음 방</b><span>현실 데이터에서 효과를 배우는 법을 본다.</span></p>
+              </div>
+            </div>
+          </details>
+
           <div class="shadow-console">
             <div class="shadow-console__prediction">
               <span class="instruction-tag">먼저 예상하기</span>
@@ -347,6 +594,67 @@
               표시하는 방법 모음입니다.
             </p>
           </header>
+
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 04</small><strong>상관·기울기·통제를 한 단계씩</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">함께 움직이는 정도</span>
+                  <h3>상관계수</h3>
+                  <p>
+                    두 값이 직선 모양으로 같은 방향으로 움직이면 양수, 반대 방향이면
+                    음수입니다. −1에서 +1 사이로 방향과 직선에 가깝게 늘어선 정도를
+                    요약합니다. +0.56은 “56%가 원인”이나 “시간당 0.56점”이라는 뜻이
+                    아닙니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">평균선의 경사</span>
+                  <h3>회귀 기울기</h3>
+                  <p>
+                    회귀는 흩어진 점들의 평균적인 관계를 선 하나로 요약합니다. 기울기
+                    +2.43점/시간은 사용시간이 1시간 다른 학생들의 점수가 평균 2.43점
+                    다르게 보였다는 뜻이지, 한 학생의 점수를 올린 원인이라는 뜻은 아닙니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">같은 조건끼리</span>
+                  <h3>통제와 잔차</h3>
+                  <p>
+                    이 전시의 직선 관계 계산에서 통제는 준비도와 직선으로 연결된 차이를
+                    먼저 덜고 남은 부분끼리 비교하는 방법입니다. 그 남은 부분을 잔차라고
+                    합니다. 쉽게 말해 “준비도가 같다고 볼 만한 만큼끼리 다시 비교”하는
+                    렌즈입니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>기본 가상자료를 따라가기</span>
+                <ol>
+                  <li><b>그냥 비교</b><p>상관은 +0.56, 겉기울기는 시간당 약 +2.43점입니다.</p></li>
+                  <li><b>세 번째 요인</b><p>원래 준비도가 높은 학생이 질문도 많이 하고 점수도 높을 수 있습니다.</p></li>
+                  <li><b>준비도 통제</b><p>이 장난감 자료에서는 실제 효과를 0으로 심었으므로 기울기가 0.00점으로 돌아옵니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  통제 뒤 0이 되는 것은 숨은 준비도를 우리가 정확히 아는 이 가상세계의
+                  결과입니다. 현실에서는 관찰하지 못한 동기·가정환경 같은 교란요인이 남아
+                  회귀식에 변수 하나를 넣는 것만으로 인과가 증명되지 않습니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> 우산 판매와 교통사고가 함께 늘 때 먼저 찾아볼 세 번째 요인은 무엇일까요?</p>
+              <div class="room-bridge">
+                <p><b>방금 안 것</b><span>관계선은 원인 판정문이 아니다.</span></p>
+                <p><b>아직 모르는 것</b><span>볼 수 없는 ‘하지 않은 세계’를 어떻게 비교할까?</span></p>
+                <p><b>다음 방</b><span>비교집단과 제비뽑기를 만든다.</span></p>
+              </div>
+            </div>
+          </details>
 
           <div class="question-banner">
             <span>미래학교 기록에서 발견</span>
@@ -439,6 +747,66 @@
             </p>
           </header>
 
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 05</small><strong>한 사람의 평행세계에서 집단 평균까지</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">볼 수 없는 답</span>
+                  <h3>반사실</h3>
+                  <p>
+                    실제로 일어나지 않아 볼 수 없는 다른 결과입니다. 민지가 힌트를 받고
+                    82점을 받았다면, 같은 순간 힌트를 받지 않은 민지의 점수는 볼 수 없습니다.
+                    그래서 82점만으로 힌트 효과를 계산할 수 없습니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">대신 비교하기</span>
+                  <h3>처치집단과 비교집단</h3>
+                  <p>
+                    한 사람의 두 세계 대신 비슷한 학생 두 무리를 만듭니다. 힌트를 받은
+                    무리가 처치집단, 받지 않은 무리가 비교집단입니다. 두 무리의 출발점이
+                    다르면 결과 차이에 원래 차이가 섞입니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">출발점 섞기</span>
+                  <h3>무작위 배정</h3>
+                  <p>
+                    제비뽑기는 누가 힌트를 받을지를 준비도·적극성 같은 원래 특성과 관계없이
+                    정하는 방법입니다. 여러 번 반복하거나 큰 집단의 평균을 보면 특성이
+                    두 무리에 고르게 섞이는 경향이 있어 평균 효과를 비교하기 더 타당해집니다.
+                    다만 한 번의 작은 표본이 꼭 균형을 이룬다고 보장하지는 않습니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>평균효과를 추정하는 다리</span>
+                <ol>
+                  <li><b>개인</b><p>민지의 두 결과 중 하나는 언제나 보이지 않습니다.</p></li>
+                  <li><b>집단</b><p>제비뽑기로 나눈 두 무리의 평균을 각각 78점과 76점이라 합시다.</p></li>
+                  <li><b>추정</b><p>평균 차이 +2점은 모든 학생이 정확히 2점 올랐다는 뜻이 아니라 평균 인과효과의 추정값입니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  추정값은 진짜 효과 그 자체가 아닙니다. 표본을 다시 뽑으면 값이 달라질 수
+                  있어 흔들릴 범위를 함께 말합니다. 아래 0~4점은 설명용 가상 범위이며,
+                  실제 자료와 정해진 계산법으로 구한 불확실성 범위는 아닙니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> 원하는 학생만 힌트를 신청하면 +6점에 어떤 차이가 섞일 수 있을까요?</p>
+              <div class="room-bridge">
+                <p><b>방금 안 것</b><span>비슷한 집단 평균으로 반사실을 추정한다.</span></p>
+                <p><b>아직 모르는 것</b><span>AI가 만든 ‘이해함’ 숫자는 정확할까?</span></p>
+                <p><b>다음 방</b><span>측정값 자체의 오류를 감사한다.</span></p>
+              </div>
+            </div>
+          </details>
+
           <div class="parallel-worlds" aria-label="같은 학생의 두 잠재적 결과">
             <article>
               <span class="world-label">우리가 본 세계 A</span>
@@ -487,8 +855,9 @@
             </div>
             <p>
               표본이 작으면 결과가 흔들립니다. 여기의 0~4점은 원리를 보여주기 위해 정한
-              <strong>설명용 가상 범위이며 계산된 신뢰구간이 아닙니다.</strong> 현실에서는
-              연구설계와 표본으로 불확실성 범위를 계산해 추정값 곁에 둡니다.
+              <strong>설명용 가상 범위이며 실제 자료로 계산한 범위가 아닙니다.</strong> 현실에서는
+              연구설계와 표본, 범위의 뜻과 계산법을 정해 불확실성 범위를 계산하고 추정값
+              곁에 둡니다.
             </p>
           </div>
 
@@ -513,6 +882,66 @@
             </p>
           </header>
 
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 06</small><strong>AI 라벨이 연구용 변수가 되기까지</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">현실을 칸으로 바꾸기</span>
+                  <h3>변수와 라벨</h3>
+                  <p>
+                    변수는 사람·시간마다 달라지는 값을 기록한 칸입니다. AI가 소감 글을 읽고
+                    “이해함/혼란”을 붙이면 그 라벨이 새 변수가 됩니다. 편리하지만, 문맥을
+                    잘못 읽은 판단도 숫자처럼 표에 들어갑니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">자의 눈금 확인</span>
+                  <h3>측정오차</h3>
+                  <p>
+                    재고 싶은 실제 상태와 기록된 값의 차이입니다. 혼란한 문장을 이해함으로
+                    표시한 것은 거짓 양성, 이해한 문장을 혼란으로 표시한 것은 거짓 음성입니다.
+                    어느 방향의 오류가 많은지에 따라 평균과 효과 추정이 달라질 수 있습니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">사람이 일부 재기</span>
+                  <h3>검증표본</h3>
+                  <p>
+                    수천 문장을 전부 사람이 읽기 어렵다면 일부를 뽑아 같은 판정 규칙으로
+                    다시 확인합니다. 쉬운 문장만 고르지 말고 대표성 있게 뽑아야 전체 오류를
+                    짐작할 수 있으며, 표본이 작으면 그 짐작도 많이 흔들립니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>75%가 50%로 바뀐 정확한 뜻</span>
+                <ol>
+                  <li><b>AI 첫 판정</b><p>검증표본 4개 중 3개를 ‘이해함’이라 해 75%입니다.</p></li>
+                  <li><b>사람 감사</b><p>그중 한 문장은 자신 있게 틀렸고, 바른 ‘이해함’은 2개라 표본 안에서 50%입니다.</p></li>
+                  <li><b>다음 행동</b><p>수천 문장 전체가 50%라고 단정하지 말고 더 큰 대표 표본으로 오류율과 범위를 추정합니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  AI의 높은 자신감은 높은 정확도와 같은 말이 아닙니다. 사람끼리도 애매한
+                  문장을 다르게 볼 수 있으므로 판정 규칙, 불일치, 모델과 프롬프트(모델에
+                  주는 지시문)의 버전을 함께 기록해야 나중에 연구 결과를 다시 검산할 수
+                  있습니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> 검증표본 4개에서 50%가 나왔다고 전체 학생의 이해율도 50%라 말할 수 없는 이유는 무엇일까요?</p>
+              <div class="room-bridge">
+                <p><b>방금 안 것</b><span>AI가 만든 변수에도 오류표와 검증표본이 필요하다.</span></p>
+                <p><b>아직 모르는 것</b><span>오차 있는 근거로 낸 제안을 누가 책임질까?</span></p>
+                <p><b>다음 방</b><span>사람과 에이전트의 역할을 나눈다.</span></p>
+              </div>
+            </div>
+          </details>
+
           <div class="measurement-flow" aria-label="AI 측정과 사람 표본 감사의 흐름">
             <span>학생 소감 글</span><b>→</b><span>AI가 이해/혼란 분류</span><b>→</b>
             <span>사람이 일부 감사</span><b>→</b><span>오차와 함께 사용</span>
@@ -525,10 +954,10 @@
               <div id="audit-list" class="audit-list"></div>
             </div>
             <aside class="audit-meter" aria-live="polite">
-              <small>AI가 처음 센 “이해함”</small>
+              <small>검증표본 4개 · AI의 “이해함”</small>
               <strong id="ai-understanding-rate">75%</strong>
               <span class="audit-meter__arrow" aria-hidden="true">↓</span>
-              <small>사람이 감사한 뒤</small>
+              <small>검증표본 4개 · 사람이 감사한 뒤</small>
               <strong id="audited-understanding-rate">75%</strong>
               <p id="audit-summary">네 문장을 직접 확인해 보세요.</p>
             </aside>
@@ -553,7 +982,7 @@
           </div>
 
           <p class="result-sentence">
-            <strong>큰 데이터가 편향을 씻어주지는 않습니다.</strong>
+            <strong>큰 데이터가 편향(한쪽으로 치우치는 오류)을 씻어주지는 않습니다.</strong>
             사진을 크게 확대해도 가려진 부분이 새로 생기지 않는 것과 같습니다.
           </p>
           <a class="next-link" href="#cockpit">사람과 에이전트가 함께 결정하기 →</a>
@@ -568,6 +997,65 @@
               결정을 승인합니다.
             </p>
           </header>
+
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 07</small><strong>에이전트와 사람이 반복해서 배우는 법</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">에이전트</span>
+                  <h3>여러 단계를 잇는 프로그램</h3>
+                  <p>
+                    목표를 받으면 필요한 자료를 찾고, 계산 도구를 쓰고, 결과를 확인해 다음
+                    행동을 고르는 프로그램입니다. 사람처럼 의지나 책임을 가진 존재라는 뜻은
+                    아닙니다. 권한과 멈춤 조건은 사람이 정합니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">루프</span>
+                  <h3>한 번 답하고 끝내지 않기</h3>
+                  <p>
+                    질문→자료→추정→제안→작은 시험→새 자료가 다시 질문으로 이어지는
+                    순환입니다. 결과가 예상과 다르면 기록을 남기고 목표·가정·모형 중 무엇이
+                    틀렸는지 되돌아봅니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">사람의 자리</span>
+                  <h3>의미 있는 통제</h3>
+                  <p>
+                    승인 버튼이 있다는 것만으로 충분하지 않습니다. 사람이 근거를 이해할
+                    시간, 수정·거절할 권한, 실행을 멈출 수단, 결과에 책임질 역할을 실제로
+                    가져야 합니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>네 개의 문장을 제안서에서 찾기</span>
+                <ol>
+                  <li><b>왜·근거</b><p>현재 선택한 목표의 가중치와 가상 효과표를 전수 계산해 이 후보를 냈습니다.</p></li>
+                  <li><b>불확실성</b><p>현장자료가 아니며 내일도 같은 효과가 날지 모릅니다.</p></li>
+                  <li><b>되돌리기</b><p>실제 배포가 아니라 1시간 모의운영 뒤 중단하고 다시 추정합니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  네 칸을 체크했다고 이해가 자동 증명되지는 않습니다. 그래서 체크하기 전에
+                  바로 아래 제안서에서 해당 문장을 직접 찾아야 하며, 납득되지 않으면
+                  반려하는 것도 정상적인 성공 경로입니다.
+                </p>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> AI의 계산이 정확해도 사람이 승인 전에 목표를 확인해야 하는 이유는 무엇일까요?</p>
+              <div class="room-bridge">
+                <p><b>방금 안 것</b><span>AI는 제안하고 사람은 묻고 고치고 멈춘다.</span></p>
+                <p><b>아직 모르는 것</b><span>같은 판단을 매번 AI에게 맡겨야 할까?</span></p>
+                <p><b>다음 방</b><span>안정된 반복을 도구로 굳힌다.</span></p>
+              </div>
+            </div>
+          </details>
 
           <ol class="agent-loop" aria-label="AI 계량경제학 에이전트 루프">
             <li class="is-complete"><span>1</span><b>질문</b><small>사람이 정함</small></li>
@@ -596,10 +1084,22 @@
 
             <fieldset class="approval-gates">
               <legend>승인 전 네 질문을 직접 확인하세요</legend>
-              <label><input type="checkbox" value="why" /> 왜 이 제안인가?</label>
-              <label><input type="checkbox" value="evidence" /> 근거와 가정은 무엇인가?</label>
-              <label><input type="checkbox" value="uncertainty" /> 얼마나 불확실한가?</label>
-              <label><input type="checkbox" value="reversible" /> 틀리면 멈추거나 되돌릴 수 있는가?</label>
+              <label>
+                <input type="checkbox" value="why" />
+                <span><b>왜 이 제안인가?</b><small>제안 제목과 목표점수에서 이유 찾기</small></span>
+              </label>
+              <label>
+                <input type="checkbox" value="evidence" />
+                <span><b>근거와 가정은 무엇인가?</b><small>근거·가정 두 줄을 직접 읽기</small></span>
+              </label>
+              <label>
+                <input type="checkbox" value="uncertainty" />
+                <span><b>얼마나 불확실한가?</b><small>모르는 것과 측정하지 않은 것 찾기</small></span>
+              </label>
+              <label>
+                <input type="checkbox" value="reversible" />
+                <span><b>틀리면 멈추거나 되돌릴 수 있는가?</b><small>1시간 모의운영과 중단권 확인</small></span>
+              </label>
             </fieldset>
 
             <div class="approval-actions">
@@ -615,10 +1115,10 @@
           <div class="human-attention">
             <div>
               <small>미래의 새 병목</small>
-              <strong>GPU보다 사람의 검토시간</strong>
+              <strong>일부 AI 작업에서는 사람의 검토시간</strong>
             </div>
             <p>
-              AI가 후보를 무한히 만들면 사람은 검토하다 지칩니다. 그래서 인간의 주의력도
+              AI가 매우 많은 후보를 만들면 사람은 검토하다 지칩니다. 그래서 인간의 주의력도
               칸토로비치식으로 가장 되돌리기 어려운 결정에 배분해야 합니다.
             </p>
           </div>
@@ -638,15 +1138,89 @@
             <p class="exhibit__number">보너스 전시 · 제로토큰 공방</p>
             <h2>매번 다시 생각할까, 한 번 도구로 만들까?</h2>
             <p class="exhibit__one-line">
-              새롭고 애매한 일은 에이전트에게, 검증된 반복은 코드와 규칙에게 맡깁니다.
+              새롭고 애매한 일은 에이전트가 다루고 사람이 감사하며, 검증된 반복은 코드와
+              규칙에게 맡깁니다.
             </p>
           </header>
+
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 +</small><strong>토큰 0보다 중요한 ‘언제 도구화할까’</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">실행할 때</span>
+                  <h3>런타임과 대규모 언어모델(LLM) 토큰</h3>
+                  <p>
+                    런타임은 프로그램이 실제로 돌아가는 때입니다. 대규모 언어모델(LLM)
+                    토큰은 모델이 글을 읽고 쓸 때 세는 처리 단위입니다. “런타임 토큰 0”은
+                    그 실행에서 LLM을 부르지 않는다는 뜻이지 컴퓨터가 아무 일도 안 한다는
+                    뜻은 아닙니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">처음 한 번</span>
+                  <h3>고정 구축비</h3>
+                  <p>
+                    규칙을 설계하고 코드로 만들고 시험하는 비용입니다. 한 번만 할 일이라면
+                    이 비용이 너무 커 도구화가 손해일 수 있습니다. 규칙이 바뀌면 수정·재검증
+                    비용도 다시 듭니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">매번 조금씩</span>
+                  <h3>회당비용과 손익분기</h3>
+                  <p>
+                    한 번 실행할 때마다 드는 비용이 회당비용입니다. 처음에는 비싼 도구 경로가
+                    반복되면서 유리해져 두 총비용이 같아지는 첫 횟수를 손익분기점이라고 합니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>5회·10회·30회 비교</span>
+                <ol>
+                  <li><b>5회</b><p>에이전트 14×5=70, 도구 120+2×5=130으로 아직 에이전트가 쌉니다.</p></li>
+                  <li><b>10회</b><p>둘 다 140으로 같아져 손익분기에 닿습니다.</p></li>
+                  <li><b>30회</b><p>에이전트 420, 도구 180으로 안정된 반복의 도구화가 유리합니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  반복이 많다는 이유만으로 자동화하면 안 됩니다. 규칙의 변화 가능성과 실패
+                  위험도 함께 봐야 합니다. 안정된 반복은 도구, 낯선 예외는 에이전트와 사람
+                  감사, 생명·권리처럼 고위험 결정은 사람의 최종 승인이 필요합니다.
+                </p>
+              </div>
+              <div class="decision-matrix">
+                <h3>반복성 × 변화 가능성 × 위험도 결정표</h3>
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>일</th><th>반복</th><th>변화</th><th>위험</th><th>주된 담당</th></tr></thead>
+                    <tbody>
+                      <tr><td>같은 형식 파일 이름 바꾸기</td><td>높음</td><td>낮음</td><td>낮음</td><td>검증된 코드</td></tr>
+                      <tr><td>새 정책 문서 요약하기</td><td>낮음</td><td>높음</td><td>중간</td><td>에이전트 + 사람 감사</td></tr>
+                      <tr><td>대피소 의약품 전력 줄이기</td><td>상관없음</td><td>상관없음</td><td>매우 높음</td><td>사람의 명시적 승인</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> 한 번뿐이고 규칙도 자주 바뀌는 일을 무조건 코드로 만들면 왜 손해일까요?</p>
+              <div class="room-bridge">
+                <p><b>방금 안 것</b><span>도구화는 반복·변화·위험을 함께 보고 정한다.</span></p>
+                <p><b>아직 모르는 것</b><span>새로운 위기 상황에서도 같은 생각을 쓸 수 있을까?</span></p>
+                <p><b>다음 방</b><span>대피소 문제로 개념을 옮긴다.</span></p>
+              </div>
+            </div>
+          </details>
 
           <div class="workshop-note">
             <strong>정확한 이름표</strong>
             <p>
               Zero Token Architecture는 정립된 학술 이론명이 아니라, Kelsey Hightower가
-              AI 과잉 적용을 익살스럽게 비튼 설계 철학입니다. “예전 이름: 자동화·셸 스크립트.”
+              AI 과잉 적용을 익살스럽게 비튼 설계 철학입니다. “예전 이름: 자동화·셸
+              스크립트(명령을 자동 실행하는 짧은 프로그램).”
             </p>
           </div>
 
@@ -719,9 +1293,83 @@
             <h2>외웠는지 말고, 옮겨 쓸 수 있는지</h2>
             <p class="exhibit__one-line">
               미래학교 축제를 떠나 재난대피소라는 새 상황에 같은 생각법을 적용해 봅니다.
-              여섯 문제를 모두 이해할 때까지 설명을 바꿔 다시 도전할 수 있습니다.
+              여덟 문제를 모두 이해할 때까지 설명을 바꿔 다시 도전할 수 있습니다.
             </p>
           </header>
+
+          <details class="concept-walkthrough" data-walkthrough open>
+            <summary>
+              <span><small>차근차근 해설 08</small><strong>새 상황에 옮길 때 지켜야 할 순서</strong></span>
+            </summary>
+            <div class="concept-walkthrough__body">
+              <div class="lesson-grid">
+                <article>
+                  <span class="lesson-label">1 · 최소선</span>
+                  <h3>점수보다 먼저 지킬 제약</h3>
+                  <p>
+                    생명·권리처럼 타협하면 안 되는 조건은 점수를 높이는 목표가 아니라
+                    제약조건으로 적습니다. “냉장 의약품에 전기 최소 3칸”을 먼저 지키고
+                    남은 자원을 비교해야 합니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">2 · 근거</span>
+                  <h3>예측과 인과를 나누기</h3>
+                  <p>
+                    “어디에 사람이 몰릴까?”는 예측이고, “충전소를 늘리면 구조 연락이
+                    늘까?”는 인과 질문입니다. 좋은 수요예측도 정책을 바꾼 효과를 저절로
+                    알려주지는 않습니다.
+                  </p>
+                </article>
+                <article>
+                  <span class="lesson-label">3 · 책임</span>
+                  <h3>오차와 중단권 확인</h3>
+                  <p>
+                    AI 수요 숫자가 어떻게 측정됐고 얼마나 틀릴 수 있는지 확인합니다.
+                    위험이 크면 사람이 승인하며, 작은 시험·실시간 감시·중단 방법을 먼저
+                    준비합니다.
+                  </p>
+                </article>
+              </div>
+              <div class="worked-example">
+                <span>전기 8칸을 배분하기 전</span>
+                <ol>
+                  <li><b>필수 제약</b><p>냉장 의약품 ≥ 3칸을 먼저 확보합니다.</p></li>
+                  <li><b>남은 선택</b><p>나머지 5칸을 조명과 충전에 배분해 안전목표를 비교합니다.</p></li>
+                  <li><b>추가 한 칸</b><p>안전점수 +7은 현재 배분 근처의 이산 한계가치이며, 항상 7은 아닙니다.</p></li>
+                </ol>
+              </div>
+              <div class="misconception">
+                <b>헷갈림 방지</b>
+                <p>
+                  “안전점수 최대”만 적으면 소수에게 꼭 필요한 전력을 희생할 수 있습니다.
+                  최적화 전에 최소선과 금지선을 적고, AI의 수요예측을 사실이 아닌 오차 있는
+                  추정으로 다뤄야 합니다.
+                </p>
+              </div>
+              <div class="glossary">
+                <h3>관람을 마치기 전, 핵심 말 15개</h3>
+                <div class="glossary-grid">
+                  <p><b>계량경제학</b><span>경제 질문을 데이터로 재고 불확실성도 말하는 방법</span></p>
+                  <p><b>결정변수</b><span>무엇을 얼마나 선택할지 나타내는 값</span></p>
+                  <p><b>목적함수</b><span>가장 크게 또는 작게 만들 점수</span></p>
+                  <p><b>제약조건</b><span>반드시 지켜야 하는 한계와 최소선</span></p>
+                  <p><b>한계효과</b><span>지금 한 단위를 더 쓸 때 새로 얻는 효과</span></p>
+                  <p><b>최적안</b><span>현재 목표·제약·효과표 안에서 점수가 가장 높은 선택</span></p>
+                  <p><b>이산 한계가치</b><span>정수 자원 한 칸을 더 받을 때 늘어나는 최적 점수</span></p>
+                  <p><b>상관관계</b><span>두 값이 직선 모양으로 함께 움직이는 방향과 정도</span></p>
+                  <p><b>교란요인</b><span>두 값을 함께 움직여 원인처럼 보이게 할 세 번째 요인</span></p>
+                  <p><b>회귀</b><span>자료 속 평균적인 관계를 선이나 식으로 요약하는 도구</span></p>
+                  <p><b>반사실</b><span>실제로 일어나지 않아 볼 수 없는 다른 선택의 결과</span></p>
+                  <p><b>인과효과</b><span>한 선택을 바꿨기 때문에 생긴 결과의 차이</span></p>
+                  <p><b>측정오차</b><span>재고 싶은 실제 상태와 기록된 값의 차이</span></p>
+                  <p><b>에이전트</b><span>목표를 받고 도구를 써 여러 단계를 잇는 프로그램</span></p>
+                  <p><b>손익분기점</b><span>두 선택의 누적 비용이 처음 같아지는 지점</span></p>
+                </div>
+              </div>
+              <p class="teach-back"><b>내 말로 확인</b> 대피소에서 “점수를 가장 크게” 계산하기 전에 사람이 먼저 적어야 할 것은 무엇일까요?</p>
+            </div>
+          </details>
 
           <div class="transfer-case">
             <span>새 상황</span>
@@ -792,7 +1440,7 @@
         </section>
       </main>
 
-      <aside id="docent" class="docent" aria-labelledby="docent-title">
+      <aside id="docent" class="docent" aria-labelledby="docent-title" tabindex="-1">
         <div class="docent__identity">
           <span class="docent__face" aria-hidden="true"><i></i><i></i></span>
           <div><strong id="docent-title">TT</strong><small>Thinking Together</small></div>
@@ -804,7 +1452,7 @@
         <div class="docent__depth" role="group" aria-label="도슨트 설명 깊이">
           <button type="button" data-depth="short" aria-pressed="true">한 줄로</button>
           <button type="button" data-depth="analogy" aria-pressed="false">비유로</button>
-          <button type="button" data-depth="deep" aria-pressed="false">조금 깊게</button>
+          <button type="button" data-depth="deep" aria-pressed="false">왜 그런지</button>
         </div>
         <p class="docent__truth">로컬 규칙 기반 · 모델 호출 0회 · 선택 전송 0회</p>
       </aside>

@@ -962,6 +962,482 @@ input[type="range"] {
   color: var(--muted);
 }
 
+.reading-mode {
+  position: relative;
+  z-index: 1;
+  max-width: 850px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 8px 0 24px;
+  padding: 0;
+  border: 0;
+}
+
+.reading-mode legend {
+  grid-column: 1 / -1;
+  margin-bottom: 8px;
+  font-weight: 900;
+}
+
+.reading-mode label {
+  cursor: pointer;
+}
+
+.reading-mode input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reading-mode label > span {
+  min-height: 78px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.reading-mode label:hover > span {
+  transform: translateY(-1px);
+}
+
+.reading-mode input:focus-visible + span {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.reading-mode input:checked + span {
+  border-color: var(--orange);
+  background: #fff1ea;
+  box-shadow: inset 0 0 0 1px var(--orange);
+}
+
+.reading-mode b,
+.reading-mode small {
+  display: block;
+}
+
+.reading-mode small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.concept-walkthrough {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  margin: 0 0 34px;
+  overflow: clip;
+  border: 1px solid rgba(23, 59, 87, 0.22);
+  border-radius: 20px;
+  background:
+    linear-gradient(135deg, rgba(235, 244, 247, 0.84), rgba(255, 253, 248, 0.9)),
+    var(--white);
+  box-shadow: 0 12px 34px rgba(23, 59, 87, 0.08);
+}
+
+.concept-walkthrough--intro {
+  max-width: 850px;
+  margin-top: 4px;
+}
+
+.concept-walkthrough > summary {
+  min-height: 66px;
+  display: flex;
+  align-items: center;
+  padding: 14px 54px 14px 20px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.concept-walkthrough > summary:focus-visible {
+  outline-offset: -4px;
+}
+
+.concept-walkthrough > summary::-webkit-details-marker {
+  display: none;
+}
+
+.concept-walkthrough > summary::after {
+  position: absolute;
+  top: 22px;
+  right: 22px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--blue);
+  color: white;
+  content: "+";
+  font-size: 1rem;
+  font-weight: 900;
+}
+
+.concept-walkthrough[open] > summary {
+  border-bottom: 1px solid rgba(23, 59, 87, 0.14);
+}
+
+.concept-walkthrough[open] > summary::after {
+  content: "−";
+}
+
+.concept-walkthrough > summary span,
+.concept-walkthrough > summary small,
+.concept-walkthrough > summary strong,
+.concept-walkthrough > summary .walkthrough-title {
+  display: block;
+}
+
+.concept-walkthrough > summary small {
+  color: var(--orange);
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.concept-walkthrough > summary strong,
+.concept-walkthrough > summary .walkthrough-title {
+  max-width: none;
+  margin-top: 2px;
+  font-family: inherit;
+  font-size: clamp(1rem, 2vw, 1.22rem);
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.concept-walkthrough__body {
+  padding: 24px;
+}
+
+.lesson-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.lesson-grid article {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid rgba(23, 59, 87, 0.13);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.lesson-grid h3 {
+  margin: 6px 0 9px;
+  color: var(--blue);
+  font-size: 1.05rem;
+}
+
+.lesson-grid p {
+  margin: 0;
+  color: #3f535d;
+  font-size: 0.86rem;
+  line-height: 1.72;
+}
+
+.lesson-label {
+  color: var(--orange);
+  font-size: 0.65rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.worked-example {
+  margin-top: 14px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--blue);
+  color: white;
+}
+
+.worked-example > span {
+  display: block;
+  margin-bottom: 12px;
+  color: var(--yellow);
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.worked-example ol {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: explanation-step;
+}
+
+.worked-example li {
+  position: relative;
+  min-width: 0;
+  padding: 13px 13px 13px 42px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  counter-increment: explanation-step;
+}
+
+.worked-example li::before {
+  position: absolute;
+  top: 13px;
+  left: 13px;
+  width: 21px;
+  height: 21px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--yellow);
+  color: var(--ink);
+  content: counter(explanation-step);
+  font-size: 0.65rem;
+  font-weight: 900;
+}
+
+.worked-example b,
+.worked-example p {
+  display: block;
+}
+
+.worked-example b {
+  color: white;
+  font-size: 0.78rem;
+}
+
+.worked-example p {
+  margin: 4px 0 0;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 0.75rem;
+  line-height: 1.65;
+}
+
+.misconception {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 15px 17px;
+  border-left: 5px solid var(--orange);
+  border-radius: 0 13px 13px 0;
+  background: #fff1ea;
+}
+
+.misconception b {
+  color: #9b3828;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.misconception p {
+  margin: 0;
+  color: #593d37;
+  font-size: 0.8rem;
+}
+
+.teach-back {
+  margin: 14px 0 0;
+  padding: 14px 16px;
+  border: 1px dashed var(--teal);
+  border-radius: 13px;
+  background: rgba(203, 232, 223, 0.56);
+  color: #224d48;
+  font-size: 0.82rem;
+}
+
+.teach-back b {
+  margin-right: 8px;
+  color: var(--teal);
+}
+
+.room-bridge {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--line);
+}
+
+.room-bridge p {
+  margin: 0;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.room-bridge b,
+.room-bridge span {
+  display: block;
+}
+
+.room-bridge b {
+  color: var(--orange);
+  font-size: 0.65rem;
+}
+
+.room-bridge span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.exhibit--dark .concept-walkthrough {
+  border-color: rgba(255, 255, 255, 0.22);
+  background:
+    linear-gradient(135deg, rgba(24, 52, 67, 0.96), rgba(14, 34, 44, 0.96)),
+    var(--ink);
+  box-shadow: none;
+}
+
+.exhibit--dark .concept-walkthrough > summary {
+  color: white;
+}
+
+.exhibit--dark button:focus-visible,
+.exhibit--dark a:focus-visible,
+.exhibit--dark input:focus-visible,
+.exhibit--dark textarea:focus-visible,
+.exhibit--dark summary:focus-visible,
+.exhibit--dark [tabindex="-1"]:focus-visible {
+  outline-color: var(--yellow);
+}
+
+.exhibit--dark .concept-walkthrough[open] > summary {
+  border-bottom-color: rgba(255, 255, 255, 0.16);
+}
+
+.exhibit--dark .concept-walkthrough > summary::after {
+  background: var(--yellow);
+  color: var(--ink);
+}
+
+.exhibit--dark .lesson-grid article {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.exhibit--dark .lesson-grid h3 {
+  color: var(--yellow);
+}
+
+.exhibit--dark .lesson-grid p {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.misconception--dark {
+  border-left-color: var(--yellow);
+  background: rgba(255, 202, 92, 0.12);
+}
+
+.misconception--dark b {
+  color: var(--yellow);
+}
+
+.misconception--dark p {
+  color: rgba(255, 255, 255, 0.84);
+}
+
+.exhibit--dark .teach-back {
+  border-color: #80c8bd;
+  background: rgba(15, 118, 110, 0.2);
+  color: white;
+}
+
+.exhibit--dark .teach-back b {
+  color: #a8e6dc;
+}
+
+.room-bridge--dark {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.room-bridge--dark p {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.room-bridge--dark span {
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.decision-matrix,
+.glossary {
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.decision-matrix h3,
+.glossary h3 {
+  margin: 0 0 13px;
+  font-size: 0.92rem;
+}
+
+.decision-matrix table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+}
+
+.decision-matrix th,
+.decision-matrix td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.decision-matrix th {
+  color: var(--blue);
+}
+
+.glossary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.glossary-grid p {
+  min-width: 0;
+  margin: 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(23, 59, 87, 0.12);
+  border-radius: 11px;
+  background: white;
+}
+
+.glossary-grid b,
+.glossary-grid span {
+  display: block;
+}
+
+.glossary-grid b {
+  color: var(--blue);
+  font-size: 0.72rem;
+}
+
+.glossary-grid span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
 .exhibit--garden {
   background:
     radial-gradient(circle at 85% 20%, rgba(23, 140, 125, 0.16), transparent 22rem),
@@ -2136,9 +2612,23 @@ th {
 }
 
 .approval-gates input {
+  flex: 0 0 auto;
   width: 20px;
   height: 20px;
   accent-color: var(--teal);
+}
+
+.approval-gates label > span,
+.approval-gates label b,
+.approval-gates label small {
+  display: block;
+}
+
+.approval-gates label small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.4;
 }
 
 .approval-actions {
@@ -3011,7 +3501,12 @@ body.reduce-motion *::after {
   }
 
   .value-badges,
+  .reading-mode,
   .concept-strip,
+  .lesson-grid,
+  .worked-example ol,
+  .room-bridge,
+  .glossary-grid,
   .allocation-grid,
   .candidate-garden,
   .truth-cards,
@@ -3019,6 +3514,55 @@ body.reduce-motion *::after {
   .future-cards,
   .price-grid {
     grid-template-columns: 1fr;
+  }
+
+  .concept-walkthrough > summary {
+    min-height: 62px;
+    padding: 12px 50px 12px 15px;
+  }
+
+  .concept-walkthrough > summary::after {
+    top: 18px;
+    right: 15px;
+  }
+
+  .concept-walkthrough__body {
+    padding: 15px;
+  }
+
+  .lesson-grid p,
+  .worked-example p,
+  .misconception p,
+  .teach-back,
+  .room-bridge span,
+  .glossary-grid span,
+  .quiz-options label,
+  .docent__message {
+    font-size: 0.9375rem;
+  }
+
+  .worked-example b,
+  .glossary-grid b {
+    font-size: 0.875rem;
+  }
+
+  .lesson-label,
+  .worked-example > span,
+  .room-bridge b {
+    font-size: 0.8rem;
+  }
+
+  .lesson-grid article {
+    padding: 15px;
+  }
+
+  .misconception {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+
+  .misconception b {
+    white-space: normal;
   }
 
   .value-badges label span {
