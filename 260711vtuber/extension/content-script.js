@@ -137,6 +137,18 @@
     if (resolved.platform === SOURCE_PLATFORM_YOUTUBE && resolved.contentId) {
       return `https://www.youtube.com/watch?v=${encodeURIComponent(resolved.contentId)}`;
     }
+    if (resolved.platform === SOURCE_PLATFORM_CHZZK) {
+      const contentType = String(resolved.contentType || "").toLowerCase();
+      if (contentType === "live" && resolved.channelId) {
+        return `https://chzzk.naver.com/live/${encodeURIComponent(resolved.channelId)}`;
+      }
+      if (contentType === "vod" && resolved.contentId) {
+        return `https://chzzk.naver.com/video/${encodeURIComponent(resolved.contentId)}`;
+      }
+      if (contentType === "clip" && resolved.contentId) {
+        return `https://chzzk.naver.com/clips/${encodeURIComponent(resolved.contentId)}`;
+      }
+    }
     url.hash = "";
     return url.toString();
   }
@@ -495,10 +507,7 @@
       return {
         platform,
         url: requestedUrl,
-        canonicalUrl: canonicalSourceUrl(
-          platform === SOURCE_PLATFORM_CHZZK ? document.querySelector("link[rel='canonical']")?.href || requestedUrl : requestedUrl,
-          identifiers
-        ),
+        canonicalUrl: canonicalSourceUrl(requestedUrl, identifiers),
         pageTitle,
         streamerName,
         broadcastTitle,

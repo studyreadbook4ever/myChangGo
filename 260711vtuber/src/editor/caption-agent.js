@@ -7,11 +7,15 @@ import {
   captionEditorialContextFingerprint
 } from "../caption-agent/editorial-context.js";
 
-export const CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v1";
+export const CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v2";
+export const LEGACY_CAPTION_AGENT_SETTINGS_KEY =
+  "chzzk-kirinuki-caption-agent-settings-v1";
 export const CAPTION_AGENT_REQUEST_SCHEMA = "chzzk-kirinuki-caption-request/v1";
 export const CAPTION_AGENT_RESPONSE_SCHEMA = "chzzk-kirinuki-caption-response/v1";
 export const CAPTION_AGENT_SESSION_SCHEMA =
   "chzzk-kirinuki-caption-agent/session-v1";
+export const CAPTION_AGENT_CAPABILITY_SCHEMA =
+  "chzzk-kirinuki-caption-agent/capability-v1";
 export const MAX_REMOTE_CUE_DURATION_MS = 4_000;
 export const MAX_REMOTE_CUES = 4_000;
 export const MAX_REMOTE_WARNINGS = 4_000;
@@ -40,21 +44,30 @@ export const CAPTION_AGENT_PROVIDER_HEADERS = Object.freeze({
 
 export const DEFAULT_CAPTION_AGENT_SETTINGS = Object.freeze({
   endpoint: "http://127.0.0.1:4319/v1/captions",
-  model: "solar-pro3",
+  model: "whisper-tiny",
   sttEndpoint: "",
   sttModel: ""
 });
 
+const LOCAL_WHISPER_CAPTION_MODEL = "whisper-tiny";
 const ALLOWED_SOLAR_MODELS = new Set([
   "solar-pro3",
   "solar-mini"
 ]);
+const ALLOWED_CAPTION_MODELS = new Set([
+  LOCAL_WHISPER_CAPTION_MODEL,
+  ...ALLOWED_SOLAR_MODELS
+]);
+const LEGACY_CAPTION_PIPELINE_FINGERPRINT = "legacy-caption-pipeline-v0";
+const REQUIRED_CAPTION_PIPELINE_FINGERPRINT =
+  "current-caption-pipeline-required-v1";
 
-const PLACEMENT_Y = Object.freeze({
-  top: 0.18,
-  center: 0.5,
-  bottom: 0.84
-});
+export function isSolarCaptionModel(model) {
+  return ALLOWED_SOLAR_MODELS.has(model);
+}
+
+const AUTOMATIC_CAPTION_PLACEMENT = "bottom";
+const AUTOMATIC_CAPTION_Y = 0.84;
 
 function finiteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -225,7 +238,7 @@ export function captionAgentPermissionOrigin(endpoint) {
 }
 
 export function normalizeCaptionAgentSettings(raw = {}) {
-  const model = ALLOWED_SOLAR_MODELS.has(raw.model)
+  const model = ALLOWED_CAPTION_MODELS.has(raw.model)
     ? raw.model
     : DEFAULT_CAPTION_AGENT_SETTINGS.model;
   let endpoint = DEFAULT_CAPTION_AGENT_SETTINGS.endpoint;
@@ -248,12 +261,32 @@ export function normalizeCaptionAgentSettings(raw = {}) {
   } catch {
     // Invalid non-secret provider settings are discarded on load.
   }
+  if (model === LOCAL_WHISPER_CAPTION_MODEL) {
+    if (!isLoopbackCaptionAgentEndpoint(endpoint)) {
+      endpoint = DEFAULT_CAPTION_AGENT_SETTINGS.endpoint;
+    }
+    // Old Solar settings must not silently turn the local-only mode into an
+    // external STT request after the default-model migration.
+    sttEndpoint = "";
+    sttModel = "";
+  }
   return { endpoint, model, sttEndpoint, sttModel };
 }
 
 export async function loadCaptionAgentSettings(storageArea = chrome.storage.local) {
-  const stored = await storageArea.get(CAPTION_AGENT_SETTINGS_KEY);
-  return normalizeCaptionAgentSettings(stored[CAPTION_AGENT_SETTINGS_KEY]);
+  const stored = await storageArea.get([
+    CAPTION_AGENT_SETTINGS_KEY,
+    LEGACY_CAPTION_AGENT_SETTINGS_KEY
+  ]);
+  const current = stored[CAPTION_AGENT_SETTINGS_KEY];
+  if (current) {
+    return normalizeCaptionAgentSettings(current);
+  }
+  const legacy = normalizeCaptionAgentSettings({
+    ...(stored[LEGACY_CAPTION_AGENT_SETTINGS_KEY] || {}),
+    model: DEFAULT_CAPTION_AGENT_SETTINGS.model
+  });
+  return legacy;
 }
 
 export async function saveCaptionAgentSettings(
@@ -270,6 +303,104 @@ export async function saveCaptionAgentSettings(
   return normalized;
 }
 
+function boundedCapabilityString(value, label, maximum = 2_048) {
+  const normalized = String(value || "").trim();
+  if (
+    !normalized
+    || normalized.length > maximum
+    || /[\u0000-\u001f\u007f]/u.test(normalized)
+  ) {
+    throw new Error(`자막 에이전트의 ${label} 정보가 올바르지 않습니다.`);
+  }
+  return normalized;
+}
+
+function shortStableFingerprint(value) {
+  const bytes = new TextEncoder().encode(String(value));
+  let first = 0x811C9DC5;
+  let second = 0x9E3779B9;
+  for (const byte of bytes) {
+    first = Math.imul(first ^ byte, 0x01000193) >>> 0;
+    second = Math.imul(second ^ byte, 0x85EBCA6B) >>> 0;
+  }
+  return `${first.toString(16).padStart(8, "0")}${second
+    .toString(16)
+    .padStart(8, "0")}`;
+}
+
+export function captionAgentRuntimeIdentity(
+  capability,
+  {
+    model = DEFAULT_CAPTION_AGENT_SETTINGS.model,
+    sttEndpoint = ""
+  } = {}
+) {
+  if (!isPlainObject(capability)) {
+    throw new Error("자막 에이전트 capability 응답이 JSON 객체가 아닙니다.");
+  }
+  if (
+    capability.schema !== CAPTION_AGENT_CAPABILITY_SCHEMA
+    || capability.status !== "ok"
+  ) {
+    throw new Error("자막 에이전트 capability 버전이 맞지 않습니다.");
+  }
+  if (!ALLOWED_CAPTION_MODELS.has(model)) {
+    throw new Error("선택한 자막 초벌 모델이 올바르지 않습니다.");
+  }
+  const availableModels = Array.isArray(capability.availableModels)
+    ? capability.availableModels.map((entry) => String(entry))
+    : [];
+  if (!availableModels.includes(model)) {
+    throw new Error(`로컬 companion이 ${model} 모델을 지원하지 않습니다.`);
+  }
+  const provider = boundedCapabilityString(
+    capability.provider,
+    "STT 제공자",
+    80
+  );
+  if (!["local-whispercpp", "timed-stt"].includes(provider)) {
+    throw new Error("자막 에이전트의 STT 제공자가 올바르지 않습니다.");
+  }
+  const sttModel = boundedCapabilityString(
+    capability.models?.stt,
+    "실제 STT 모델",
+    MAX_STT_MODEL_LENGTH
+  );
+  const transcriptionMode = boundedCapabilityString(
+    capability.transcription?.mode,
+    "STT 실행 방식",
+    80
+  );
+  if (
+    model === LOCAL_WHISPER_CAPTION_MODEL
+    && (
+      provider !== "local-whispercpp"
+      || transcriptionMode !== "local-whispercpp"
+    )
+  ) {
+    throw new Error(
+      "Whisper Tiny 로컬 초벌은 이 기기의 local-whispercpp runtime만 사용할 수 있습니다."
+    );
+  }
+  const normalizedEndpoint = sttEndpoint
+    ? normalizeExternalSttEndpoint(sttEndpoint)
+    : "";
+  const identitySource = JSON.stringify({
+    schema: "caption-pipeline-identity/v1",
+    model,
+    provider,
+    transcriptionMode,
+    sttModel,
+    sttEndpoint: normalizedEndpoint
+  });
+  return {
+    provider,
+    sttModel,
+    transcriptionMode,
+    fingerprint: `caption-pipeline-v1-${shortStableFingerprint(identitySource)}`
+  };
+}
+
 export async function ensureCaptionAgentPermission(
   endpoint,
   permissionsApi = chrome.permissions
@@ -281,7 +412,9 @@ export async function ensureCaptionAgentPermission(
   return permissionsApi.request({ origins: [origin] });
 }
 
-export function captionAgentRunEstimate(clips = []) {
+export function captionAgentRunEstimate(clips = [], {
+  model = DEFAULT_CAPTION_AGENT_SETTINGS.model
+} = {}) {
   if (!Array.isArray(clips)) {
     throw new TypeError("자막 실행 예상량을 계산할 컷 배열이 필요합니다.");
   }
@@ -294,8 +427,8 @@ export function captionAgentRunEstimate(clips = []) {
   return {
     clipCount: enabled.length,
     totalDurationMs,
-    plannedSolarRequests: enabled.length,
-    maximumSolarRequests: enabled.length
+    plannedSolarRequests: isSolarCaptionModel(model) ? enabled.length : 0,
+    maximumSolarRequests: isSolarCaptionModel(model) ? enabled.length : 0
   };
 }
 
@@ -314,7 +447,8 @@ function captionCheckpointKey({
   model,
   qualityProfile,
   harnessFingerprint,
-  editorialContextFingerprint
+  editorialContextFingerprint,
+  pipelineFingerprint
 }) {
   return [
     String(clipId || ""),
@@ -323,7 +457,8 @@ function captionCheckpointKey({
     String(model || ""),
     String(qualityProfile || "legacy-unharnessed-v0"),
     String(harnessFingerprint || "legacy-harness-fingerprint-v0"),
-    String(editorialContextFingerprint || "legacy-context-v0")
+    String(editorialContextFingerprint || "legacy-context-v0"),
+    String(pipelineFingerprint || LEGACY_CAPTION_PIPELINE_FINGERPRINT)
   ].join("\u0000");
 }
 
@@ -333,11 +468,12 @@ export function createCaptionAgentCheckpoint(
   {
     requestId = "",
     completedAt = new Date().toISOString(),
-    editorialContextFingerprint = "legacy-context-v0"
+    editorialContextFingerprint = "legacy-context-v0",
+    pipelineFingerprint = REQUIRED_CAPTION_PIPELINE_FINGERPRINT
   } = {}
 ) {
-  if (!ALLOWED_SOLAR_MODELS.has(model)) {
-    throw new Error("자막 재개 체크포인트의 Solar 모델이 올바르지 않습니다.");
+  if (!ALLOWED_CAPTION_MODELS.has(model)) {
+    throw new Error("자막 재개 체크포인트의 초벌 모델이 올바르지 않습니다.");
   }
   const normalizedModel = model;
   const checkpoint = {
@@ -350,6 +486,9 @@ export function createCaptionAgentCheckpoint(
     editorialContextFingerprint: String(
       editorialContextFingerprint || "legacy-context-v0"
     ).trim().slice(0, 128),
+    pipelineFingerprint: String(
+      pipelineFingerprint || REQUIRED_CAPTION_PIPELINE_FINGERPRINT
+    ).trim().slice(0, 128),
     requestId: String(requestId || "").trim().slice(0, 128),
     completedAt: String(completedAt || "").trim().slice(0, 64)
   };
@@ -357,6 +496,7 @@ export function createCaptionAgentCheckpoint(
     !checkpoint.clipId
     || checkpoint.sourceStartMs < 0
     || checkpoint.sourceEndMs <= checkpoint.sourceStartMs
+    || !checkpoint.pipelineFingerprint
   ) {
     throw new Error("자막 재개 체크포인트용 컷 범위가 올바르지 않습니다.");
   }
@@ -429,7 +569,8 @@ export function captionAgentResumePlan(
   model,
   {
     resume = false,
-    editorialContextFingerprint = "legacy-context-v0"
+    editorialContextFingerprint = "legacy-context-v0",
+    pipelineFingerprint = REQUIRED_CAPTION_PIPELINE_FINGERPRINT
   } = {}
 ) {
   const enabled = (Array.isArray(clips) ? clips : []).filter(
@@ -454,7 +595,8 @@ export function captionAgentResumePlan(
       model,
       qualityProfile: CAPTION_QUALITY_PROFILE_ID,
       harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
-      editorialContextFingerprint
+      editorialContextFingerprint,
+      pipelineFingerprint
     }));
     if (completed) {
       skippedClipIds.push(String(clip.id));
@@ -470,7 +612,7 @@ export function captionAgentResumePlan(
 export function captionAgentAudioFootprint(durationMs) {
   const duration = Math.round(finiteNumber(durationMs));
   if (duration <= 0 || duration > MAX_CAPTION_AGENT_CLIP_DURATION_MS) {
-    throw new RangeError("Solar 자막은 한 컷당 30분 이하만 처리할 수 있습니다.");
+    throw new RangeError("자동 자막은 한 컷당 30분 이하만 처리할 수 있습니다.");
   }
   const sampleCount = Math.ceil(
     duration * CAPTION_AGENT_SAMPLE_RATE_HZ / 1_000
@@ -478,7 +620,7 @@ export function captionAgentAudioFootprint(durationMs) {
   const floatPcmBytes = sampleCount * Float32Array.BYTES_PER_ELEMENT;
   const wavBytes = 44 + sampleCount * Int16Array.BYTES_PER_ELEMENT;
   if (wavBytes > MAX_CAPTION_AGENT_WAV_BYTES) {
-    throw new RangeError("Solar 자막용 WAV가 64MiB 상한을 넘습니다.");
+    throw new RangeError("자동 자막용 WAV가 64MiB 상한을 넘습니다.");
   }
   return {
     durationMs: duration,
@@ -498,11 +640,11 @@ export function encodePcm16WavBase64(
   }
   const sampleRate = Math.round(finiteNumber(sampleRateHz));
   if (sampleRate !== CAPTION_AGENT_SAMPLE_RATE_HZ) {
-    throw new RangeError("Solar 자막은 16kHz PCM 오디오만 처리할 수 있습니다.");
+    throw new RangeError("자동 자막은 16kHz PCM 오디오만 처리할 수 있습니다.");
   }
   const wavByteLength = 44 + audio.length * 2;
   if (wavByteLength > MAX_CAPTION_AGENT_WAV_BYTES) {
-    throw new RangeError("Solar 자막용 WAV가 64MiB 상한을 넘습니다.");
+    throw new RangeError("자동 자막용 WAV가 64MiB 상한을 넘습니다.");
   }
   const bytes = new Uint8Array(wavByteLength);
   const view = new DataView(bytes.buffer);
@@ -562,8 +704,8 @@ export function createCaptionAgentRequest({
     throw new Error("자막을 만들 컷 구간이 올바르지 않습니다.");
   }
   captionAgentAudioFootprint(durationMs);
-  if (!ALLOWED_SOLAR_MODELS.has(model)) {
-    throw new Error("지원하지 않는 Solar 모델입니다.");
+  if (!ALLOWED_CAPTION_MODELS.has(model)) {
+    throw new Error("지원하지 않는 자막 초벌 모델입니다.");
   }
   if (!audioBase64) {
     throw new Error("에이전트에 보낼 음성이 비어 있습니다.");
@@ -662,7 +804,7 @@ function normalizedColor(value) {
   return /^#[0-9a-f]{6}$/iu.test(color) ? color.toLowerCase() : undefined;
 }
 
-function normalizedRemoteMeta(raw, placement) {
+function normalizedRemoteMeta(raw) {
   const rawQuality = raw?.quality;
   const qualityCodes = Array.isArray(rawQuality?.codes)
     ? [...new Set(rawQuality.codes
@@ -682,7 +824,7 @@ function normalizedRemoteMeta(raw, placement) {
       Boolean(raw?.reviewRequired ?? raw?.review_required)
       || qualityStatus === "review-required"
     ),
-    placement,
+    placement: AUTOMATIC_CAPTION_PLACEMENT,
     ...(isPlainObject(rawQuality)
       ? { qualityStatus, qualityCodes }
       : {})
@@ -718,21 +860,14 @@ export function normalizeCaptionAgentCues(cues, clipDurationMs) {
     }
     const startOffsetMs = Math.round(rawStartMs);
     const endOffsetMs = Math.round(rawEndMs);
-    const requestedPlacement = String(raw?.placement || "bottom").toLowerCase();
-    const placement = Object.hasOwn(PLACEMENT_Y, requestedPlacement)
-      ? requestedPlacement
-      : "bottom";
-    const y = Object.hasOwn(PLACEMENT_Y, requestedPlacement)
-      ? PLACEMENT_Y[requestedPlacement]
-      : clamp(finiteNumber(raw?.y, PLACEMENT_Y.bottom), 0.08, 0.92);
     const color = normalizedColor(raw?.color);
     return {
       startOffsetMs,
       endOffsetMs,
       text,
-      y,
+      y: AUTOMATIC_CAPTION_Y,
       ...(color ? { color } : {}),
-      remoteMeta: normalizedRemoteMeta(raw, placement)
+      remoteMeta: normalizedRemoteMeta(raw)
     };
   }).sort((left, right) => (
     left.startOffsetMs - right.startOffsetMs ||
@@ -1043,8 +1178,21 @@ function validateCompletedCaptionAgentResponse(payload, request) {
   ]) {
     requiredResponseString(payload, field);
   }
-  if (payload.provider !== "upstage") {
-    throw new Error("자막 에이전트 응답 제공자가 Upstage가 아닙니다.");
+  if (!["local-whispercpp", "upstage"].includes(payload.provider)) {
+    throw new Error("자막 에이전트 응답 제공자가 올바르지 않습니다.");
+  }
+  const requestedModel = String(request?.model || "");
+  if (
+    payload.captionModel !== requestedModel
+    || payload.model !== requestedModel
+  ) {
+    throw new Error("자막 에이전트 응답 모델이 현재 요청과 다릅니다.");
+  }
+  const expectedProvider = requestedModel === LOCAL_WHISPER_CAPTION_MODEL
+    ? "local-whispercpp"
+    : "upstage";
+  if (payload.provider !== expectedProvider) {
+    throw new Error("자막 에이전트 응답 제공자가 선택한 초벌 방식과 다릅니다.");
   }
   if (!Array.isArray(payload.cues) || payload.cues.length > MAX_REMOTE_CUES) {
     throw new Error("자막 에이전트 응답의 cues 필드가 올바르지 않습니다.");
@@ -1218,7 +1366,7 @@ export async function requestCaptionAgent({
         providerConfig
       )
     };
-    onProgress(0.08, "외부 자막 에이전트에 음성을 보내는 중");
+    onProgress(0.08, "자막 엔진에 선택 구간 음성을 보내는 중");
     throwIfAborted(requestSignal);
     let response = await fetchImpl(normalizedEndpoint, {
       method: "POST",
@@ -1247,7 +1395,7 @@ export async function requestCaptionAgent({
       pollCount += 1;
       onProgress(
         clamp(finiteNumber(payload.progress, 0.15 + pollCount * 0.025), 0.12, 0.92),
-        String(payload.message || "외부 음성인식과 Solar 자막 정리 중")
+        String(payload.message || "음성인식과 자막 초벌 정리 중")
       );
       await abortableDelay(
         clamp(finiteNumber(payload.retryAfterMs, 1_200), 300, 10_000),
@@ -1274,7 +1422,12 @@ export async function requestCaptionAgent({
     }
     throwIfAborted(requestSignal);
     validateCompletedCaptionAgentResponse(payload, request);
-    onProgress(1, "Solar 자막 초안 수신 완료");
+    onProgress(
+      1,
+      payload.provider === "local-whispercpp"
+        ? "로컬 Whisper 자막 초안 수신 완료"
+        : "Solar 자막 초안 수신 완료"
+    );
     return payload;
   } finally {
     deadline.cleanup();

@@ -2,16 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CAPTION_RESPONSE_PROVIDERS,
   CAPTION_AGENT_REQUEST_SCHEMA_ID,
   CAPTION_AGENT_REQUEST_JSON_SCHEMA,
   CAPTION_AGENT_RESPONSE_SCHEMA_ID,
   CAPTION_AGENT_RESPONSE_JSON_SCHEMA,
   KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT,
+  LOCAL_WHISPER_CAPTION_MODEL,
   MAX_AUDIO_WAV_BYTES,
   MAX_CAPTION_CUE_DURATION_MS,
   MAX_CAPTION_CUES,
   MAX_CAPTION_WARNINGS,
   MAX_CLIP_DURATION_MS,
+  SUPPORTED_CAPTION_MODELS,
   SUPPORTED_SOLAR_CAPTION_MODELS,
   UPSTAGE_CAPTION_JSON_SCHEMA,
   CaptionProtocolError,
@@ -51,7 +54,7 @@ function protocolRequest(overrides = {}) {
   return {
     schema: CAPTION_AGENT_REQUEST_SCHEMA_ID,
     requestId: "protocol-request-1",
-    model: "solar-pro3",
+    model: LOCAL_WHISPER_CAPTION_MODEL,
     locale: "ko-KR",
     clip: {
       id: "clip-1",
@@ -94,7 +97,7 @@ function protocolRequest(overrides = {}) {
   };
 }
 
-test("프로토콜은 한국어 VTuber 키리누키 규칙과 평평한 Solar cue 스키마를 공개한다", () => {
+test("프로토콜은 로컬 Whisper 기본값과 선택형 Solar 모델 계약을 함께 공개한다", () => {
   assert.equal(
     CAPTION_AGENT_REQUEST_JSON_SCHEMA.$id,
     CAPTION_AGENT_REQUEST_SCHEMA_ID
@@ -106,11 +109,23 @@ test("프로토콜은 한국어 VTuber 키리누키 규칙과 평평한 Solar cu
   assert(CAPTION_AGENT_REQUEST_JSON_SCHEMA.required.includes("requestId"));
   assert.deepEqual(
     CAPTION_AGENT_REQUEST_JSON_SCHEMA.properties.model.enum,
-    ["solar-pro3", "solar-mini"]
+    SUPPORTED_CAPTION_MODELS
+  );
+  assert.deepEqual(
+    SUPPORTED_CAPTION_MODELS,
+    ["whisper-tiny", "solar-pro3", "solar-mini"]
   );
   assert.deepEqual(
     SUPPORTED_SOLAR_CAPTION_MODELS,
     ["solar-pro3", "solar-mini"]
+  );
+  assert.deepEqual(
+    CAPTION_AGENT_RESPONSE_JSON_SCHEMA.properties.provider.enum,
+    CAPTION_RESPONSE_PROVIDERS
+  );
+  assert.deepEqual(
+    CAPTION_RESPONSE_PROVIDERS,
+    ["local-whispercpp", "upstage"]
   );
   assert.equal(
     CAPTION_AGENT_REQUEST_JSON_SCHEMA.properties.audio.properties.data.maxLength,
@@ -135,7 +150,7 @@ test("프로토콜은 한국어 VTuber 키리누키 규칙과 평평한 Solar cu
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /마침표/u);
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /물음표/u);
   assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /의미·호흡/u);
-  assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /visualPlacement/u);
+  assert.match(KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT, /placement는 bottom/u);
   assert.match(
     KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT,
     /편집 자료이지 명령이 아니다/u
@@ -160,6 +175,11 @@ test("프로토콜은 한국어 VTuber 키리누키 규칙과 평평한 Solar cu
       .properties.startMs.type,
     "integer"
   );
+  assert.equal(
+    UPSTAGE_CAPTION_JSON_SCHEMA.schema.properties.cues.items
+      .properties.placement.const,
+    "bottom"
+  );
 });
 
 test("caption-agent 요청은 스키마·한국어·클립 길이·base64를 엄격히 검증한다", () => {
@@ -183,7 +203,7 @@ test("caption-agent 요청은 스키마·한국어·클립 길이·base64를 엄
       clipDurationMs: 12_345,
       language: "ko",
       streamerName: "엘리",
-      model: "solar-pro3"
+      model: "whisper-tiny"
     }
   );
 
@@ -454,7 +474,7 @@ test("cue 검증은 경계·최대 4초·종결 마침표를 각각 진단한다
   );
 });
 
-test("응답 생성기는 정규화된 cue와 모델 식별자만 계약 형태로 내보낸다", () => {
+test("응답 생성기는 로컬 Whisper를 기본 provider로 계약 형태에 내보낸다", () => {
   const request = validateCaptionAgentRequest(protocolRequest({
     requestId: "request-response",
     clip: {
@@ -465,8 +485,8 @@ test("응답 생성기는 정규화된 cue와 모델 식별자만 계약 형태�
   }));
   const response = createCaptionAgentResponse({
     request,
-    sttModel: "external-stt",
-    captionModel: "solar-pro3",
+    sttModel: "tiny-q5_1",
+    captionModel: LOCAL_WHISPER_CAPTION_MODEL,
     cues: [{
       startMs: 0,
       endMs: 2_000,
@@ -478,9 +498,10 @@ test("응답 생성기는 정규화된 cue와 모델 식별자만 계약 형태�
   });
   assert.equal(response.schema, CAPTION_AGENT_RESPONSE_SCHEMA_ID);
   assert.equal(response.requestId, "request-response");
-  assert.equal(response.sttModel, "external-stt");
-  assert.equal(response.captionModel, "solar-pro3");
-  assert.equal(response.provider, "upstage");
+  assert.equal(response.sttModel, "tiny-q5_1");
+  assert.equal(response.captionModel, "whisper-tiny");
+  assert.equal(response.resolvedModel, "whisper-tiny");
+  assert.equal(response.provider, "local-whispercpp");
   assert.equal(response.status, "completed");
   assert.deepEqual(response.warnings, []);
   assert.equal(response.qualityReport.disposition, "accepted");
@@ -492,4 +513,24 @@ test("응답 생성기는 정규화된 cue와 모델 식별자만 계약 형태�
     response.editorialContextFingerprint,
     /^ctx-v1-[0-9a-f]{16}$/u
   );
+});
+
+test("명시적으로 선택한 Solar 응답은 Upstage provider를 그대로 유지한다", () => {
+  const request = validateCaptionAgentRequest(protocolRequest({
+    requestId: "request-solar-response",
+    model: "solar-pro3",
+    clip: {
+      id: "clip-solar-response",
+      title: "",
+      durationMs: 4_000
+    }
+  }));
+  const response = createCaptionAgentResponse({
+    request,
+    sttModel: "tiny-q5_1",
+    captionModel: "solar-pro3",
+    cues: []
+  });
+  assert.equal(response.captionModel, "solar-pro3");
+  assert.equal(response.provider, "upstage");
 });

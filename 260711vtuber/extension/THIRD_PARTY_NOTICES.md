@@ -79,6 +79,7 @@ The setup command builds `whisper-server` locally without a repository patch.
 The semantic profiles download exactly one of these converted multilingual
 model files:
 
+- `ggml-tiny-q5_1.bin` — SHA-256 `818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7`
 - `ggml-base-q5_1.bin` — SHA-256 `422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898`
 - `ggml-small-q5_1.bin` — SHA-256 `ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb`
 - `ggml-medium-q5_0.bin` — SHA-256 `19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f`

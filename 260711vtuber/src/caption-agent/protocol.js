@@ -18,9 +18,18 @@ export const CAPTION_AGENT_REQUEST_SCHEMA_ID =
   "chzzk-kirinuki-caption-request/v1";
 export const CAPTION_AGENT_RESPONSE_SCHEMA_ID =
   "chzzk-kirinuki-caption-response/v1";
+export const LOCAL_WHISPER_CAPTION_MODEL = "whisper-tiny";
 export const SUPPORTED_SOLAR_CAPTION_MODELS = Object.freeze([
   "solar-pro3",
   "solar-mini"
+]);
+export const SUPPORTED_CAPTION_MODELS = Object.freeze([
+  LOCAL_WHISPER_CAPTION_MODEL,
+  ...SUPPORTED_SOLAR_CAPTION_MODELS
+]);
+export const CAPTION_RESPONSE_PROVIDERS = Object.freeze([
+  "local-whispercpp",
+  "upstage"
 ]);
 
 export const MAX_CAPTION_CUE_DURATION_MS = 4_000;
@@ -68,7 +77,7 @@ export const CAPTION_AGENT_REQUEST_JSON_SCHEMA = Object.freeze({
     requestId: { type: "string", minLength: 1, maxLength: 128 },
     model: {
       type: "string",
-      enum: SUPPORTED_SOLAR_CAPTION_MODELS
+      enum: SUPPORTED_CAPTION_MODELS
     },
     locale: { const: "ko-KR" },
     clip: {
@@ -284,9 +293,8 @@ const CAPTION_CUE_SCHEMA = Object.freeze({
       description: "사람이 특히 다시 들어야 하는 불확실 자막 여부"
     },
     placement: {
-      type: "string",
-      enum: ["top", "center", "bottom"],
-      description: "얼굴·게임 UI를 덜 가리는 읽기 좋은 화면 위치"
+      const: "bottom",
+      description: "자동 본문 자막의 고정 기본 위치"
     },
     quality: {
       type: "object",
@@ -413,7 +421,10 @@ export const CAPTION_AGENT_RESPONSE_JSON_SCHEMA = Object.freeze({
     captionModel: { type: "string", minLength: 1 },
     model: { type: "string", minLength: 1 },
     resolvedModel: { type: "string", minLength: 1 },
-    provider: { const: "upstage" },
+    provider: {
+      type: "string",
+      enum: CAPTION_RESPONSE_PROVIDERS
+    },
     status: { const: "completed" },
     cues: {
       type: "array",
@@ -468,7 +479,7 @@ export const KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT = `
 결과는 사람이 반드시 한 번 더 듣고 검수하는 초안이지만, 그 사실을 핑계로 발화를 빼먹지 않는다.
 
 작업 원칙:
-1. 발화 내용과 발화 시각은 제공된 외부 STT만 근거로 삼고, 영상에 없던 말이나 화자의 신원을 지어내지 않는다. 화면 위치는 픽셀이 아닌 visualPlacement의 로컬 분석 점수만 근거로 삼는다.
+1. 발화 내용과 발화 시각은 제공된 외부 STT만 근거로 삼고, 영상에 없던 말이나 화자의 신원을 지어내지 않는다.
 2. 말로 인식되는 부분은 가능한 한 전부 자막으로 만든다. 알아듣기 어려운 곳도 들리는 조각은 보존하고, 완전히 판독할 수 없으면 [불명확]으로 표시한다.
 3. 일반적인 한국어 유튜브 키리누키처럼 짧고 한눈에 읽히게 다듬되, 말투·감탄·웃음·질문 의도와 VTuber의 캐릭터성은 함부로 평문화하지 않는다.
 4. 본문 자막은 한 줄을 원칙으로 하고 한글 폭 약 20자를 넘기지 않는다. 길면 줄바꿈하지 말고 의미·호흡·질문·반응이 자연스럽게 끊기는 지점에서 다음 시간 자막으로 나눈다.
@@ -656,9 +667,9 @@ export function validateCaptionAgentRequest(value) {
       issues: ["locale"]
     });
   }
-  const supportedModels = new Set(SUPPORTED_SOLAR_CAPTION_MODELS);
+  const supportedModels = new Set(SUPPORTED_CAPTION_MODELS);
   if (!supportedModels.has(value.model)) {
-    throw new CaptionProtocolError("지원하지 않는 Solar 모델입니다.", {
+    throw new CaptionProtocolError("지원하지 않는 자막 초벌 모델입니다.", {
       code: "INVALID_REQUEST_FIELD",
       issues: ["model"]
     });
@@ -791,11 +802,8 @@ function normalizedSpeaker(value) {
   return speaker.slice(0, 80) || "unknown";
 }
 
-function normalizedPlacement(value) {
-  const placement = String(value || "").trim().toLowerCase();
-  return ["top", "center", "bottom"].includes(placement)
-    ? placement
-    : "bottom";
+function normalizedPlacement() {
+  return "bottom";
 }
 
 function splitTextIntoParts(text, requestedParts) {
@@ -856,7 +864,7 @@ export function validateCaptionCue(cue, { clipDurationMs } = {}) {
   if (typeof cue.reviewRequired !== "boolean") {
     errors.push("reviewRequired");
   }
-  if (!["top", "center", "bottom"].includes(cue.placement)) {
+  if (cue.placement !== "bottom") {
     errors.push("placement");
   }
   if (cue.quality != null) {
@@ -1042,6 +1050,9 @@ export function createCaptionAgentResponse({
   sttModel,
   captionModel,
   resolvedModel = captionModel,
+  provider = captionModel === LOCAL_WHISPER_CAPTION_MODEL
+    ? "local-whispercpp"
+    : "upstage",
   cues,
   warnings = [],
   qualityProfile = CAPTION_QUALITY_PROFILE_ID,
@@ -1150,6 +1161,11 @@ export function createCaptionAgentResponse({
       });
     }
   }
+  if (!CAPTION_RESPONSE_PROVIDERS.includes(provider)) {
+    throw new CaptionProtocolError("응답 자막 제공자가 올바르지 않습니다.", {
+      code: "INVALID_RESPONSE_PROVIDER"
+    });
+  }
   return {
     schema: CAPTION_AGENT_RESPONSE_SCHEMA_ID,
     requestId: request.requestId,
@@ -1159,7 +1175,7 @@ export function createCaptionAgentResponse({
     captionModel: String(captionModel || ""),
     model: String(captionModel || ""),
     resolvedModel: String(resolvedModel || captionModel || ""),
-    provider: "upstage",
+    provider,
     status: "completed",
     cues,
     warnings,

@@ -31,7 +31,7 @@ const read = (relativePath) => readFile(path.join(extensionRoot, relativePath), 
 const manifest = JSON.parse(await read("manifest.json"));
 assert(manifest.manifest_version === 3, "manifest_version은 3이어야 합니다.");
 assert(manifest.side_panel?.default_path === "sidepanel.html", "사이드패널 진입점이 없습니다.");
-assert(manifest.version === "2.2.0", "통합 편집기 manifest 버전이 2.2.0이 아닙니다.");
+assert(manifest.version === "2.3.0", "통합 편집기 manifest 버전이 2.3.0이 아닙니다.");
 assert(manifest.host_permissions?.includes("https://chzzk.naver.com/*"), "치지직 host permission이 없습니다.");
 assert(manifest.host_permissions?.includes("https://api.chzzk.naver.com/*"), "치지직 라이브 상태 메타데이터 permission이 없습니다.");
 assert(manifest.host_permissions?.includes("https://youtube.com/*"), "YouTube 루트 영상 permission이 없습니다.");
@@ -229,6 +229,8 @@ for (const id of [
   "asset-track",
   "audio-track",
   "caption-tracks",
+  "toggle-timeline-snap",
+  "timeline-snap-guide",
   "add-audio-region",
   "add-subtitle-lane",
   "timeline-context-menu",
@@ -239,6 +241,8 @@ for (const id of [
   "cue-x",
   "cue-y",
   "font-color",
+  "caption-color-register",
+  "match-cue-to-asset",
   "asset-mode-tab",
   "asset-paste",
   "asset-input",
@@ -248,6 +252,7 @@ for (const id of [
   "asset-y",
   "asset-scale",
   "asset-opacity",
+  "match-asset-to-cue",
   "audio-volume",
   "audio-mute",
   "caption-agent-endpoint",
@@ -283,8 +288,9 @@ for (const id of [
 assert(editorScript.includes("renderProjectVideo"), "편집기 번들에 영상 렌더 경로가 없습니다.");
 assert(editorScript.includes("extractClipPcm16k"), "편집기 번들에 선택 구간 음성 추출 경로가 없습니다.");
 assert(editorScript.includes("requestCaptionAgent"), "편집기 번들에 외부 자막 에이전트 요청 경로가 없습니다.");
-assert(editorScript.includes("solar-pro3"), "편집기 번들에 Solar Pro 3 기본 모델이 없습니다.");
-assert(editorScript.includes("solar-mini"), "편집기 번들에 Solar Mini 선택 모델이 없습니다.");
+assert(editorScript.includes("whisper-tiny"), "편집기 번들에 로컬 Whisper 기본 모델이 없습니다.");
+assert(editorScript.includes("solar-pro3"), "편집기 번들에 Solar Pro 3 고급 모델이 없습니다.");
+assert(editorScript.includes("solar-mini"), "편집기 번들에 Solar Mini 고급 모델이 없습니다.");
 assert(editorScript.includes("MAX_REMOTE_CUE_DURATION_MS = 4e3"), "원격 자막 4초 상한 검증이 없습니다.");
 assert(editorScript.includes("encodePcm16WavBase64"), "선택 구간 PCM을 표준 WAV 요청으로 바꾸지 않습니다.");
 assert(editorScript.includes("ensureCaptionAgentPermission"), "사용자 선택 원격 에이전트 권한 요청 경로가 없습니다.");
@@ -293,7 +299,7 @@ assert(
   editorScript.includes("MAX_CAPTION_AGENT_CLIPS_PER_RUN = 16")
     && editorScript.includes("captionAgentResumePlan")
     && editorScript.includes("captionCheckpoints"),
-  "16컷 유료 요청 가드 또는 실패 지점 재개 체크포인트가 없습니다."
+  "16컷 요청 가드 또는 실패 지점 재개 체크포인트가 없습니다."
 );
 assert(
   editorScript.includes("isLoopbackCaptionAgentEndpoint")
@@ -349,6 +355,12 @@ assert(
   "자막 양끝 손잡이가 drag 시작 시점 기준으로 안정적으로 움직이지 않습니다."
 );
 assert(
+  editorScript.includes("timelineSnapCandidates")
+    && editorScript.includes("matchSubtitleCueToImageAsset")
+    && editorScript.includes("rememberSubtitleColor"),
+  "자막·에셋 자석 정렬 또는 최근 자막 색상 레지스터 경로가 없습니다."
+);
+assert(
   editorScript.includes("pendingPreviewSeek") &&
     editorScript.includes("retryWhenAvailable"),
   "비영점 PTS 원본의 첫 미리보기 seek 재시도 경로가 없습니다."
@@ -362,8 +374,9 @@ assert(
     editorScript.includes('onProgress(0.995, "finalize")'),
   "파일 commit 단계의 취소 불가 전환이 없습니다."
 );
-assert(editorHtml.includes('value="solar-pro3" selected'), "Solar Pro 3가 자막 기본 모델로 선택되지 않았습니다.");
+assert(editorHtml.includes('value="whisper-tiny" selected'), "Whisper Tiny가 자막 기본 모델로 선택되지 않았습니다.");
 assert(editorHtml.includes('option value="solar-mini"'), "Solar Mini 선택지가 없습니다.");
+assert(editorHtml.includes('option value="solar-pro3"'), "Solar Pro 3 선택지가 없습니다.");
 assert(!editorHtml.includes('option value="solar-pro2"'), "사용하지 않는 Solar Pro 2 선택지가 남아 있습니다.");
 assert(editorHtml.includes('id="caption-advanced-settings"'), "STT·companion 세부설정 접기가 없습니다.");
 assert(editorHtml.includes("자막 하나는 최대 4초"), "편집기 UI에 4초 자막 원칙이 없습니다.");

@@ -50,11 +50,32 @@ export function sourcePlatformFromUrl(value) {
 }
 
 export function isSupportedSourceUrl(value) {
-  return Boolean(sourcePlatformFromUrl(value));
+  const identifiers = inferSourceIdentifiers(value);
+  if (identifiers.platform === SOURCE_PLATFORM_YOUTUBE) {
+    return Boolean(
+      identifiers.contentType === "vod"
+      && identifiers.contentId
+    );
+  }
+  if (identifiers.platform !== SOURCE_PLATFORM_CHZZK) {
+    return false;
+  }
+  if (identifiers.contentType === "live") {
+    return Boolean(identifiers.channelId);
+  }
+  return Boolean(
+    ["vod", "clip"].includes(identifiers.contentType)
+    && identifiers.contentId
+  );
 }
 
 function sameSourceIdentity(left, right) {
   if (!left?.platform || !right?.platform || left.platform !== right.platform) {
+    return false;
+  }
+  const leftContentType = String(left.contentType || "unknown").toLowerCase();
+  const rightContentType = String(right.contentType || "unknown").toLowerCase();
+  if (leftContentType !== rightContentType) {
     return false;
   }
   if (left.contentId || right.contentId) {
@@ -72,6 +93,58 @@ function sameSourceIdentity(left, right) {
   );
 }
 
+function expectedSourceIdentifiers(expectedSource) {
+  const source = (
+    expectedSource
+    && typeof expectedSource === "object"
+    && !Array.isArray(expectedSource)
+  )
+    ? expectedSource
+    : {};
+  const inferred = inferSourceIdentifiers(
+    source.canonicalUrl || source.url || ""
+  );
+  const explicitPlatform = String(source.platform || "")
+    .trim()
+    .toUpperCase();
+  const platform = [
+    SOURCE_PLATFORM_CHZZK,
+    SOURCE_PLATFORM_YOUTUBE
+  ].includes(explicitPlatform)
+    ? explicitPlatform
+    : inferred.platform;
+  const explicitContentType = String(source.contentType || "")
+    .trim()
+    .toLowerCase();
+  const hasExplicitContentType = Boolean(
+    explicitContentType && explicitContentType !== "unknown"
+  );
+  const canUseInferredIdentity = Boolean(
+    (!explicitPlatform || explicitPlatform === inferred.platform)
+    && (
+      !hasExplicitContentType
+      || explicitContentType === inferred.contentType
+    )
+  );
+  const contentType = hasExplicitContentType
+    ? explicitContentType
+    : inferred.contentType;
+  return {
+    platform,
+    channelId: String(
+      source.channelId
+      || (canUseInferredIdentity ? inferred.channelId : "")
+      || ""
+    ).trim(),
+    contentId: String(
+      (contentType === "live" ? "" : source.contentId)
+      || (canUseInferredIdentity ? inferred.contentId : "")
+      || ""
+    ).trim(),
+    contentType
+  };
+}
+
 export function selectSupportedSourceTab(tabs, {
   expectedSource = null
 } = {}) {
@@ -85,10 +158,7 @@ export function selectSupportedSourceTab(tabs, {
     return active;
   }
 
-  const expectedUrl = String(
-    expectedSource?.canonicalUrl || expectedSource?.url || ""
-  ).trim();
-  const expectedIdentity = inferSourceIdentifiers(expectedUrl);
+  const expectedIdentity = expectedSourceIdentifiers(expectedSource);
   if (expectedIdentity.platform) {
     const matches = candidates.filter((tab) => sameSourceIdentity(
       inferSourceIdentifiers(tab.url),
@@ -100,6 +170,30 @@ export function selectSupportedSourceTab(tabs, {
   }
 
   return candidates.length === 1 ? candidates[0] : null;
+}
+
+export function sourceRefreshFailureAction({
+  silent = false,
+  hasCurrentContext = false,
+  sourceUnavailable = false
+} = {}) {
+  return (
+    silent
+    && hasCurrentContext
+    && !sourceUnavailable
+  )
+    ? "retain"
+    : "clear";
+}
+
+export function canStartSourceRefresh({
+  silent = false,
+  foregroundRequestCount = 0
+} = {}) {
+  return !(
+    silent
+    && Math.max(0, Number(foregroundRequestCount) || 0) > 0
+  );
 }
 
 function youtubeVideoId(value) {
@@ -229,6 +323,18 @@ export function canonicalSourceUrl(value, identifiers = null) {
     && resolved.contentId
   ) {
     return `https://www.youtube.com/watch?v=${encodeURIComponent(resolved.contentId)}`;
+  }
+  if (resolved.platform === SOURCE_PLATFORM_CHZZK) {
+    const contentType = String(resolved.contentType || "").toLowerCase();
+    if (contentType === "live" && resolved.channelId) {
+      return `https://chzzk.naver.com/live/${encodeURIComponent(resolved.channelId)}`;
+    }
+    if (contentType === "vod" && resolved.contentId) {
+      return `https://chzzk.naver.com/video/${encodeURIComponent(resolved.contentId)}`;
+    }
+    if (contentType === "clip" && resolved.contentId) {
+      return `https://chzzk.naver.com/clips/${encodeURIComponent(resolved.contentId)}`;
+    }
   }
   url.hash = "";
   return url.toString();

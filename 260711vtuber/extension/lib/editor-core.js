@@ -14,6 +14,8 @@ export const MIN_SUBTITLE_LANES = 2;
 export const MAX_SUBTITLE_LANES = 8;
 export const MAX_AI_WARNINGS = 4_000;
 export const MAX_AI_CAPTION_CHECKPOINTS = 500;
+export const DEFAULT_SUBTITLE_COLOR = "#ffffff";
+export const MAX_RECENT_SUBTITLE_COLORS = 5;
 export const SUPPORTED_IMAGE_ASSET_MIME_TYPES = Object.freeze([
   "image/png",
   "image/jpeg",
@@ -30,6 +32,11 @@ const ACCEPTED_EDITOR_SCHEMAS = new Set([
   LEGACY_EDITOR_SCHEMA_V1,
   LEGACY_EDITOR_SCHEMA_V2
 ]);
+const AUTOMATIC_CAPTION_POSITION = Object.freeze({
+  x: 0.5,
+  y: 0.84,
+  placement: "bottom"
+});
 
 const nowIso = () => new Date().toISOString();
 const makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
@@ -138,12 +145,15 @@ export function normalizeAiCaptionCheckpoints(value, clips = []) {
     const editorialContextFingerprint = String(
       raw.editorialContextFingerprint || "legacy-context-v0"
     ).trim().slice(0, 128);
+    const pipelineFingerprint = String(
+      raw.pipelineFingerprint || "legacy-caption-pipeline-v0"
+    ).trim().slice(0, 128);
     if (
       !clipId
       || !clipIds.has(clipId)
       || sourceStartMs < 0
       || sourceEndMs <= sourceStartMs
-      || !["solar-pro3", "solar-mini"].includes(model)
+      || !["whisper-tiny", "solar-pro3", "solar-mini"].includes(model)
     ) {
       continue;
     }
@@ -157,6 +167,7 @@ export function normalizeAiCaptionCheckpoints(value, clips = []) {
       qualityProfile,
       harnessFingerprint,
       editorialContextFingerprint,
+      pipelineFingerprint,
       ...(requestId ? { requestId } : {}),
       ...(completedAt ? { completedAt } : {})
     };
@@ -168,7 +179,8 @@ export function normalizeAiCaptionCheckpoints(value, clips = []) {
         model,
         qualityProfile,
         harnessFingerprint,
-        editorialContextFingerprint
+        editorialContextFingerprint,
+        pipelineFingerprint
       ].join("\u0000"),
       checkpoint
     );
@@ -185,6 +197,56 @@ export function normalizeHexColor(value, fallback = "#ffffff") {
     return `#${[...candidate.slice(1)].map((character) => character.repeat(2)).join("")}`;
   }
   return fallback;
+}
+
+export function normalizeRecentSubtitleColors(value) {
+  const normalized = [];
+  for (const rawColor of Array.isArray(value) ? value : []) {
+    const color = normalizeHexColor(rawColor, "");
+    if (
+      !color
+      || color === DEFAULT_SUBTITLE_COLOR
+      || normalized.includes(color)
+    ) {
+      continue;
+    }
+    normalized.push(color);
+    if (normalized.length >= MAX_RECENT_SUBTITLE_COLORS) {
+      break;
+    }
+  }
+  return normalized;
+}
+
+export function rememberSubtitleColor(project, rawColor) {
+  if (!project || typeof project !== "object") {
+    return project;
+  }
+  const color = normalizeHexColor(rawColor, "");
+  const current = normalizeRecentSubtitleColors(project.recentSubtitleColors);
+  if (!color || color === DEFAULT_SUBTITLE_COLOR) {
+    return Array.isArray(project.recentSubtitleColors)
+      && project.recentSubtitleColors.length === current.length
+      && project.recentSubtitleColors.every((entry, index) => entry === current[index])
+      ? project
+      : { ...project, recentSubtitleColors: current };
+  }
+  const next = [
+    color,
+    ...current.filter((candidate) => candidate !== color)
+  ].slice(0, MAX_RECENT_SUBTITLE_COLORS);
+  if (
+    Array.isArray(project.recentSubtitleColors)
+    && project.recentSubtitleColors.length === next.length
+    && project.recentSubtitleColors.every((entry, index) => entry === next[index])
+  ) {
+    return project;
+  }
+  return {
+    ...project,
+    recentSubtitleColors: next,
+    updatedAt: nowIso()
+  };
 }
 
 export function normalizeAiSpeakerColors(value) {
@@ -305,6 +367,84 @@ export function sourceSessionIdentity(source = {}) {
   return String(source.canonicalUrl || source.url || "").trim();
 }
 
+export function sameSourceSession(leftSource = {}, rightSource = {}) {
+  const leftPlatform = String(leftSource.platform ?? "CHZZK")
+    .trim()
+    .toUpperCase() || "CHZZK";
+  const rightPlatform = String(rightSource.platform ?? "CHZZK")
+    .trim()
+    .toUpperCase() || "CHZZK";
+  if (leftPlatform !== rightPlatform) {
+    return false;
+  }
+
+  const leftContentType = String(leftSource.contentType ?? "unknown")
+    .trim()
+    .toLowerCase() || "unknown";
+  const rightContentType = String(rightSource.contentType ?? "unknown")
+    .trim()
+    .toLowerCase() || "unknown";
+  const sameContentType = leftContentType === rightContentType;
+  const chzzkLiveVodPair = (
+    leftPlatform === "CHZZK"
+    && new Set([leftContentType, rightContentType]).size === 2
+    && [leftContentType, rightContentType].every((type) => (
+      type === "live" || type === "vod"
+    ))
+  );
+  if (!sameContentType && !chzzkLiveVodPair) {
+    return false;
+  }
+
+  const leftContentId = String(leftSource.contentId ?? "").trim();
+  const rightContentId = String(rightSource.contentId ?? "").trim();
+  const involvesChzzkLive = (
+    leftPlatform === "CHZZK"
+    && (leftContentType === "live" || rightContentType === "live")
+  );
+  if (leftContentId && rightContentId && !involvesChzzkLive) {
+    return leftContentId === rightContentId;
+  }
+
+  if (leftPlatform === "CHZZK") {
+    const leftChannelId = String(leftSource.channelId ?? "").trim();
+    const rightChannelId = String(rightSource.channelId ?? "").trim();
+    const leftStartedAt = String(
+      leftSource.broadcastStartedAt ?? ""
+    ).trim();
+    const rightStartedAt = String(
+      rightSource.broadcastStartedAt ?? ""
+    ).trim();
+    if (
+      leftChannelId
+      && rightChannelId
+      && leftStartedAt
+      && rightStartedAt
+    ) {
+      return (
+        leftChannelId === rightChannelId
+        && leftStartedAt === rightStartedAt
+      );
+    }
+    if (chzzkLiveVodPair) {
+      return false;
+    }
+    if (leftContentType === "live") {
+      return Boolean(
+        leftChannelId
+        && rightChannelId
+        && leftChannelId === rightChannelId
+        && !leftStartedAt
+        && !rightStartedAt
+      );
+    }
+  }
+
+  const leftIdentity = sourceSessionIdentity(leftSource);
+  const rightIdentity = sourceSessionIdentity(rightSource);
+  return Boolean(leftIdentity && leftIdentity === rightIdentity);
+}
+
 export function captureStateSourceConflict(captureState = {}, nextSource = {}) {
   const previousIdentity = sourceSessionIdentity(captureState.source);
   const nextIdentity = sourceSessionIdentity(nextSource);
@@ -320,7 +460,7 @@ export function captureStateSourceConflict(captureState = {}, nextSource = {}) {
     hasRange &&
     previousIdentity &&
     nextIdentity &&
-    previousIdentity !== nextIdentity
+    !sameSourceSession(captureState.source, nextSource)
   );
 }
 
@@ -446,6 +586,7 @@ export function createEditorProjectFromCapture(captureState = {}, {
     imageAssets: [],
     subtitles: [],
     subtitleLaneCount: MIN_SUBTITLE_LANES,
+    recentSubtitleColors: [],
     audioRegions: [],
     selectedClipId: clips[0]?.id || null,
     selectedImageAssetId: null,
@@ -457,7 +598,7 @@ export function createEditorProjectFromCapture(captureState = {}, {
     ),
     ai: {
       provider: "caption-agent",
-      model: "solar-pro3",
+      model: "whisper-tiny",
       language: "korean",
       status: "idle",
       progress: 0,
@@ -647,14 +788,11 @@ export function normalizeEditorProject(raw) {
     )
   };
   const rawAi = raw.ai || {};
-  const localWhisperMetadata = (
-    rawAi.provider === "transformers.js" ||
-    String(rawAi.model || "").toLowerCase().includes("whisper")
-  );
+  const legacyBrowserWhisperMetadata = rawAi.provider === "transformers.js";
   const ai = {
     ...defaults.ai,
     ...rawAi,
-    ...(localWhisperMetadata
+    ...(legacyBrowserWhisperMetadata
       ? {
         provider: defaults.ai.provider,
         model: defaults.ai.model,
@@ -688,6 +826,7 @@ export function normalizeEditorProject(raw) {
     suppressedSelections,
     subtitles,
     subtitleLaneCount,
+    recentSubtitleColors: normalizeRecentSubtitleColors(raw.recentSubtitleColors),
     audioRegions,
     imageAssets,
     selectedImageAssetId: imageAssets.some((asset) => asset.id === raw.selectedImageAssetId)
@@ -1019,6 +1158,9 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
   const remotePlacement = String(cue.remoteMeta?.placement || "")
     .trim()
     .toLowerCase();
+  const origin = cue.origin === "ai" ? "ai" : "human";
+  const humanEdited = Boolean(cue.humanEdited);
+  const automaticAiCue = origin === "ai" && !humanEdited;
   const remoteMeta = cue.remoteMeta && typeof cue.remoteMeta === "object"
     ? {
       speakerId: String(cue.remoteMeta.speakerId || "unknown")
@@ -1026,9 +1168,11 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
         .trim()
         .slice(0, 80) || "unknown",
       reviewRequired: Boolean(cue.remoteMeta.reviewRequired),
-      placement: ["top", "center", "bottom"].includes(remotePlacement)
-        ? remotePlacement
-        : "bottom",
+      placement: automaticAiCue
+        ? AUTOMATIC_CAPTION_POSITION.placement
+        : ["top", "center", "bottom"].includes(remotePlacement)
+          ? remotePlacement
+          : AUTOMATIC_CAPTION_POSITION.placement,
       ...(cue.remoteMeta.qualityStatus != null
         || Array.isArray(cue.remoteMeta.qualityCodes)
         ? {
@@ -1058,15 +1202,68 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
       Math.max(0, Math.min(MAX_SUBTITLE_LANES, laneCount) - 1)
     ),
     color: normalizeHexColor(cue.color, "#ffffff"),
-    x: clamp(finiteNumber(cue.x, 0.5), 0.05, 0.95),
-    y: clamp(finiteNumber(cue.y, 0.84), 0.05, 0.95),
-    origin: cue.origin === "ai" ? "ai" : "human",
-    humanEdited: Boolean(cue.humanEdited),
+    x: automaticAiCue
+      ? AUTOMATIC_CAPTION_POSITION.x
+      : clamp(finiteNumber(cue.x, AUTOMATIC_CAPTION_POSITION.x), 0.05, 0.95),
+    y: automaticAiCue
+      ? AUTOMATIC_CAPTION_POSITION.y
+      : clamp(finiteNumber(cue.y, AUTOMATIC_CAPTION_POSITION.y), 0.05, 0.95),
+    origin,
+    humanEdited,
     confidence: Number.isFinite(cue.confidence) ? cue.confidence : null,
     ...(remoteMeta ? { remoteMeta } : {}),
     createdAt: cue.createdAt || nowIso(),
     updatedAt: cue.updatedAt || cue.createdAt || nowIso()
   };
+}
+
+export function resetAiSubtitlePositions(project, {
+  includeHumanEdited = false,
+  updatedAt = nowIso()
+} = {}) {
+  if (!project || !Array.isArray(project.subtitles)) {
+    return project;
+  }
+  let changed = false;
+  const subtitles = project.subtitles.map((cue) => {
+    if (
+      cue?.origin !== "ai"
+      || (cue.humanEdited && !includeHumanEdited)
+    ) {
+      return cue;
+    }
+    const remoteMeta = cue.remoteMeta && typeof cue.remoteMeta === "object"
+      ? {
+        ...cue.remoteMeta,
+        placement: AUTOMATIC_CAPTION_POSITION.placement
+      }
+      : cue.remoteMeta;
+    if (
+      cue.x === AUTOMATIC_CAPTION_POSITION.x
+      && cue.y === AUTOMATIC_CAPTION_POSITION.y
+      && (
+        !remoteMeta
+        || remoteMeta.placement === cue.remoteMeta?.placement
+      )
+    ) {
+      return cue;
+    }
+    changed = true;
+    return {
+      ...cue,
+      x: AUTOMATIC_CAPTION_POSITION.x,
+      y: AUTOMATIC_CAPTION_POSITION.y,
+      ...(remoteMeta ? { remoteMeta } : {}),
+      updatedAt
+    };
+  });
+  return changed
+    ? {
+      ...project,
+      subtitles,
+      updatedAt
+    }
+    : project;
 }
 
 export function createSubtitleCue(project, {
@@ -1368,6 +1565,184 @@ export function audioRegionTimelineRange(project, region) {
   };
 }
 
+export function timelineSnapThresholdMs(pixelsPerSecond, {
+  thresholdPx = 8,
+  minimumMs = 25,
+  maximumMs = 400
+} = {}) {
+  const pixels = Math.max(1, finiteNumber(pixelsPerSecond, 70));
+  const requested = Math.round(
+    Math.max(0, finiteNumber(thresholdPx, 8)) / pixels * 1000
+  );
+  return clamp(
+    requested,
+    Math.max(0, Math.round(finiteNumber(minimumMs, 25))),
+    Math.max(0, Math.round(finiteNumber(maximumMs, 400)))
+  );
+}
+
+export function timelineSnapCandidates(project, {
+  clipId,
+  excludeCueId = null,
+  excludeImageAssetId = null,
+  preferredKind = null,
+  includePlayhead = true
+} = {}) {
+  const clip = project?.clips?.find((candidate) => candidate.id === clipId);
+  if (!clip || clip.enabled === false) {
+    return [];
+  }
+  const clipStartMs = clip.timelineStartMs;
+  const clipEndMs = clip.timelineStartMs + clipDurationMs(clip);
+  const candidates = [];
+  const priorityFor = (kind) => {
+    if (kind === preferredKind) {
+      return 0;
+    }
+    if (kind === "subtitle" || kind === "asset") {
+      return 1;
+    }
+    return kind === "playhead" ? 2 : 3;
+  };
+  const add = ({ timeMs, kind, edge, itemId = null, label }) => {
+    const normalizedTimeMs = Math.round(finiteNumber(timeMs, -1));
+    if (normalizedTimeMs < clipStartMs || normalizedTimeMs > clipEndMs) {
+      return;
+    }
+    candidates.push({
+      timeMs: normalizedTimeMs,
+      kind,
+      edge,
+      itemId,
+      label,
+      priority: priorityFor(kind)
+    });
+  };
+
+  add({
+    timeMs: clipStartMs,
+    kind: "clip",
+    edge: "start",
+    itemId: clip.id,
+    label: "컷 시작"
+  });
+  add({
+    timeMs: clipEndMs,
+    kind: "clip",
+    edge: "end",
+    itemId: clip.id,
+    label: "컷 끝"
+  });
+  if (includePlayhead) {
+    add({
+      timeMs: project.playheadMs,
+      kind: "playhead",
+      edge: "point",
+      label: "재생 헤드"
+    });
+  }
+  for (const cue of project.subtitles || []) {
+    if (cue.clipId !== clip.id || cue.id === excludeCueId) {
+      continue;
+    }
+    const range = cueTimelineRange(project, cue);
+    if (!range) {
+      continue;
+    }
+    add({
+      timeMs: range.startMs,
+      kind: "subtitle",
+      edge: "start",
+      itemId: cue.id,
+      label: "자막 시작"
+    });
+    add({
+      timeMs: range.endMs,
+      kind: "subtitle",
+      edge: "end",
+      itemId: cue.id,
+      label: "자막 끝"
+    });
+  }
+  for (const asset of project.imageAssets || []) {
+    if (asset.clipId !== clip.id || asset.id === excludeImageAssetId) {
+      continue;
+    }
+    const range = imageAssetTimelineRange(project, asset);
+    if (!range) {
+      continue;
+    }
+    add({
+      timeMs: range.startMs,
+      kind: "asset",
+      edge: "start",
+      itemId: asset.id,
+      label: "에셋 시작"
+    });
+    add({
+      timeMs: range.endMs,
+      kind: "asset",
+      edge: "end",
+      itemId: asset.id,
+      label: "에셋 끝"
+    });
+  }
+  return candidates;
+}
+
+export function resolveTimelineSnap(rawTimelineMs, candidates, {
+  thresholdMs = 0
+} = {}) {
+  const targetMs = Math.round(finiteNumber(rawTimelineMs));
+  const limitMs = Math.max(0, Math.round(finiteNumber(thresholdMs)));
+  const matches = (Array.isArray(candidates) ? candidates : [])
+    .filter((candidate) => (
+      candidate
+      && Number.isFinite(Number(candidate.timeMs))
+    ))
+    .map((candidate) => ({
+      ...candidate,
+      timeMs: Math.round(Number(candidate.timeMs)),
+      deltaMs: Math.round(Number(candidate.timeMs)) - targetMs,
+      distanceMs: Math.abs(Math.round(Number(candidate.timeMs)) - targetMs),
+      priority: Math.round(finiteNumber(candidate.priority, 100))
+    }))
+    .filter((candidate) => candidate.distanceMs <= limitMs)
+    .sort((first, second) => (
+      first.distanceMs - second.distanceMs
+      || first.priority - second.priority
+      || first.timeMs - second.timeMs
+      || String(first.kind || "").localeCompare(String(second.kind || ""))
+      || String(first.itemId || "").localeCompare(String(second.itemId || ""))
+      || String(first.edge || "").localeCompare(String(second.edge || ""))
+    ));
+  return matches[0] || null;
+}
+
+export function matchSubtitleCueToImageAsset(project, cueId, assetId) {
+  const cue = project?.subtitles?.find((candidate) => candidate.id === cueId);
+  const asset = project?.imageAssets?.find((candidate) => candidate.id === assetId);
+  if (!cue || !asset || cue.clipId !== asset.clipId) {
+    return project;
+  }
+  return updateSubtitleCue(project, cue.id, {
+    startOffsetMs: asset.startOffsetMs,
+    endOffsetMs: asset.endOffsetMs
+  });
+}
+
+export function matchImageAssetToSubtitleCue(project, assetId, cueId) {
+  const asset = project?.imageAssets?.find((candidate) => candidate.id === assetId);
+  const cue = project?.subtitles?.find((candidate) => candidate.id === cueId);
+  if (!asset || !cue || asset.clipId !== cue.clipId) {
+    return project;
+  }
+  return updateImageAsset(project, asset.id, {
+    startOffsetMs: cue.startOffsetMs,
+    endOffsetMs: cue.endOffsetMs
+  });
+}
+
 export function cueAtTimeline(project, timelineMs) {
   return cuesAtTimeline(project, timelineMs)[0] || null;
 }
@@ -1622,34 +1997,7 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
       speakerLanes.set(speakerId, lane);
     }
   }
-  const stackableCues = [...protectedInClip, ...aiCues];
-  const stackedAiCues = aiCues.map((cue) => {
-    const simultaneous = stackableCues
-      .filter((candidate) => overlaps(candidate, cue))
-      .sort((left, right) => (
-        (left.origin === "human" ? -1 : 0)
-        - (right.origin === "human" ? -1 : 0)
-        || aiCaptionStackPriority(left) - aiCaptionStackPriority(right)
-        || left.lane - right.lane
-        || left.startOffsetMs - right.startOffsetMs
-        || left.id.localeCompare(right.id)
-      ));
-    if (simultaneous.length <= 1) {
-      return cue;
-    }
-    const rank = simultaneous.findIndex((candidate) => candidate.id === cue.id);
-    const placement = cue.remoteMeta?.placement || "bottom";
-    const y = placement === "top"
-      ? 0.18 + rank * 0.12
-      : placement === "center"
-        ? 0.5 + (rank - (simultaneous.length - 1) / 2) * 0.12
-        : 0.84 - rank * 0.12;
-    return {
-      ...cue,
-      y: clamp(y, 0.08, 0.92)
-    };
-  });
-  const subtitles = [...preserved, ...stackedAiCues].sort((a, b) => {
+  const subtitles = [...preserved, ...aiCues].sort((a, b) => {
     const clipA = project.clips.find((candidate) => candidate.id === a.clipId);
     const clipB = project.clips.find((candidate) => candidate.id === b.clipId);
     return (clipA?.timelineStartMs || 0) + a.startOffsetMs - ((clipB?.timelineStartMs || 0) + b.startOffsetMs);
@@ -1660,7 +2008,7 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
     subtitles,
     selectedCueId: subtitles.some((cue) => cue.id === project.selectedCueId)
       ? project.selectedCueId
-      : stackedAiCues[0]?.id || protectedInClip[0]?.id || null,
+      : aiCues[0]?.id || protectedInClip[0]?.id || null,
     updatedAt: nowIso()
   };
 }

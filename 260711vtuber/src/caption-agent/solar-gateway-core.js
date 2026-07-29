@@ -1,6 +1,8 @@
 import {
   KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT,
+  LOCAL_WHISPER_CAPTION_MODEL,
   MAX_CAPTION_WARNINGS,
+  SUPPORTED_CAPTION_MODELS,
   SUPPORTED_SOLAR_CAPTION_MODELS,
   UPSTAGE_CAPTION_JSON_SCHEMA,
   CaptionProtocolError,
@@ -21,6 +23,7 @@ import {
 
 export const UPSTAGE_CHAT_COMPLETIONS_URL =
   "https://api.upstage.ai/v1/chat/completions";
+export const DEFAULT_CAPTION_MODEL = LOCAL_WHISPER_CAPTION_MODEL;
 export const DEFAULT_SOLAR_MODEL = "solar-pro3";
 export const DEFAULT_TRANSCRIPTION_MODE = "external-timed-stt";
 export const LOCAL_WHISPERCPP_TRANSCRIPTION_MODE = "local-whispercpp";
@@ -231,6 +234,23 @@ export function normalizeSolarCaptionModel(value, {
   return normalized;
 }
 
+export function normalizeCaptionModel(value, {
+  fallback = DEFAULT_CAPTION_MODEL,
+  httpStatus = 500
+} = {}) {
+  const normalized = String(value || fallback).trim() || fallback;
+  if (!SUPPORTED_CAPTION_MODELS.includes(normalized)) {
+    throw new CaptionGatewayError(
+      `자막 초벌 모델은 ${SUPPORTED_CAPTION_MODELS.join(" 또는 ")}만 지원합니다.`,
+      {
+        code: "UNSUPPORTED_CAPTION_MODEL",
+        httpStatus
+      }
+    );
+  }
+  return normalized;
+}
+
 export function resolveCaptionPipelineConfig(
   env = process.env,
   { allowMissingProviderConfig = false } = {}
@@ -268,7 +288,10 @@ export function resolveCaptionPipelineConfig(
     upstageApiKey: providerApiKey(
       env.UPSTAGE_API_KEY,
       "UPSTAGE_API_KEY",
-      providerOptions
+      {
+        required: false,
+        httpStatus: 500
+      }
     ),
     solarModel: normalizeSolarCaptionModel(
       env.KIRINUKI_SOLAR_MODEL || DEFAULT_SOLAR_MODEL
@@ -289,10 +312,6 @@ export function resolveCaptionPipelineRequestConfig(
   baseConfig = {},
   overrides = {}
 ) {
-  const requestOptions = {
-    required: true,
-    httpStatus: 400
-  };
   const optionalRequestOptions = {
     required: false,
     httpStatus: 400
@@ -368,7 +387,7 @@ export function resolveCaptionPipelineRequestConfig(
     upstageApiKey: providerApiKey(
       overrides.upstageApiKey || baseConfig.upstageApiKey,
       "Upstage API 키",
-      requestOptions
+      optionalRequestOptions
     ),
     solarModel: normalizeSolarCaptionModel(baseConfig.solarModel, {
       httpStatus: 400
@@ -886,6 +905,79 @@ function transcriptHasRecognizableContent(transcript) {
   );
 }
 
+export function buildLocalWhisperCaptionDraft(request, transcript) {
+  const canonicalTranscript = canonicalTimedTranscript(transcript, {
+    clipDurationMs: request.clipDurationMs,
+    editorialContext: request.editorialContext
+  });
+  const rawCues = canonicalTranscript.units.map((unit) => ({
+    startMs: unit.startMs,
+    endMs: unit.endMs,
+    text: unit.text,
+    speakerId: !unit.speakerId || unit.speakerId === "unknown"
+      ? "main"
+      : unit.speakerId,
+    reviewRequired: false,
+    placement: "bottom"
+  }));
+  // Let the local harness see each original STT range and its word anchors
+  // before enforcing the four-second protocol limit. Pre-normalizing here
+  // would split long segments at evenly distributed times and lose the best
+  // available speech boundary for the draft.
+  const repaired = repairCaptionDraft(rawCues, {
+    clipDurationMs: request.clipDurationMs,
+    transcript: canonicalTranscript,
+    visualPlacement: request.visualPlacement,
+    editorialContext: request.editorialContext,
+    timingPolicy: "stt-boundaries"
+  });
+  // repairCaptionDraft already emits protocol-shaped cues. Running the generic
+  // normalizer here would silently expand sub-100 ms STT ranges and could
+  // reintroduce an overlap after the boundary-preserving harness pass.
+  const finalizedCues = repaired.cues;
+  const qualityReport = repaired.report;
+  if (qualityReport.disposition === "rejected") {
+    throw new CaptionGatewayError(
+      "로컬 품질 하네스가 원래 STT 경계를 움직이지 않고 구조 충돌 cue를 격리했습니다. 자막은 적용하지 않았습니다.",
+      {
+        code: "CAPTION_QUALITY_GATE_FAILED",
+        httpStatus: 422
+      }
+    );
+  }
+  const reviewsByCue = new Map(
+    qualityReport.cueReviews.map((review) => [review.cueIndex, review])
+  );
+  const cues = finalizedCues.map((cue, cueIndex) => {
+    const review = reviewsByCue.get(cueIndex);
+    const status = review?.status === "review-required"
+      ? "review-required"
+      : "accepted";
+    return {
+      ...cue,
+      reviewRequired: cue.reviewRequired || status === "review-required",
+      quality: {
+        status,
+        codes: (review?.codes || []).slice(0, 32)
+      }
+    };
+  });
+  return {
+    cues,
+    warnings: boundedCaptionWarnings(
+      canonicalTranscript.warnings,
+      repaired.warnings,
+      qualityReport.violations.map(({ code, cueIndex }) => ({
+        code,
+        cueIndex
+      }))
+    ),
+    qualityProfile: repaired.profileId,
+    harnessFingerprint: repaired.harnessFingerprint,
+    qualityReport
+  };
+}
+
 export async function requestSolarCaptions(request, transcript, {
   fetchImpl = globalThis.fetch,
   upstageApiKey,
@@ -1133,10 +1225,11 @@ export async function runCaptionPipeline(rawRequest, {
   try {
     const validatedRequest = validateCaptionAgentRequest(rawRequest);
     const request = validatedRequest;
-    const captionModel = normalizeSolarCaptionModel(
-      request.model || config.solarModel || DEFAULT_SOLAR_MODEL,
+    const captionModel = normalizeCaptionModel(
+      request.model || DEFAULT_CAPTION_MODEL,
       { httpStatus: 400 }
     );
+    const localWhisperDraft = captionModel === LOCAL_WHISPER_CAPTION_MODEL;
     if (typeof transcribeAudio !== "function") {
       throw new CaptionGatewayError(
         "오디오를 시간 정보가 있는 전사문으로 바꿀 transcribeAudio 구현이 필요합니다.",
@@ -1168,7 +1261,10 @@ export async function runCaptionPipeline(rawRequest, {
         request,
         sttModel: config.sttModel || DEFAULT_STT_MODEL,
         captionModel,
-        resolvedModel: captionModel,
+        resolvedModel: localWhisperDraft
+          ? config.sttModel || DEFAULT_STT_MODEL
+          : captionModel,
+        provider: localWhisperDraft ? "local-whispercpp" : "upstage",
         cues: [],
         warnings: [{
           code: "NO_RECOGNIZABLE_SPEECH",
@@ -1197,6 +1293,21 @@ export async function runCaptionPipeline(rawRequest, {
             placement: "bottom"
           }
         }
+      });
+    }
+    if (localWhisperDraft) {
+      const result = buildLocalWhisperCaptionDraft(request, transcript);
+      return createCaptionAgentResponse({
+        request,
+        sttModel: config.sttModel || DEFAULT_STT_MODEL,
+        captionModel,
+        resolvedModel: config.sttModel || DEFAULT_STT_MODEL,
+        provider: "local-whispercpp",
+        cues: result.cues,
+        warnings: result.warnings,
+        qualityProfile: result.qualityProfile,
+        harnessFingerprint: result.harnessFingerprint,
+        qualityReport: result.qualityReport
       });
     }
     const result = await requestSolarCaptions(request, transcript, {

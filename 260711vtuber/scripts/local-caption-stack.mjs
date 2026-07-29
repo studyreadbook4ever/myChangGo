@@ -40,6 +40,7 @@ import {
   buildWhisperServerArgs,
   createInstallConfig,
   extensionOriginForPath,
+  installedProfileSummary,
   parseLocalCaptionStackArgs,
   renderSystemdUserUnit,
   resolveSemanticProfile,
@@ -69,13 +70,13 @@ function outputError(message) {
   process.stderr.write(`${message}\n`);
 }
 
-function helpText() {
+export function helpText() {
   return `
 Kirinuki 로컬 자막 스택
 
 사용법:
-  npm run caption-stack -- doctor [--profile auto|light|quality]
-  npm run caption-stack -- setup  [--profile auto|light|quality] [--backend auto|cpu|cuda] [--dry-run]
+  npm run caption-stack -- doctor [--profile draft|auto|light|quality]
+  npm run caption-stack -- setup  [--profile draft|auto|light|quality] [--backend auto|cpu|cuda] [--dry-run]
   npm run caption-stack -- start  [--foreground]
   npm run caption-stack -- status [--json]
   npm run caption-stack -- stop
@@ -88,12 +89,14 @@ Kirinuki 로컬 자막 스택
   stop    systemd-user 서비스 또는 검증된 foreground 프로세스 중지
 
 profile:
-  auto     기본값. 6 GiB 미만에서는 light로 자동 하향
+  draft    기본값. 빠른 자막 초벌용 Whisper Tiny tiny-q5_1
+  auto     균형형 small-q5_1. 6 GiB 미만에서는 light로 자동 하향
   light    저사양 CPU용 base-q5_1
   quality  정확도 우선 medium-q5_0
 
 비밀 값:
-  Upstage 키는 실행 중인 편집기 탭에서 요청할 때만 전달합니다.
+  기본 Whisper Tiny 초벌에는 API 키가 필요하지 않습니다.
+  Upstage 키는 Solar 고급 초벌을 명시적으로 고른 요청에만 전달합니다.
   CLI는 API 키를 입력받거나 옵션·파일·환경·systemd unit·로그에 기록하지 않습니다.
 
 systemd-user가 없다면:
@@ -482,6 +485,7 @@ async function doctorCommand(options) {
     ])
   );
   const config = await readInstalledConfig(paths).catch(() => null);
+  const installedProfile = installedProfileSummary(config);
   const [
     modelVerified,
     vadVerified,
@@ -524,7 +528,8 @@ async function doctorCommand(options) {
       originMatchesCurrentPath: installOriginMatches(paths, config),
       binaryReady: Boolean(config && await locateWhisperBinary(config)),
       modelReady: modelVerified,
-      vadReady: vadVerified
+      vadReady: vadVerified,
+      profile: installedProfile
     },
     loopbackPorts: {
       stt: {
@@ -550,7 +555,7 @@ async function doctorCommand(options) {
   );
   output(`Linux: ${report.platform.supported ? "OK" : "지원 대상 아님"}`);
   output(
-    `profile: ${report.profile.requested} → ${report.profile.effective} (${report.profile.model})`
+    `setup 후보: ${report.profile.requested} → ${report.profile.effective} (${report.profile.model})`
   );
   output(
     `backend: ${report.hardware.selectedBackend}`
@@ -569,6 +574,14 @@ async function doctorCommand(options) {
   output(`systemd-user: ${report.systemdUser ? "사용 가능" : "foreground fallback"}`);
   output(
     `설치: ${report.installation.configured ? "설정 있음" : "setup 필요"}`
+    + (
+      report.installation.profile
+        ? ` · 실제 ${report.installation.profile.requested}`
+          + ` → ${report.installation.profile.effective}`
+          + ` (${report.installation.profile.model})`
+          + ` · ${report.installation.profile.backend}`
+        : ""
+    )
     + (
       report.installation.configured
       && !report.installation.originMatchesCurrentPath
@@ -627,7 +640,8 @@ async function setupCommand(options) {
       profile: {
         requested: semantic.requestedProfile,
         effective: semantic.effectiveProfile,
-        backend: semantic.backend
+        backend: semantic.backend,
+        model: semantic.model.id
       },
       downloads: [
         { ...PINNED_WHISPER_CPP.archive, destination: sourceArchive },
@@ -703,7 +717,8 @@ async function setupCommand(options) {
     output("systemd-user를 사용할 수 없어 foreground fallback을 준비했습니다.");
   }
   output(
-    `설치 완료: ${installedConfig.effectiveProfile} · ${installedConfig.backend} · API 키 저장 없음`
+    `설치 완료: ${installedConfig.effectiveProfile} (${installedConfig.model.id})`
+    + ` · ${installedConfig.backend} · API 키 저장 없음`
   );
   output("실행: npm run caption-stack -- start");
 }
@@ -1011,7 +1026,8 @@ function runSystemdCommands(commands, env) {
 function printConnection(config) {
   output(`에이전트 주소: http://${LOOPBACK_HOST}:${config.gatewayPort}/v1/captions`);
   output("자동 페어링: 켜짐 · 로컬 STT는 API 키 없이 127.0.0.1에서만 연결");
-  output("Upstage API 키는 편집기 현재 탭의 요청 헤더로만 전달됩니다.");
+  output("기본 Whisper Tiny 초벌: Upstage 호출 0회 · API 키 불필요");
+  output("Solar 고급 초벌의 Upstage 키만 편집기 현재 탭에서 요청할 때 전달됩니다.");
 }
 
 async function startCommand(options) {

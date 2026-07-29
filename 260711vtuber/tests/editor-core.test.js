@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   EDITOR_SCHEMA,
+  DEFAULT_SUBTITLE_COLOR,
   MAX_AI_CAPTION_CHECKPOINTS,
   MAX_AI_WARNINGS,
+  MAX_RECENT_SUBTITLE_COLORS,
   MAX_SUBTITLE_LANES,
   MIN_SUBTITLE_LANES,
   SUPPORTED_IMAGE_ASSET_MIME_TYPES,
@@ -32,19 +34,28 @@ import {
   imageAssetsAtTimeline,
   imageAssetTimelineRange,
   mapTimelineToSource,
+  matchImageAssetToSubtitleCue,
+  matchSubtitleCueToImageAsset,
   mergeCaptureIntoEditorProject,
   mergeAiWarnings,
   normalizeEditorProject,
   normalizeAiCaptionCheckpoints,
   normalizeImageAssetSource,
+  normalizeRecentSubtitleColors,
   projectDurationMs,
   reorderClip,
   reorderClipGroup,
   replaceAiSubtitleDraft,
+  resetAiSubtitlePositions,
+  rememberSubtitleColor,
+  resolveTimelineSnap,
   rippleDeleteTimelineRange,
   serializeSrt,
+  sameSourceSession,
   sourceSessionIdentity,
   transcriptChunksToCueDrafts,
+  timelineSnapCandidates,
+  timelineSnapThresholdMs,
   updateAudioRegion,
   updateClipTrim,
   updateImageAsset,
@@ -106,22 +117,113 @@ test("AI 자막 체크포인트는 현재 컷·범위·지원 모델만 제한 �
     { ...valid, clipId: "missing" },
     { ...valid, model: "unknown-model" },
     valid,
-    { ...valid, requestId: "request-latest" }
+    { ...valid, requestId: "request-latest" },
+    {
+      ...valid,
+      model: "whisper-tiny",
+      requestId: "request-local"
+    }
   ], clips);
-  assert.equal(normalized.length, 1);
+  assert.equal(normalized.length, 2);
   assert.equal(normalized[0].requestId, "request-latest");
+  assert.equal(
+    normalized[0].pipelineFingerprint,
+    "legacy-caption-pipeline-v0"
+  );
+  assert.equal(normalized[1].requestId, "request-local");
+  const currentPipeline = normalizeAiCaptionCheckpoints([{
+    ...valid,
+    model: "whisper-tiny",
+    pipelineFingerprint: "caption-pipeline-v1-1234567890abcdef"
+  }], clips);
+  assert.equal(
+    currentPipeline[0].pipelineFingerprint,
+    "caption-pipeline-v1-1234567890abcdef"
+  );
   assert.equal(MAX_AI_CAPTION_CHECKPOINTS, 500);
 });
 
 test("생방송과 다시보기는 채널·방송 시작 시각이 같으면 같은 회차로 연결한다", () => {
   const live = sourceSessionIdentity(captureState.source);
-  const vod = sourceSessionIdentity({
+  const vodSource = {
     ...captureState.source,
     contentType: "vod",
     contentId: "11804294",
     canonicalUrl: "https://chzzk.naver.com/video/11804294"
-  });
+  };
+  const vod = sourceSessionIdentity(vodSource);
   assert.equal(vod, live);
+  assert.equal(sameSourceSession(captureState.source, vodSource), true);
+});
+
+test("동일 치지직 VOD의 metadata 보강은 새 원본으로 오인하지 않는다", () => {
+  const withoutMetadata = {
+    platform: "CHZZK",
+    contentType: "vod",
+    contentId: "13583412",
+    channelId: "088973112d8acc831ec20274f7ffbb99",
+    broadcastStartedAt: "",
+    canonicalUrl: "https://chzzk.naver.com/video/13583412"
+  };
+  const enriched = {
+    ...withoutMetadata,
+    broadcastStartedAt: "2026-07-28 21:00:00"
+  };
+  assert.notEqual(
+    sourceSessionIdentity(withoutMetadata),
+    sourceSessionIdentity(enriched),
+    "기존 저장 ID 형식은 live↔VOD 회차 연결을 위해 유지됩니다."
+  );
+  assert.equal(sameSourceSession(withoutMetadata, enriched), true);
+  assert.equal(captureStateSourceConflict({
+    source: withoutMetadata,
+    segments: [{ id: "saved-range" }]
+  }, enriched), false);
+
+  const otherVod = {
+    ...enriched,
+    contentId: "14405629",
+    canonicalUrl: "https://chzzk.naver.com/video/14405629"
+  };
+  assert.equal(sameSourceSession(enriched, otherVod), false);
+  assert.equal(captureStateSourceConflict({
+    source: enriched,
+    segments: [{ id: "saved-range" }]
+  }, otherVod), true);
+});
+
+test("치지직 live의 stale contentId는 다른 타입 원본과 service binding을 만들지 않는다", () => {
+  const liveWithStaleContentId = {
+    platform: "CHZZK",
+    contentType: "live",
+    channelId: "channel-live",
+    contentId: "shared-id",
+    broadcastStartedAt: "2026-07-29 03:00:00"
+  };
+  const unrelatedVod = {
+    platform: "CHZZK",
+    contentType: "vod",
+    channelId: "channel-other",
+    contentId: "shared-id",
+    broadcastStartedAt: "2026-07-28 03:00:00"
+  };
+  assert.equal(sameSourceSession(liveWithStaleContentId, unrelatedVod), false);
+  assert.equal(sameSourceSession(
+    { platform: "CHZZK", contentType: "vod", contentId: "shared-id" },
+    { platform: "CHZZK", contentType: "clip", contentId: "shared-id" }
+  ), false);
+
+  const matchingVod = {
+    ...unrelatedVod,
+    channelId: liveWithStaleContentId.channelId,
+    contentId: "actual-vod-id",
+    broadcastStartedAt: liveWithStaleContentId.broadcastStartedAt
+  };
+  assert.equal(
+    sameSourceSession(liveWithStaleContentId, matchingVod),
+    true,
+    "live↔VOD 연결은 contentId가 아니라 채널·방송 시작 시각으로 유지해야 합니다."
+  );
 });
 
 test("YouTube URL 형식은 같은 영상 ID로 연결하고 치지직 ID와는 충돌하지 않는다", () => {
@@ -218,8 +320,29 @@ test("새 프로젝트는 에셋·자막 2개 레인과 고정 음성 레인 데
   assert.equal(project.subtitleDefaults.fontScale, 0.0675);
   assert.equal(project.subtitleDefaults.stylePresetId, "kr-vtuber-clean-v1");
   assert.equal(project.subtitleDefaults.maxLines, 1);
+  assert.equal(project.ai.model, "whisper-tiny");
   assert.deepEqual(project.ai.warnings, []);
   assert.deepEqual(project.ai.speakerColors, {});
+});
+
+test("현재 로컬 Whisper 실행 메타데이터는 저장 왕복에서 legacy로 오인하지 않는다", () => {
+  const current = createEditorProjectFromCapture(captureState);
+  const normalized = normalizeEditorProject({
+    ...current,
+    ai: {
+      ...current.ai,
+      provider: "local-whispercpp",
+      model: "whisper-tiny",
+      resolvedModel: "tiny-q5_1",
+      status: "done",
+      progress: 1
+    }
+  });
+  assert.equal(normalized.ai.provider, "local-whispercpp");
+  assert.equal(normalized.ai.model, "whisper-tiny");
+  assert.equal(normalized.ai.resolvedModel, "tiny-q5_1");
+  assert.equal(normalized.ai.status, "done");
+  assert.equal(normalized.ai.progress, 1);
 });
 
 test("저작권 고지를 포함한 Paperlogy 프리셋을 명시적으로 적용하고 정규화한다", () => {
@@ -295,7 +418,15 @@ test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v3로 이관
     y: 0.73,
     origin: "ai"
   });
-  const { lane: _lane, color: _color, ...cueWithoutV2Fields } = legacyCue;
+  const {
+    lane: _lane,
+    color: _color,
+    ...cueWithoutV2Fields
+  } = {
+    ...legacyCue,
+    x: 0.31,
+    y: 0.73
+  };
   const {
     subtitleLaneCount: _subtitleLaneCount,
     suppressedSelections: _suppressedSelections,
@@ -499,6 +630,152 @@ test("자막 텍스트·표시 구간·위치는 사용자 수정 상태로 보�
   assert.equal(cueAtTimeline(project, 1_000)?.id, "cue-1");
 });
 
+test("저장된 자동 AI 자막만 기본 위치로 이관하고 사람 소유 위치는 보존한다", () => {
+  const base = createEditorProjectFromCapture(captureState);
+  const raw = {
+    ...base,
+    subtitles: [
+      {
+        ...createSubtitleCue(base, {
+          id: "automatic-ai",
+          clipId: "clip-first",
+          startOffsetMs: 0,
+          endOffsetMs: 1_000,
+          text: "자동 초안",
+          origin: "ai",
+          remoteMeta: {
+            speakerId: "main",
+            reviewRequired: false,
+            placement: "bottom"
+          }
+        }),
+        x: 0.12,
+        y: 0.18,
+        remoteMeta: {
+          speakerId: "main",
+          reviewRequired: false,
+          placement: "top"
+        }
+      },
+      {
+        ...createSubtitleCue(base, {
+          id: "reviewed-ai",
+          clipId: "clip-first",
+          startOffsetMs: 1_000,
+          endOffsetMs: 2_000,
+          text: "사람 검수 AI",
+          origin: "ai",
+          remoteMeta: {
+            speakerId: "guest",
+            reviewRequired: false,
+            placement: "bottom"
+          }
+        }),
+        humanEdited: true,
+        x: 0.31,
+        y: 0.27,
+        remoteMeta: {
+          speakerId: "guest",
+          reviewRequired: false,
+          placement: "top"
+        }
+      },
+      {
+        ...createSubtitleCue(base, {
+          id: "manual-caption",
+          clipId: "clip-first",
+          startOffsetMs: 2_000,
+          endOffsetMs: 3_000,
+          text: "직접 만든 강조",
+          origin: "human"
+        }),
+        x: 0.76,
+        y: 0.44
+      }
+    ]
+  };
+
+  const once = normalizeEditorProject(structuredClone(raw));
+  const automatic = once.subtitles.find((cue) => cue.id === "automatic-ai");
+  const reviewed = once.subtitles.find((cue) => cue.id === "reviewed-ai");
+  const manual = once.subtitles.find((cue) => cue.id === "manual-caption");
+  assert.deepEqual(
+    [automatic.x, automatic.y, automatic.remoteMeta.placement],
+    [0.5, 0.84, "bottom"]
+  );
+  assert.deepEqual(
+    [reviewed.x, reviewed.y, reviewed.remoteMeta.placement],
+    [0.31, 0.27, "top"]
+  );
+  assert.deepEqual([manual.x, manual.y], [0.76, 0.44]);
+
+  const twice = normalizeEditorProject(structuredClone(once));
+  assert.deepEqual(twice, once);
+});
+
+test("명시적 전체 정렬은 AI 자막 위치만 초기화하고 수동 자막은 건드리지 않는다", () => {
+  const base = createEditorProjectFromCapture(captureState);
+  const project = {
+    ...base,
+    subtitles: [
+      {
+        ...createSubtitleCue(base, {
+          id: "reviewed-ai",
+          clipId: "clip-first",
+          startOffsetMs: 0,
+          endOffsetMs: 1_000,
+          text: "사람이 글을 고친 AI",
+          origin: "ai",
+          remoteMeta: {
+            speakerId: "guest",
+            reviewRequired: false,
+            placement: "bottom"
+          }
+        }),
+        humanEdited: true,
+        x: 0.4,
+        y: 0.18,
+        remoteMeta: {
+          speakerId: "guest",
+          reviewRequired: false,
+          placement: "top"
+        }
+      },
+      {
+        ...createSubtitleCue(base, {
+          id: "manual-caption",
+          clipId: "clip-first",
+          startOffsetMs: 1_000,
+          endOffsetMs: 2_000,
+          text: "수동 강조",
+          origin: "human"
+        }),
+        x: 0.7,
+        y: 0.2
+      }
+    ]
+  };
+
+  const reset = resetAiSubtitlePositions(project, {
+    includeHumanEdited: true,
+    updatedAt: "2026-07-29T12:00:00.000Z"
+  });
+  const reviewed = reset.subtitles.find((cue) => cue.id === "reviewed-ai");
+  const manual = reset.subtitles.find((cue) => cue.id === "manual-caption");
+  assert.deepEqual(
+    [reviewed.x, reviewed.y, reviewed.remoteMeta.placement],
+    [0.5, 0.84, "bottom"]
+  );
+  assert.equal(reviewed.humanEdited, true);
+  assert.deepEqual([manual.x, manual.y], [0.7, 0.2]);
+  assert.strictEqual(
+    resetAiSubtitlePositions(reset, {
+      includeHumanEdited: true
+    }),
+    reset
+  );
+});
+
 test("자막마다 색상을 따로 정규화하고 수정한다", () => {
   let project = createEditorProjectFromCapture(captureState);
   const cue = createSubtitleCue(project, {
@@ -518,6 +795,211 @@ test("자막마다 색상을 따로 정규화하고 수정한다", () => {
   assert.equal(project.subtitles[0].color, "#12ab34");
   assert.equal(project.subtitles[0].humanEdited, true);
   assert.equal(project.subtitleDefaults.color, "#ffffff");
+});
+
+test("자막 색상 레지스터는 흰색을 제외한 최근 고유 색상 5개만 MRU로 보존한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  assert.equal(DEFAULT_SUBTITLE_COLOR, "#ffffff");
+  assert.equal(MAX_RECENT_SUBTITLE_COLORS, 5);
+  assert.deepEqual(project.recentSubtitleColors, []);
+
+  for (const color of [
+    "#ff0000",
+    "#00ff00",
+    "#0000ff",
+    "#ffff00",
+    "#ff00ff",
+    "#00ffff"
+  ]) {
+    project = rememberSubtitleColor(project, color);
+  }
+  assert.deepEqual(project.recentSubtitleColors, [
+    "#00ffff",
+    "#ff00ff",
+    "#ffff00",
+    "#0000ff",
+    "#00ff00"
+  ]);
+
+  project = rememberSubtitleColor(project, "#00F");
+  assert.deepEqual(project.recentSubtitleColors, [
+    "#0000ff",
+    "#00ffff",
+    "#ff00ff",
+    "#ffff00",
+    "#00ff00"
+  ]);
+  assert.strictEqual(rememberSubtitleColor(project, "#ffffff"), project);
+  assert.strictEqual(rememberSubtitleColor(project, "not-a-color"), project);
+
+  assert.deepEqual(normalizeRecentSubtitleColors([
+    "#FFF",
+    "#0F0",
+    "#00ff00",
+    "bad",
+    "#123456",
+    "#abcdef",
+    "#fedcba",
+    "#135790",
+    "#246801"
+  ]), [
+    "#00ff00",
+    "#123456",
+    "#abcdef",
+    "#fedcba",
+    "#135790"
+  ]);
+
+  const restored = normalizeEditorProject({
+    ...project,
+    recentSubtitleColors: [
+      "#ABC",
+      "#ffffff",
+      "#aabbcc",
+      "javascript:alert(1)"
+    ]
+  });
+  assert.deepEqual(restored.recentSubtitleColors, ["#aabbcc"]);
+});
+
+test("타임라인 자석은 줌에 맞춘 8px 범위에서 반대 종류 경계를 우선해 결정한다", () => {
+  let project = createEditorProjectFromCapture(captureState);
+  const cue = createSubtitleCue(project, {
+    id: "snap-cue",
+    clipId: "clip-first",
+    startOffsetMs: 500,
+    endOffsetMs: 1_500,
+    text: "스냅 대상"
+  });
+  const asset = createImageAsset(project, {
+    id: "snap-asset",
+    clipId: "clip-first",
+    startOffsetMs: 1_800,
+    endOffsetMs: 2_800,
+    mimeType: "image/png",
+    dataUrl: "data:image/png;base64,AAAA"
+  });
+  project = {
+    ...project,
+    subtitles: [cue],
+    imageAssets: [asset],
+    playheadMs: 1_750
+  };
+
+  assert.equal(timelineSnapThresholdMs(20), 400);
+  assert.equal(timelineSnapThresholdMs(70), 114);
+  assert.equal(timelineSnapThresholdMs(240), 33);
+
+  const candidates = timelineSnapCandidates(project, {
+    clipId: "clip-first",
+    excludeCueId: cue.id,
+    preferredKind: "asset"
+  });
+  assert.equal(
+    candidates.some((candidate) => candidate.kind === "subtitle"),
+    false
+  );
+  assert.equal(
+    candidates.some((candidate) => (
+      candidate.kind === "asset"
+      && candidate.edge === "start"
+      && candidate.timeMs === 1_800
+    )),
+    true
+  );
+
+  const snapped = resolveTimelineSnap(1_775, candidates, {
+    thresholdMs: timelineSnapThresholdMs(70)
+  });
+  assert.deepEqual(
+    {
+      timeMs: snapped.timeMs,
+      deltaMs: snapped.deltaMs,
+      distanceMs: snapped.distanceMs,
+      kind: snapped.kind,
+      edge: snapped.edge
+    },
+    {
+      timeMs: 1_800,
+      deltaMs: 25,
+      distanceMs: 25,
+      kind: "asset",
+      edge: "start"
+    }
+  );
+  assert.equal(resolveTimelineSnap(3_500, candidates, { thresholdMs: 20 }), null);
+});
+
+test("같은 컷의 선택 자막과 에셋은 양끝 시각을 손실 없이 서로 맞춘다", () => {
+  const base = createEditorProjectFromCapture(captureState);
+  const cue = createSubtitleCue(base, {
+    id: "match-cue",
+    clipId: "clip-first",
+    startOffsetMs: 400,
+    endOffsetMs: 1_400,
+    text: "정확 맞춤"
+  });
+  const asset = createImageAsset(base, {
+    id: "match-asset",
+    clipId: "clip-first",
+    startOffsetMs: 1_725,
+    endOffsetMs: 3_125,
+    mimeType: "image/png",
+    dataUrl: "data:image/png;base64,AAAA"
+  });
+  const project = {
+    ...base,
+    subtitles: [cue],
+    imageAssets: [asset],
+    selectedCueId: cue.id,
+    selectedImageAssetId: asset.id
+  };
+
+  const cueMatched = matchSubtitleCueToImageAsset(
+    project,
+    cue.id,
+    asset.id
+  );
+  assert.deepEqual(
+    cueMatched.subtitles.map(({ startOffsetMs, endOffsetMs }) => ({
+      startOffsetMs,
+      endOffsetMs
+    })),
+    [{ startOffsetMs: 1_725, endOffsetMs: 3_125 }]
+  );
+  assert.equal(cueMatched.subtitles[0].humanEdited, true);
+  assert.equal(cueMatched.selectedImageAssetId, asset.id);
+
+  const assetMatched = matchImageAssetToSubtitleCue(
+    project,
+    asset.id,
+    cue.id
+  );
+  assert.deepEqual(
+    assetMatched.imageAssets.map(({ startOffsetMs, endOffsetMs }) => ({
+      startOffsetMs,
+      endOffsetMs
+    })),
+    [{ startOffsetMs: 400, endOffsetMs: 1_400 }]
+  );
+  assert.equal(assetMatched.selectedCueId, cue.id);
+
+  const otherClipAsset = createImageAsset(project, {
+    id: "other-clip-asset",
+    clipId: "clip-second",
+    startOffsetMs: 0,
+    endOffsetMs: 500,
+    mimeType: "image/png",
+    dataUrl: "data:image/png;base64,BBBB"
+  });
+  const crossClip = {
+    ...project,
+    imageAssets: [...project.imageAssets, otherClipAsset]
+  };
+  assert.strictEqual(
+    matchSubtitleCueToImageAsset(crossClip, cue.id, otherClipAsset.id),
+    crossClip
+  );
 });
 
 test("웹 붙여넣기 이미지 참조는 안전한 래스터 형식만 영속화한다", () => {
@@ -835,7 +1317,7 @@ test("단일 transcript chunk가 길어도 모든 AI cue를 4초 이하로 나�
   )));
 });
 
-test("원격 AI cue의 화자·검수·배치 메타와 개별 색상을 정규화 왕복에서도 보존한다", () => {
+test("원격 AI cue의 위치 요청은 무시하고 화자·검수·색상만 정규화 왕복에서 보존한다", () => {
   let project = createEditorProjectFromCapture(captureState);
   project = replaceAiSubtitleDraft(project, "clip-first", [
     {
@@ -868,18 +1350,19 @@ test("원격 AI cue의 화자·검수·배치 메타와 개별 색상을 정규�
 
   assert.equal(project.subtitles.every((cue) => cue.lane === 0), true);
   assert.equal(project.subtitles[1].color, "#00ff88");
-  assert.equal(project.subtitles[1].y, 0.18);
+  assert.equal(project.subtitles[1].x, 0.5);
+  assert.equal(project.subtitles[1].y, 0.84);
   assert.deepEqual(project.subtitles[1].remoteMeta, {
     speakerId: "guest",
     reviewRequired: true,
-    placement: "top"
+    placement: "bottom"
   });
 
   project = normalizeEditorProject(JSON.parse(JSON.stringify(project)));
   assert.deepEqual(project.subtitles[1].remoteMeta, {
     speakerId: "guest",
     reviewRequired: true,
-    placement: "top"
+    placement: "bottom"
   });
 });
 
@@ -936,7 +1419,7 @@ test("동시에 말하는 원격 화자는 서로 다른 자막 레인에 모두
   );
   assert.equal(
     project.subtitles.find((cue) => cue.id === "simultaneous-guest").y,
-    0.72
+    0.84
   );
   assert.equal(
     project.subtitles.find((cue) => cue.id === "main-followup").y,

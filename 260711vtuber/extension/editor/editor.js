@@ -242,6 +242,8 @@ var MIN_SUBTITLE_LANES = 2;
 var MAX_SUBTITLE_LANES = 8;
 var MAX_AI_WARNINGS = 4e3;
 var MAX_AI_CAPTION_CHECKPOINTS = 500;
+var DEFAULT_SUBTITLE_COLOR = "#ffffff";
+var MAX_RECENT_SUBTITLE_COLORS = 5;
 var SUPPORTED_IMAGE_ASSET_MIME_TYPES = Object.freeze([
   "image/png",
   "image/jpeg",
@@ -257,6 +259,11 @@ var ACCEPTED_EDITOR_SCHEMAS = /* @__PURE__ */ new Set([
   LEGACY_EDITOR_SCHEMA_V1,
   LEGACY_EDITOR_SCHEMA_V2
 ]);
+var AUTOMATIC_CAPTION_POSITION = Object.freeze({
+  x: 0.5,
+  y: 0.84,
+  placement: "bottom"
+});
 var nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
 var makeId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
 var finiteNumber = (value, fallback = 0) => {
@@ -347,7 +354,10 @@ function normalizeAiCaptionCheckpoints(value, clips = []) {
     const editorialContextFingerprint = String(
       raw.editorialContextFingerprint || "legacy-context-v0"
     ).trim().slice(0, 128);
-    if (!clipId || !clipIds.has(clipId) || sourceStartMs < 0 || sourceEndMs <= sourceStartMs || !["solar-pro3", "solar-mini"].includes(model)) {
+    const pipelineFingerprint = String(
+      raw.pipelineFingerprint || "legacy-caption-pipeline-v0"
+    ).trim().slice(0, 128);
+    if (!clipId || !clipIds.has(clipId) || sourceStartMs < 0 || sourceEndMs <= sourceStartMs || !["whisper-tiny", "solar-pro3", "solar-mini"].includes(model)) {
       continue;
     }
     const requestId = String(raw.requestId || "").trim().slice(0, 128);
@@ -360,6 +370,7 @@ function normalizeAiCaptionCheckpoints(value, clips = []) {
       qualityProfile,
       harnessFingerprint,
       editorialContextFingerprint,
+      pipelineFingerprint,
       ...requestId ? { requestId } : {},
       ...completedAt ? { completedAt } : {}
     };
@@ -371,7 +382,8 @@ function normalizeAiCaptionCheckpoints(value, clips = []) {
         model,
         qualityProfile,
         harnessFingerprint,
-        editorialContextFingerprint
+        editorialContextFingerprint,
+        pipelineFingerprint
       ].join("\0"),
       checkpoint
     );
@@ -387,6 +399,42 @@ function normalizeHexColor(value, fallback = "#ffffff") {
     return `#${[...candidate.slice(1)].map((character) => character.repeat(2)).join("")}`;
   }
   return fallback;
+}
+function normalizeRecentSubtitleColors(value) {
+  const normalized = [];
+  for (const rawColor of Array.isArray(value) ? value : []) {
+    const color = normalizeHexColor(rawColor, "");
+    if (!color || color === DEFAULT_SUBTITLE_COLOR || normalized.includes(color)) {
+      continue;
+    }
+    normalized.push(color);
+    if (normalized.length >= MAX_RECENT_SUBTITLE_COLORS) {
+      break;
+    }
+  }
+  return normalized;
+}
+function rememberSubtitleColor(project2, rawColor) {
+  if (!project2 || typeof project2 !== "object") {
+    return project2;
+  }
+  const color = normalizeHexColor(rawColor, "");
+  const current = normalizeRecentSubtitleColors(project2.recentSubtitleColors);
+  if (!color || color === DEFAULT_SUBTITLE_COLOR) {
+    return Array.isArray(project2.recentSubtitleColors) && project2.recentSubtitleColors.length === current.length && project2.recentSubtitleColors.every((entry, index) => entry === current[index]) ? project2 : { ...project2, recentSubtitleColors: current };
+  }
+  const next = [
+    color,
+    ...current.filter((candidate) => candidate !== color)
+  ].slice(0, MAX_RECENT_SUBTITLE_COLORS);
+  if (Array.isArray(project2.recentSubtitleColors) && project2.recentSubtitleColors.length === next.length && project2.recentSubtitleColors.every((entry, index) => entry === next[index])) {
+    return project2;
+  }
+  return {
+    ...project2,
+    recentSubtitleColors: next,
+    updatedAt: nowIso()
+  };
 }
 function normalizeAiSpeakerColors(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -592,6 +640,7 @@ function createEditorProjectFromCapture(captureState = {}, {
     imageAssets: [],
     subtitles: [],
     subtitleLaneCount: MIN_SUBTITLE_LANES,
+    recentSubtitleColors: [],
     audioRegions: [],
     selectedClipId: clips[0]?.id || null,
     selectedImageAssetId: null,
@@ -603,7 +652,7 @@ function createEditorProjectFromCapture(captureState = {}, {
     ),
     ai: {
       provider: "caption-agent",
-      model: "solar-pro3",
+      model: "whisper-tiny",
       language: "korean",
       status: "idle",
       progress: 0,
@@ -769,11 +818,11 @@ function normalizeEditorProject(raw) {
     )
   };
   const rawAi = raw.ai || {};
-  const localWhisperMetadata = rawAi.provider === "transformers.js" || String(rawAi.model || "").toLowerCase().includes("whisper");
+  const legacyBrowserWhisperMetadata = rawAi.provider === "transformers.js";
   const ai = {
     ...defaults.ai,
     ...rawAi,
-    ...localWhisperMetadata ? {
+    ...legacyBrowserWhisperMetadata ? {
       provider: defaults.ai.provider,
       model: defaults.ai.model,
       status: "idle",
@@ -804,6 +853,7 @@ function normalizeEditorProject(raw) {
     suppressedSelections,
     subtitles,
     subtitleLaneCount,
+    recentSubtitleColors: normalizeRecentSubtitleColors(raw.recentSubtitleColors),
     audioRegions,
     imageAssets,
     selectedImageAssetId: imageAssets.some((asset) => asset.id === raw.selectedImageAssetId) ? raw.selectedImageAssetId : null,
@@ -1083,10 +1133,13 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
     duration
   );
   const remotePlacement = String(cue.remoteMeta?.placement || "").trim().toLowerCase();
+  const origin = cue.origin === "ai" ? "ai" : "human";
+  const humanEdited = Boolean(cue.humanEdited);
+  const automaticAiCue = origin === "ai" && !humanEdited;
   const remoteMeta = cue.remoteMeta && typeof cue.remoteMeta === "object" ? {
     speakerId: String(cue.remoteMeta.speakerId || "unknown").replace(/\s+/gu, " ").trim().slice(0, 80) || "unknown",
     reviewRequired: Boolean(cue.remoteMeta.reviewRequired),
-    placement: ["top", "center", "bottom"].includes(remotePlacement) ? remotePlacement : "bottom",
+    placement: automaticAiCue ? AUTOMATIC_CAPTION_POSITION.placement : ["top", "center", "bottom"].includes(remotePlacement) ? remotePlacement : AUTOMATIC_CAPTION_POSITION.placement,
     ...cue.remoteMeta.qualityStatus != null || Array.isArray(cue.remoteMeta.qualityCodes) ? {
       qualityStatus: cue.remoteMeta.qualityStatus === "review-required" ? "review-required" : "accepted",
       qualityCodes: [...new Set(
@@ -1106,15 +1159,49 @@ function normalizeSubtitleCue(cue, clip, laneCount = MAX_SUBTITLE_LANES) {
       Math.max(0, Math.min(MAX_SUBTITLE_LANES, laneCount) - 1)
     ),
     color: normalizeHexColor(cue.color, "#ffffff"),
-    x: clamp(finiteNumber(cue.x, 0.5), 0.05, 0.95),
-    y: clamp(finiteNumber(cue.y, 0.84), 0.05, 0.95),
-    origin: cue.origin === "ai" ? "ai" : "human",
-    humanEdited: Boolean(cue.humanEdited),
+    x: automaticAiCue ? AUTOMATIC_CAPTION_POSITION.x : clamp(finiteNumber(cue.x, AUTOMATIC_CAPTION_POSITION.x), 0.05, 0.95),
+    y: automaticAiCue ? AUTOMATIC_CAPTION_POSITION.y : clamp(finiteNumber(cue.y, AUTOMATIC_CAPTION_POSITION.y), 0.05, 0.95),
+    origin,
+    humanEdited,
     confidence: Number.isFinite(cue.confidence) ? cue.confidence : null,
     ...remoteMeta ? { remoteMeta } : {},
     createdAt: cue.createdAt || nowIso(),
     updatedAt: cue.updatedAt || cue.createdAt || nowIso()
   };
+}
+function resetAiSubtitlePositions(project2, {
+  includeHumanEdited = false,
+  updatedAt = nowIso()
+} = {}) {
+  if (!project2 || !Array.isArray(project2.subtitles)) {
+    return project2;
+  }
+  let changed = false;
+  const subtitles = project2.subtitles.map((cue) => {
+    if (cue?.origin !== "ai" || cue.humanEdited && !includeHumanEdited) {
+      return cue;
+    }
+    const remoteMeta = cue.remoteMeta && typeof cue.remoteMeta === "object" ? {
+      ...cue.remoteMeta,
+      placement: AUTOMATIC_CAPTION_POSITION.placement
+    } : cue.remoteMeta;
+    if (cue.x === AUTOMATIC_CAPTION_POSITION.x && cue.y === AUTOMATIC_CAPTION_POSITION.y && (!remoteMeta || remoteMeta.placement === cue.remoteMeta?.placement)) {
+      return cue;
+    }
+    changed = true;
+    return {
+      ...cue,
+      x: AUTOMATIC_CAPTION_POSITION.x,
+      y: AUTOMATIC_CAPTION_POSITION.y,
+      ...remoteMeta ? { remoteMeta } : {},
+      updatedAt
+    };
+  });
+  return changed ? {
+    ...project2,
+    subtitles,
+    updatedAt
+  } : project2;
 }
 function createSubtitleCue(project2, {
   id,
@@ -1393,6 +1480,164 @@ function audioRegionTimelineRange(project2, region) {
     endMs: clip.timelineStartMs + region.endOffsetMs
   };
 }
+function timelineSnapThresholdMs(pixelsPerSecond2, {
+  thresholdPx = 8,
+  minimumMs = 25,
+  maximumMs = 400
+} = {}) {
+  const pixels = Math.max(1, finiteNumber(pixelsPerSecond2, 70));
+  const requested = Math.round(
+    Math.max(0, finiteNumber(thresholdPx, 8)) / pixels * 1e3
+  );
+  return clamp(
+    requested,
+    Math.max(0, Math.round(finiteNumber(minimumMs, 25))),
+    Math.max(0, Math.round(finiteNumber(maximumMs, 400)))
+  );
+}
+function timelineSnapCandidates(project2, {
+  clipId,
+  excludeCueId = null,
+  excludeImageAssetId = null,
+  preferredKind = null,
+  includePlayhead = true
+} = {}) {
+  const clip = project2?.clips?.find((candidate) => candidate.id === clipId);
+  if (!clip || clip.enabled === false) {
+    return [];
+  }
+  const clipStartMs = clip.timelineStartMs;
+  const clipEndMs = clip.timelineStartMs + clipDurationMs(clip);
+  const candidates = [];
+  const priorityFor = (kind) => {
+    if (kind === preferredKind) {
+      return 0;
+    }
+    if (kind === "subtitle" || kind === "asset") {
+      return 1;
+    }
+    return kind === "playhead" ? 2 : 3;
+  };
+  const add = ({ timeMs, kind, edge, itemId = null, label }) => {
+    const normalizedTimeMs = Math.round(finiteNumber(timeMs, -1));
+    if (normalizedTimeMs < clipStartMs || normalizedTimeMs > clipEndMs) {
+      return;
+    }
+    candidates.push({
+      timeMs: normalizedTimeMs,
+      kind,
+      edge,
+      itemId,
+      label,
+      priority: priorityFor(kind)
+    });
+  };
+  add({
+    timeMs: clipStartMs,
+    kind: "clip",
+    edge: "start",
+    itemId: clip.id,
+    label: "\uCEF7 \uC2DC\uC791"
+  });
+  add({
+    timeMs: clipEndMs,
+    kind: "clip",
+    edge: "end",
+    itemId: clip.id,
+    label: "\uCEF7 \uB05D"
+  });
+  if (includePlayhead) {
+    add({
+      timeMs: project2.playheadMs,
+      kind: "playhead",
+      edge: "point",
+      label: "\uC7AC\uC0DD \uD5E4\uB4DC"
+    });
+  }
+  for (const cue of project2.subtitles || []) {
+    if (cue.clipId !== clip.id || cue.id === excludeCueId) {
+      continue;
+    }
+    const range = cueTimelineRange(project2, cue);
+    if (!range) {
+      continue;
+    }
+    add({
+      timeMs: range.startMs,
+      kind: "subtitle",
+      edge: "start",
+      itemId: cue.id,
+      label: "\uC790\uB9C9 \uC2DC\uC791"
+    });
+    add({
+      timeMs: range.endMs,
+      kind: "subtitle",
+      edge: "end",
+      itemId: cue.id,
+      label: "\uC790\uB9C9 \uB05D"
+    });
+  }
+  for (const asset of project2.imageAssets || []) {
+    if (asset.clipId !== clip.id || asset.id === excludeImageAssetId) {
+      continue;
+    }
+    const range = imageAssetTimelineRange(project2, asset);
+    if (!range) {
+      continue;
+    }
+    add({
+      timeMs: range.startMs,
+      kind: "asset",
+      edge: "start",
+      itemId: asset.id,
+      label: "\uC5D0\uC14B \uC2DC\uC791"
+    });
+    add({
+      timeMs: range.endMs,
+      kind: "asset",
+      edge: "end",
+      itemId: asset.id,
+      label: "\uC5D0\uC14B \uB05D"
+    });
+  }
+  return candidates;
+}
+function resolveTimelineSnap(rawTimelineMs, candidates, {
+  thresholdMs = 0
+} = {}) {
+  const targetMs = Math.round(finiteNumber(rawTimelineMs));
+  const limitMs = Math.max(0, Math.round(finiteNumber(thresholdMs)));
+  const matches = (Array.isArray(candidates) ? candidates : []).filter((candidate) => candidate && Number.isFinite(Number(candidate.timeMs))).map((candidate) => ({
+    ...candidate,
+    timeMs: Math.round(Number(candidate.timeMs)),
+    deltaMs: Math.round(Number(candidate.timeMs)) - targetMs,
+    distanceMs: Math.abs(Math.round(Number(candidate.timeMs)) - targetMs),
+    priority: Math.round(finiteNumber(candidate.priority, 100))
+  })).filter((candidate) => candidate.distanceMs <= limitMs).sort((first, second) => first.distanceMs - second.distanceMs || first.priority - second.priority || first.timeMs - second.timeMs || String(first.kind || "").localeCompare(String(second.kind || "")) || String(first.itemId || "").localeCompare(String(second.itemId || "")) || String(first.edge || "").localeCompare(String(second.edge || "")));
+  return matches[0] || null;
+}
+function matchSubtitleCueToImageAsset(project2, cueId, assetId) {
+  const cue = project2?.subtitles?.find((candidate) => candidate.id === cueId);
+  const asset = project2?.imageAssets?.find((candidate) => candidate.id === assetId);
+  if (!cue || !asset || cue.clipId !== asset.clipId) {
+    return project2;
+  }
+  return updateSubtitleCue(project2, cue.id, {
+    startOffsetMs: asset.startOffsetMs,
+    endOffsetMs: asset.endOffsetMs
+  });
+}
+function matchImageAssetToSubtitleCue(project2, assetId, cueId) {
+  const asset = project2?.imageAssets?.find((candidate) => candidate.id === assetId);
+  const cue = project2?.subtitles?.find((candidate) => candidate.id === cueId);
+  if (!asset || !cue || asset.clipId !== cue.clipId) {
+    return project2;
+  }
+  return updateImageAsset(project2, asset.id, {
+    startOffsetMs: cue.startOffsetMs,
+    endOffsetMs: cue.endOffsetMs
+  });
+}
 function cuesAtTimeline(project2, timelineMs) {
   const target = Math.round(finiteNumber(timelineMs));
   return (project2?.subtitles || []).map((cue) => ({ cue, range: cueTimelineRange(project2, cue) })).filter(({ range }) => range && target >= range.startMs && target < range.endMs).sort((a, b) => a.cue.lane - b.cue.lane || a.range.startMs - b.range.startMs || a.cue.id.localeCompare(b.cue.id)).map(({ cue }) => cue);
@@ -1562,21 +1807,7 @@ function replaceAiSubtitleDraft(project2, clipId, drafts = []) {
       speakerLanes.set(speakerId, lane);
     }
   }
-  const stackableCues = [...protectedInClip, ...aiCues];
-  const stackedAiCues = aiCues.map((cue) => {
-    const simultaneous = stackableCues.filter((candidate) => overlaps(candidate, cue)).sort((left, right) => (left.origin === "human" ? -1 : 0) - (right.origin === "human" ? -1 : 0) || aiCaptionStackPriority(left) - aiCaptionStackPriority(right) || left.lane - right.lane || left.startOffsetMs - right.startOffsetMs || left.id.localeCompare(right.id));
-    if (simultaneous.length <= 1) {
-      return cue;
-    }
-    const rank = simultaneous.findIndex((candidate) => candidate.id === cue.id);
-    const placement = cue.remoteMeta?.placement || "bottom";
-    const y = placement === "top" ? 0.18 + rank * 0.12 : placement === "center" ? 0.5 + (rank - (simultaneous.length - 1) / 2) * 0.12 : 0.84 - rank * 0.12;
-    return {
-      ...cue,
-      y: clamp(y, 0.08, 0.92)
-    };
-  });
-  const subtitles = [...preserved, ...stackedAiCues].sort((a, b) => {
+  const subtitles = [...preserved, ...aiCues].sort((a, b) => {
     const clipA = project2.clips.find((candidate) => candidate.id === a.clipId);
     const clipB = project2.clips.find((candidate) => candidate.id === b.clipId);
     return (clipA?.timelineStartMs || 0) + a.startOffsetMs - ((clipB?.timelineStartMs || 0) + b.startOffsetMs);
@@ -1585,7 +1816,7 @@ function replaceAiSubtitleDraft(project2, clipId, drafts = []) {
     ...project2,
     subtitleLaneCount,
     subtitles,
-    selectedCueId: subtitles.some((cue) => cue.id === project2.selectedCueId) ? project2.selectedCueId : stackedAiCues[0]?.id || protectedInClip[0]?.id || null,
+    selectedCueId: subtitles.some((cue) => cue.id === project2.selectedCueId) ? project2.selectedCueId : aiCues[0]?.id || protectedInClip[0]?.id || null,
     updatedAt: nowIso()
   };
 }
@@ -34261,13 +34492,15 @@ var KR_VTUBER_CLEAN_PROFILE = Object.freeze({
   speakerPalette: DEFAULT_SPEAKER_PALETTE
 });
 var CAPTION_QUALITY_PROFILE_ID = KR_VTUBER_CLEAN_PROFILE.id;
-var CAPTION_HARNESS_FINGERPRINT = "kr-vtuber-clean-v1:segment-word-v2:context-v1:quality-gate-v1";
+var CAPTION_HARNESS_FINGERPRINT = "kr-vtuber-clean-v1:segment-word-v3:context-v1:quality-gate-v2";
 
 // src/editor/caption-agent.js
-var CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v1";
+var CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v2";
+var LEGACY_CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v1";
 var CAPTION_AGENT_REQUEST_SCHEMA = "chzzk-kirinuki-caption-request/v1";
 var CAPTION_AGENT_RESPONSE_SCHEMA = "chzzk-kirinuki-caption-response/v1";
 var CAPTION_AGENT_SESSION_SCHEMA = "chzzk-kirinuki-caption-agent/session-v1";
+var CAPTION_AGENT_CAPABILITY_SCHEMA = "chzzk-kirinuki-caption-agent/capability-v1";
 var MAX_REMOTE_CUE_DURATION_MS = 4e3;
 var MAX_REMOTE_CUES = 4e3;
 var MAX_REMOTE_WARNINGS = 4e3;
@@ -34293,19 +34526,26 @@ var CAPTION_AGENT_PROVIDER_HEADERS = Object.freeze({
 });
 var DEFAULT_CAPTION_AGENT_SETTINGS = Object.freeze({
   endpoint: "http://127.0.0.1:4319/v1/captions",
-  model: "solar-pro3",
+  model: "whisper-tiny",
   sttEndpoint: "",
   sttModel: ""
 });
+var LOCAL_WHISPER_CAPTION_MODEL = "whisper-tiny";
 var ALLOWED_SOLAR_MODELS = /* @__PURE__ */ new Set([
   "solar-pro3",
   "solar-mini"
 ]);
-var PLACEMENT_Y = Object.freeze({
-  top: 0.18,
-  center: 0.5,
-  bottom: 0.84
-});
+var ALLOWED_CAPTION_MODELS = /* @__PURE__ */ new Set([
+  LOCAL_WHISPER_CAPTION_MODEL,
+  ...ALLOWED_SOLAR_MODELS
+]);
+var LEGACY_CAPTION_PIPELINE_FINGERPRINT = "legacy-caption-pipeline-v0";
+var REQUIRED_CAPTION_PIPELINE_FINGERPRINT = "current-caption-pipeline-required-v1";
+function isSolarCaptionModel(model) {
+  return ALLOWED_SOLAR_MODELS.has(model);
+}
+var AUTOMATIC_CAPTION_PLACEMENT = "bottom";
+var AUTOMATIC_CAPTION_Y = 0.84;
 function finiteNumber2(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -34445,7 +34685,7 @@ function captionAgentPermissionOrigin(endpoint) {
   return `${url2.protocol}//${url2.hostname}/*`;
 }
 function normalizeCaptionAgentSettings(raw = {}) {
-  const model = ALLOWED_SOLAR_MODELS.has(raw.model) ? raw.model : DEFAULT_CAPTION_AGENT_SETTINGS.model;
+  const model = ALLOWED_CAPTION_MODELS.has(raw.model) ? raw.model : DEFAULT_CAPTION_AGENT_SETTINGS.model;
   let endpoint = DEFAULT_CAPTION_AGENT_SETTINGS.endpoint;
   try {
     endpoint = normalizeCaptionAgentEndpoint(
@@ -34463,11 +34703,29 @@ function normalizeCaptionAgentSettings(raw = {}) {
     sttModel = normalizeSttModel(raw.sttModel);
   } catch {
   }
+  if (model === LOCAL_WHISPER_CAPTION_MODEL) {
+    if (!isLoopbackCaptionAgentEndpoint(endpoint)) {
+      endpoint = DEFAULT_CAPTION_AGENT_SETTINGS.endpoint;
+    }
+    sttEndpoint = "";
+    sttModel = "";
+  }
   return { endpoint, model, sttEndpoint, sttModel };
 }
 async function loadCaptionAgentSettings(storageArea = chrome.storage.local) {
-  const stored = await storageArea.get(CAPTION_AGENT_SETTINGS_KEY);
-  return normalizeCaptionAgentSettings(stored[CAPTION_AGENT_SETTINGS_KEY]);
+  const stored = await storageArea.get([
+    CAPTION_AGENT_SETTINGS_KEY,
+    LEGACY_CAPTION_AGENT_SETTINGS_KEY
+  ]);
+  const current = stored[CAPTION_AGENT_SETTINGS_KEY];
+  if (current) {
+    return normalizeCaptionAgentSettings(current);
+  }
+  const legacy = normalizeCaptionAgentSettings({
+    ...stored[LEGACY_CAPTION_AGENT_SETTINGS_KEY] || {},
+    model: DEFAULT_CAPTION_AGENT_SETTINGS.model
+  });
+  return legacy;
 }
 async function saveCaptionAgentSettings(settings, storageArea = chrome.storage.local) {
   const normalized = normalizeCaptionAgentSettings({
@@ -34479,6 +34737,79 @@ async function saveCaptionAgentSettings(settings, storageArea = chrome.storage.l
   await storageArea.set({ [CAPTION_AGENT_SETTINGS_KEY]: normalized });
   return normalized;
 }
+function boundedCapabilityString(value, label, maximum = 2048) {
+  const normalized = String(value || "").trim();
+  if (!normalized || normalized.length > maximum || /[\u0000-\u001f\u007f]/u.test(normalized)) {
+    throw new Error(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8\uC758 ${label} \uC815\uBCF4\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+  }
+  return normalized;
+}
+function shortStableFingerprint(value) {
+  const bytes2 = new TextEncoder().encode(String(value));
+  let first = 2166136261;
+  let second = 2654435769;
+  for (const byte of bytes2) {
+    first = Math.imul(first ^ byte, 16777619) >>> 0;
+    second = Math.imul(second ^ byte, 2246822507) >>> 0;
+  }
+  return `${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
+}
+function captionAgentRuntimeIdentity(capability, {
+  model = DEFAULT_CAPTION_AGENT_SETTINGS.model,
+  sttEndpoint = ""
+} = {}) {
+  if (!isPlainObject2(capability)) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 capability \uC751\uB2F5\uC774 JSON \uAC1D\uCCB4\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
+  }
+  if (capability.schema !== CAPTION_AGENT_CAPABILITY_SCHEMA || capability.status !== "ok") {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 capability \uBC84\uC804\uC774 \uB9DE\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  if (!ALLOWED_CAPTION_MODELS.has(model)) {
+    throw new Error("\uC120\uD0DD\uD55C \uC790\uB9C9 \uCD08\uBC8C \uBAA8\uB378\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const availableModels = Array.isArray(capability.availableModels) ? capability.availableModels.map((entry) => String(entry)) : [];
+  if (!availableModels.includes(model)) {
+    throw new Error(`\uB85C\uCEEC companion\uC774 ${model} \uBAA8\uB378\uC744 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
+  }
+  const provider = boundedCapabilityString(
+    capability.provider,
+    "STT \uC81C\uACF5\uC790",
+    80
+  );
+  if (!["local-whispercpp", "timed-stt"].includes(provider)) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8\uC758 STT \uC81C\uACF5\uC790\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const sttModel = boundedCapabilityString(
+    capability.models?.stt,
+    "\uC2E4\uC81C STT \uBAA8\uB378",
+    MAX_STT_MODEL_LENGTH
+  );
+  const transcriptionMode = boundedCapabilityString(
+    capability.transcription?.mode,
+    "STT \uC2E4\uD589 \uBC29\uC2DD",
+    80
+  );
+  if (model === LOCAL_WHISPER_CAPTION_MODEL && (provider !== "local-whispercpp" || transcriptionMode !== "local-whispercpp")) {
+    throw new Error(
+      "Whisper Tiny \uB85C\uCEEC \uCD08\uBC8C\uC740 \uC774 \uAE30\uAE30\uC758 local-whispercpp runtime\uB9CC \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
+    );
+  }
+  const normalizedEndpoint = sttEndpoint ? normalizeExternalSttEndpoint(sttEndpoint) : "";
+  const identitySource = JSON.stringify({
+    schema: "caption-pipeline-identity/v1",
+    model,
+    provider,
+    transcriptionMode,
+    sttModel,
+    sttEndpoint: normalizedEndpoint
+  });
+  return {
+    provider,
+    sttModel,
+    transcriptionMode,
+    fingerprint: `caption-pipeline-v1-${shortStableFingerprint(identitySource)}`
+  };
+}
 async function ensureCaptionAgentPermission(endpoint, permissionsApi = chrome.permissions) {
   const origin = captionAgentPermissionOrigin(endpoint);
   if (await permissionsApi.contains({ origins: [origin] })) {
@@ -34486,7 +34817,9 @@ async function ensureCaptionAgentPermission(endpoint, permissionsApi = chrome.pe
   }
   return permissionsApi.request({ origins: [origin] });
 }
-function captionAgentRunEstimate(clips = []) {
+function captionAgentRunEstimate(clips = [], {
+  model = DEFAULT_CAPTION_AGENT_SETTINGS.model
+} = {}) {
   if (!Array.isArray(clips)) {
     throw new TypeError("\uC790\uB9C9 \uC2E4\uD589 \uC608\uC0C1\uB7C9\uC744 \uACC4\uC0B0\uD560 \uCEF7 \uBC30\uC5F4\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.");
   }
@@ -34499,8 +34832,8 @@ function captionAgentRunEstimate(clips = []) {
   return {
     clipCount: enabled.length,
     totalDurationMs,
-    plannedSolarRequests: enabled.length,
-    maximumSolarRequests: enabled.length
+    plannedSolarRequests: isSolarCaptionModel(model) ? enabled.length : 0,
+    maximumSolarRequests: isSolarCaptionModel(model) ? enabled.length : 0
   };
 }
 function captionAgentEditorialContextFingerprint(project2) {
@@ -34517,7 +34850,8 @@ function captionCheckpointKey({
   model,
   qualityProfile,
   harnessFingerprint,
-  editorialContextFingerprint
+  editorialContextFingerprint,
+  pipelineFingerprint
 }) {
   return [
     String(clipId || ""),
@@ -34526,16 +34860,18 @@ function captionCheckpointKey({
     String(model || ""),
     String(qualityProfile || "legacy-unharnessed-v0"),
     String(harnessFingerprint || "legacy-harness-fingerprint-v0"),
-    String(editorialContextFingerprint || "legacy-context-v0")
+    String(editorialContextFingerprint || "legacy-context-v0"),
+    String(pipelineFingerprint || LEGACY_CAPTION_PIPELINE_FINGERPRINT)
   ].join("\0");
 }
 function createCaptionAgentCheckpoint(clip, model, {
   requestId = "",
   completedAt = (/* @__PURE__ */ new Date()).toISOString(),
-  editorialContextFingerprint = "legacy-context-v0"
+  editorialContextFingerprint = "legacy-context-v0",
+  pipelineFingerprint = REQUIRED_CAPTION_PIPELINE_FINGERPRINT
 } = {}) {
-  if (!ALLOWED_SOLAR_MODELS.has(model)) {
-    throw new Error("\uC790\uB9C9 \uC7AC\uAC1C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uC758 Solar \uBAA8\uB378\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  if (!ALLOWED_CAPTION_MODELS.has(model)) {
+    throw new Error("\uC790\uB9C9 \uC7AC\uAC1C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uC758 \uCD08\uBC8C \uBAA8\uB378\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
   }
   const normalizedModel = model;
   const checkpoint = {
@@ -34548,10 +34884,13 @@ function createCaptionAgentCheckpoint(clip, model, {
     editorialContextFingerprint: String(
       editorialContextFingerprint || "legacy-context-v0"
     ).trim().slice(0, 128),
+    pipelineFingerprint: String(
+      pipelineFingerprint || REQUIRED_CAPTION_PIPELINE_FINGERPRINT
+    ).trim().slice(0, 128),
     requestId: String(requestId || "").trim().slice(0, 128),
     completedAt: String(completedAt || "").trim().slice(0, 64)
   };
-  if (!checkpoint.clipId || checkpoint.sourceStartMs < 0 || checkpoint.sourceEndMs <= checkpoint.sourceStartMs) {
+  if (!checkpoint.clipId || checkpoint.sourceStartMs < 0 || checkpoint.sourceEndMs <= checkpoint.sourceStartMs || !checkpoint.pipelineFingerprint) {
     throw new Error("\uC790\uB9C9 \uC7AC\uAC1C \uCCB4\uD06C\uD3EC\uC778\uD2B8\uC6A9 \uCEF7 \uBC94\uC704\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
   }
   return checkpoint;
@@ -34603,7 +34942,8 @@ function sameCaptionMediaIdentity(left, right) {
 }
 function captionAgentResumePlan(clips, checkpoints, model, {
   resume = false,
-  editorialContextFingerprint = "legacy-context-v0"
+  editorialContextFingerprint = "legacy-context-v0",
+  pipelineFingerprint = REQUIRED_CAPTION_PIPELINE_FINGERPRINT
 } = {}) {
   const enabled = (Array.isArray(clips) ? clips : []).filter(
     (clip) => clip?.enabled !== false
@@ -34626,7 +34966,8 @@ function captionAgentResumePlan(clips, checkpoints, model, {
       model,
       qualityProfile: CAPTION_QUALITY_PROFILE_ID,
       harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
-      editorialContextFingerprint
+      editorialContextFingerprint,
+      pipelineFingerprint
     }));
     if (completed) {
       skippedClipIds.push(String(clip.id));
@@ -34641,7 +34982,7 @@ function captionAgentResumePlan(clips, checkpoints, model, {
 function captionAgentAudioFootprint(durationMs) {
   const duration = Math.round(finiteNumber2(durationMs));
   if (duration <= 0 || duration > MAX_CAPTION_AGENT_CLIP_DURATION_MS) {
-    throw new RangeError("Solar \uC790\uB9C9\uC740 \uD55C \uCEF7\uB2F9 30\uBD84 \uC774\uD558\uB9CC \uCC98\uB9AC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
+    throw new RangeError("\uC790\uB3D9 \uC790\uB9C9\uC740 \uD55C \uCEF7\uB2F9 30\uBD84 \uC774\uD558\uB9CC \uCC98\uB9AC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
   }
   const sampleCount = Math.ceil(
     duration * CAPTION_AGENT_SAMPLE_RATE_HZ / 1e3
@@ -34649,7 +34990,7 @@ function captionAgentAudioFootprint(durationMs) {
   const floatPcmBytes = sampleCount * Float32Array.BYTES_PER_ELEMENT;
   const wavBytes = 44 + sampleCount * Int16Array.BYTES_PER_ELEMENT;
   if (wavBytes > MAX_CAPTION_AGENT_WAV_BYTES) {
-    throw new RangeError("Solar \uC790\uB9C9\uC6A9 WAV\uAC00 64MiB \uC0C1\uD55C\uC744 \uB118\uC2B5\uB2C8\uB2E4.");
+    throw new RangeError("\uC790\uB3D9 \uC790\uB9C9\uC6A9 WAV\uAC00 64MiB \uC0C1\uD55C\uC744 \uB118\uC2B5\uB2C8\uB2E4.");
   }
   return {
     durationMs: duration,
@@ -34665,11 +35006,11 @@ function encodePcm16WavBase64(audio, sampleRateHz = CAPTION_AGENT_SAMPLE_RATE_HZ
   }
   const sampleRate = Math.round(finiteNumber2(sampleRateHz));
   if (sampleRate !== CAPTION_AGENT_SAMPLE_RATE_HZ) {
-    throw new RangeError("Solar \uC790\uB9C9\uC740 16kHz PCM \uC624\uB514\uC624\uB9CC \uCC98\uB9AC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
+    throw new RangeError("\uC790\uB3D9 \uC790\uB9C9\uC740 16kHz PCM \uC624\uB514\uC624\uB9CC \uCC98\uB9AC\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4.");
   }
   const wavByteLength = 44 + audio.length * 2;
   if (wavByteLength > MAX_CAPTION_AGENT_WAV_BYTES) {
-    throw new RangeError("Solar \uC790\uB9C9\uC6A9 WAV\uAC00 64MiB \uC0C1\uD55C\uC744 \uB118\uC2B5\uB2C8\uB2E4.");
+    throw new RangeError("\uC790\uB3D9 \uC790\uB9C9\uC6A9 WAV\uAC00 64MiB \uC0C1\uD55C\uC744 \uB118\uC2B5\uB2C8\uB2E4.");
   }
   const bytes2 = new Uint8Array(wavByteLength);
   const view2 = new DataView(bytes2.buffer);
@@ -34727,8 +35068,8 @@ function createCaptionAgentRequest({
     throw new Error("\uC790\uB9C9\uC744 \uB9CC\uB4E4 \uCEF7 \uAD6C\uAC04\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
   }
   captionAgentAudioFootprint(durationMs);
-  if (!ALLOWED_SOLAR_MODELS.has(model)) {
-    throw new Error("\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 Solar \uBAA8\uB378\uC785\uB2C8\uB2E4.");
+  if (!ALLOWED_CAPTION_MODELS.has(model)) {
+    throw new Error("\uC9C0\uC6D0\uD558\uC9C0 \uC54A\uB294 \uC790\uB9C9 \uCD08\uBC8C \uBAA8\uB378\uC785\uB2C8\uB2E4.");
   }
   if (!audioBase64) {
     throw new Error("\uC5D0\uC774\uC804\uD2B8\uC5D0 \uBCF4\uB0BC \uC74C\uC131\uC774 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.");
@@ -34803,14 +35144,14 @@ function normalizedColor(value) {
   const color = String(value || "").trim();
   return /^#[0-9a-f]{6}$/iu.test(color) ? color.toLowerCase() : void 0;
 }
-function normalizedRemoteMeta(raw, placement) {
+function normalizedRemoteMeta(raw) {
   const rawQuality = raw?.quality;
   const qualityCodes = Array.isArray(rawQuality?.codes) ? [...new Set(rawQuality.codes.map((code) => String(code || "").trim().slice(0, 128)).filter(Boolean))].slice(0, 32) : [];
   const qualityStatus = rawQuality?.status === "review-required" ? "review-required" : "accepted";
   return {
     speakerId: String(raw?.speakerId ?? raw?.speaker_id ?? "unknown").replace(/\s+/gu, " ").trim().slice(0, 80) || "unknown",
     reviewRequired: Boolean(raw?.reviewRequired ?? raw?.review_required) || qualityStatus === "review-required",
-    placement,
+    placement: AUTOMATIC_CAPTION_PLACEMENT,
     ...isPlainObject2(rawQuality) ? { qualityStatus, qualityCodes } : {}
   };
 }
@@ -34837,17 +35178,14 @@ function normalizeCaptionAgentCues(cues, clipDurationMs2) {
     }
     const startOffsetMs = Math.round(rawStartMs);
     const endOffsetMs = Math.round(rawEndMs);
-    const requestedPlacement = String(raw?.placement || "bottom").toLowerCase();
-    const placement = Object.hasOwn(PLACEMENT_Y, requestedPlacement) ? requestedPlacement : "bottom";
-    const y = Object.hasOwn(PLACEMENT_Y, requestedPlacement) ? PLACEMENT_Y[requestedPlacement] : clamp3(finiteNumber2(raw?.y, PLACEMENT_Y.bottom), 0.08, 0.92);
     const color = normalizedColor(raw?.color);
     return {
       startOffsetMs,
       endOffsetMs,
       text,
-      y,
+      y: AUTOMATIC_CAPTION_Y,
       ...color ? { color } : {},
-      remoteMeta: normalizedRemoteMeta(raw, placement)
+      remoteMeta: normalizedRemoteMeta(raw)
     };
   }).sort((left, right) => left.startOffsetMs - right.startOffsetMs || left.endOffsetMs - right.endOffsetMs);
   return normalized;
@@ -35087,8 +35425,16 @@ function validateCompletedCaptionAgentResponse(payload, request) {
   ]) {
     requiredResponseString(payload, field);
   }
-  if (payload.provider !== "upstage") {
-    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC81C\uACF5\uC790\uAC00 Upstage\uAC00 \uC544\uB2D9\uB2C8\uB2E4.");
+  if (!["local-whispercpp", "upstage"].includes(payload.provider)) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC81C\uACF5\uC790\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  }
+  const requestedModel = String(request?.model || "");
+  if (payload.captionModel !== requestedModel || payload.model !== requestedModel) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uBAA8\uB378\uC774 \uD604\uC7AC \uC694\uCCAD\uACFC \uB2E4\uB985\uB2C8\uB2E4.");
+  }
+  const expectedProvider = requestedModel === LOCAL_WHISPER_CAPTION_MODEL ? "local-whispercpp" : "upstage";
+  if (payload.provider !== expectedProvider) {
+    throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5 \uC81C\uACF5\uC790\uAC00 \uC120\uD0DD\uD55C \uCD08\uBC8C \uBC29\uC2DD\uACFC \uB2E4\uB985\uB2C8\uB2E4.");
   }
   if (!Array.isArray(payload.cues) || payload.cues.length > MAX_REMOTE_CUES) {
     throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC751\uB2F5\uC758 cues \uD544\uB4DC\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
@@ -35219,7 +35565,7 @@ async function requestCaptionAgent({
         providerConfig
       )
     };
-    onProgress(0.08, "\uC678\uBD80 \uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8\uC5D0 \uC74C\uC131\uC744 \uBCF4\uB0B4\uB294 \uC911");
+    onProgress(0.08, "\uC790\uB9C9 \uC5D4\uC9C4\uC5D0 \uC120\uD0DD \uAD6C\uAC04 \uC74C\uC131\uC744 \uBCF4\uB0B4\uB294 \uC911");
     throwIfAborted2(requestSignal);
     let response = await fetchImpl(normalizedEndpoint, {
       method: "POST",
@@ -35243,7 +35589,7 @@ async function requestCaptionAgent({
       pollCount += 1;
       onProgress(
         clamp3(finiteNumber2(payload.progress, 0.15 + pollCount * 0.025), 0.12, 0.92),
-        String(payload.message || "\uC678\uBD80 \uC74C\uC131\uC778\uC2DD\uACFC Solar \uC790\uB9C9 \uC815\uB9AC \uC911")
+        String(payload.message || "\uC74C\uC131\uC778\uC2DD\uACFC \uC790\uB9C9 \uCD08\uBC8C \uC815\uB9AC \uC911")
       );
       await abortableDelay(
         clamp3(finiteNumber2(payload.retryAfterMs, 1200), 300, 1e4),
@@ -35266,7 +35612,10 @@ async function requestCaptionAgent({
     }
     throwIfAborted2(requestSignal);
     validateCompletedCaptionAgentResponse(payload, request);
-    onProgress(1, "Solar \uC790\uB9C9 \uCD08\uC548 \uC218\uC2E0 \uC644\uB8CC");
+    onProgress(
+      1,
+      payload.provider === "local-whispercpp" ? "\uB85C\uCEEC Whisper \uC790\uB9C9 \uCD08\uC548 \uC218\uC2E0 \uC644\uB8CC" : "Solar \uC790\uB9C9 \uCD08\uC548 \uC218\uC2E0 \uC644\uB8CC"
+    );
     return payload;
   } finally {
     deadline.cleanup();
@@ -35470,6 +35819,7 @@ var elements = Object.fromEntries([
   "test-caption-agent",
   "caption-agent-warning",
   "generate-captions",
+  "reset-ai-caption-positions",
   "ai-progress",
   "ai-progress-label",
   "ai-progress-value",
@@ -35489,7 +35839,10 @@ var elements = Object.fromEntries([
   "cue-y-value",
   "font-size",
   "font-color",
+  "caption-color-register",
   "reset-font-color",
+  "match-cue-to-asset",
+  "cue-timing-match-help",
   "delete-cue",
   "cue-list",
   "asset-empty",
@@ -35499,6 +35852,8 @@ var elements = Object.fromEntries([
   "asset-meta",
   "asset-start",
   "asset-end",
+  "match-asset-to-cue",
+  "asset-timing-match-help",
   "asset-x",
   "asset-y",
   "asset-x-value",
@@ -35535,6 +35890,7 @@ var elements = Object.fromEntries([
   "subtitle-lane-count",
   "add-subtitle-lane",
   "fit-timeline",
+  "toggle-timeline-snap",
   "timeline-zoom",
   "timeline-scroll",
   "timeline-content",
@@ -35543,6 +35899,7 @@ var elements = Object.fromEntries([
   "asset-track",
   "audio-track",
   "caption-tracks",
+  "timeline-snap-guide",
   "timeline-range-selection",
   "timeline-range-summary",
   "range-start-handle",
@@ -35586,6 +35943,7 @@ var mediaHandle = null;
 var mediaUrl = null;
 var sourceBindingConnected = false;
 var pixelsPerSecond = 70;
+var timelineSnapEnabled = true;
 var saveDispatchPending = false;
 var pendingSaveSnapshot = null;
 var projectSaveSequence = 0;
@@ -35621,6 +35979,8 @@ var preparedPreview = null;
 var previewBoundaryTransitioning = false;
 var pendingAssetTimelineMs = null;
 var imageAssetRenderSequence = 0;
+var suppressedTimedBlockClick = null;
+var suppressedTimedBlockClickTimer = null;
 var localDraftAutosaveTimer = null;
 var localDraftOperationQueue = Promise.resolve();
 var localDraftOperationActive = false;
@@ -35629,6 +35989,7 @@ var lastAutomaticDraftAtMs = 0;
 var localDraftAutosaveAnchorAtMs = 0;
 var focusBeforeLocalDraftDialog = null;
 var captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
+var captionAgentRuntime = null;
 var imageAssetObjectUrls = /* @__PURE__ */ new Map();
 var clipGroupSelection = /* @__PURE__ */ new Set();
 var EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
@@ -35639,6 +36000,8 @@ var ASSET_TRACK_BASE_HEIGHT_PX = 54;
 var ASSET_SUBROW_STRIDE_PX = 47;
 var ASSET_BLOCK_TOP_PX = 7;
 var MIN_TIMELINE_RANGE_MS = 100;
+var TIMELINE_SNAP_THRESHOLD_PX = 8;
+var TIMED_BLOCK_DRAG_ACTIVATION_PX = 4;
 var PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
 var PREVIEW_PRELOAD_TIMEOUT_MS = 12e3;
 var LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1e3;
@@ -35778,6 +36141,7 @@ function setLocalDraftOperationActive(active) {
   localDraftOperationActive = Boolean(active);
   elements.create_local_draft.disabled = localDraftOperationActive;
   elements.open_local_drafts.disabled = localDraftOperationActive;
+  elements.reset_ai_caption_positions.disabled = localDraftOperationActive;
   elements.close_local_draft_dialog.disabled = localDraftOperationActive;
   const selectedDraft = elements.local_draft_list.querySelector(
     'input[name="local-draft-choice"]:checked'
@@ -35901,6 +36265,45 @@ function createManualLocalDraft() {
   void queueLocalDraftOperation(() => saveCurrentLocalDraft("manual", { announce: true })).catch((error) => {
     showToast(`\uC784\uC2DC\uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
   });
+}
+async function resetAllAiCaptionPositions() {
+  if (projectMutationLockCount > 0 || pointerEditActive || rangeHandleDragActive || activeJobController) {
+    throw new Error("\uC9C4\uD589 \uC911\uC778 \uD3B8\uC9D1 \uC791\uC5C5\uC774 \uB05D\uB09C \uB4A4 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.");
+  }
+  if (await countSameProjectEditorTabs() > 1) {
+    throw new Error(
+      "\uAC19\uC740 \uD504\uB85C\uC81D\uD2B8 \uD3B8\uC9D1\uAE30 \uD0ED\uC774 \uB458 \uC774\uC0C1 \uC5F4\uB824 \uC788\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uD0ED\uC744 \uB2EB\uACE0 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694."
+    );
+  }
+  const before = cloneProject(project);
+  const next = resetAiSubtitlePositions(project, {
+    includeHumanEdited: true
+  });
+  if (next === project) {
+    showToast("\uBAA8\uB4E0 AI \uC790\uB9C9\uC774 \uC774\uBBF8 \uAE30\uBCF8 \uC704\uCE58\uC5D0 \uC788\uC2B5\uB2C8\uB2E4.", "info");
+    return 0;
+  }
+  const beforeById = new Map(
+    before.subtitles.map((cue) => [cue.id, cue])
+  );
+  const changedCount = next.subtitles.filter((cue) => {
+    const previous = beforeById.get(cue.id);
+    return previous && (previous.x !== cue.x || previous.y !== cue.y || previous.remoteMeta?.placement !== cue.remoteMeta?.placement);
+  }).length;
+  lockProjectMutations();
+  try {
+    await saveCurrentLocalDraft("manual");
+    applyProject(next);
+    await flushSave();
+    showToast(
+      `AI \uC790\uB9C9 ${changedCount}\uAC1C\uC758 \uD654\uBA74 \uC704\uCE58\uB97C \uC544\uB798 \uC911\uC559 \uAE30\uBCF8\uAC12\uC73C\uB85C \uB9DE\uCDC4\uC2B5\uB2C8\uB2E4.`,
+      "success",
+      6e3
+    );
+    return changedCount;
+  } finally {
+    unlockProjectMutations();
+  }
 }
 function localDraftAutosaveBlocked() {
   return !project || pointerEditActive || rangeHandleDragActive || projectMutationLockCount > 0 || Boolean(activeJobController) || !elements.job_dialog.hidden || elements.local_draft_dialog.open || localDraftOperationActive;
@@ -36264,9 +36667,6 @@ function renderHeader() {
   elements.undo.disabled = undoStack.length === 0;
   elements.redo.disabled = redoStack.length === 0;
   elements.export_video.disabled = !mediaFile || !project.clips.some((clip) => clip.enabled !== false);
-  if (!activeJobController && document.activeElement !== elements.caption_model && [...elements.caption_model.options].some((option) => option.value === project.ai?.model)) {
-    elements.caption_model.value = project.ai.model;
-  }
   if (document.activeElement !== elements.caption_style_preset) {
     elements.caption_style_preset.value = project.subtitleDefaults?.stylePresetId || DEFAULT_CAPTION_STYLE_PRESET_ID;
   }
@@ -36491,6 +36891,35 @@ function renderClipList() {
   });
   renderClipGroupControls();
 }
+function renderCaptionColorRegister(selectedColor) {
+  const colors = [
+    DEFAULT_SUBTITLE_COLOR,
+    ...project.recentSubtitleColors || []
+  ].slice(0, 6);
+  const activeColor = String(selectedColor || DEFAULT_SUBTITLE_COLOR).toLowerCase();
+  elements.caption_color_register.replaceChildren();
+  for (let index = 0; index < 6; index += 1) {
+    const color = colors[index] || null;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `caption-color-swatch${color ? "" : " placeholder"}`;
+    if (!color) {
+      button.disabled = true;
+      button.setAttribute("aria-label", `\uBE44\uC5B4 \uC788\uB294 \uCD5C\uADFC \uC0C9\uC0C1 \uC2AC\uB86F ${index}`);
+      elements.caption_color_register.append(button);
+      continue;
+    }
+    button.dataset.color = color;
+    button.style.setProperty("--swatch-color", color);
+    button.setAttribute("aria-pressed", String(color === activeColor));
+    button.setAttribute(
+      "aria-label",
+      index === 0 ? `\uAE30\uBCF8 \uD770\uC0C9 ${color}` : `\uCD5C\uADFC \uC790\uB9C9 \uC0C9\uC0C1 ${index} ${color}`
+    );
+    button.title = index === 0 ? `\uAE30\uBCF8 \uD770\uC0C9 \xB7 ${color.toUpperCase()}` : `\uCD5C\uADFC \uC0C9\uC0C1 ${index} \xB7 ${color.toUpperCase()}`;
+    elements.caption_color_register.append(button);
+  }
+}
 function renderCueInspector() {
   const cue = selectedCue();
   const showingList = inspectorMode === "list";
@@ -36524,7 +36953,12 @@ function renderCueInspector() {
   elements.cue_x_value.textContent = `${Math.round(cue.x * 100)}%`;
   elements.cue_y_value.textContent = `${Math.round(cue.y * 100)}%`;
   elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.0675) * 100);
-  elements.font_color.value = cue.color || project.subtitleDefaults.color || "#ffffff";
+  elements.font_color.value = cue.color || project.subtitleDefaults.color || DEFAULT_SUBTITLE_COLOR;
+  renderCaptionColorRegister(elements.font_color.value);
+  const selectedAsset = selectedImageAsset();
+  const canMatchAsset = Boolean(selectedAsset && selectedAsset.clipId === cue.clipId);
+  elements.match_cue_to_asset.disabled = !canMatchAsset;
+  elements.cue_timing_match_help.textContent = !selectedAsset ? "\uAC19\uC740 \uCEF7\uC758 \uC5D0\uC14B\uC744 \uC120\uD0DD\uD558\uBA74 \uC591\uB05D \uC2DC\uAC01\uC744 \uD55C \uBC88\uC5D0 \uB9DE\uCD9C \uC218 \uC788\uC5B4\uC694." : canMatchAsset ? `${selectedAsset.name || "\uC120\uD0DD \uC5D0\uC14B"}\uC758 \uC2DC\uC791\xB7\uB05D \uC2DC\uAC01\uC744 \uADF8\uB300\uB85C \uC801\uC6A9\uD569\uB2C8\uB2E4.` : "\uC120\uD0DD \uC5D0\uC14B\uC774 \uB2E4\uB978 \uCEF7\uC5D0 \uC788\uC5B4 \uC2DC\uAC01\uC744 \uB9DE\uCD9C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.";
   const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
 }
@@ -36550,6 +36984,10 @@ function renderImageAssetInspector() {
   if (document.activeElement !== elements.asset_end) {
     elements.asset_end.value = formatTime(range?.endMs || 0, { compact: true });
   }
+  const selectedSubtitle = selectedCue();
+  const canMatchCue = Boolean(selectedSubtitle && selectedSubtitle.clipId === asset.clipId);
+  elements.match_asset_to_cue.disabled = !canMatchCue;
+  elements.asset_timing_match_help.textContent = !selectedSubtitle ? "\uAC19\uC740 \uCEF7\uC758 \uC790\uB9C9\uC744 \uC120\uD0DD\uD558\uBA74 \uC591\uB05D \uC2DC\uAC01\uC744 \uD55C \uBC88\uC5D0 \uB9DE\uCD9C \uC218 \uC788\uC5B4\uC694." : canMatchCue ? `\u201C${selectedSubtitle.text || "\uBE48 \uC790\uB9C9"}\u201D\uC758 \uC2DC\uC791\xB7\uB05D \uC2DC\uAC01\uC744 \uADF8\uB300\uB85C \uC801\uC6A9\uD569\uB2C8\uB2E4.` : "\uC120\uD0DD \uC790\uB9C9\uC774 \uB2E4\uB978 \uCEF7\uC5D0 \uC788\uC5B4 \uC2DC\uAC01\uC744 \uB9DE\uCD9C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.";
   const xPercent = Math.round(asset.x * 100);
   const yPercent = Math.round(asset.y * 100);
   const scalePercent = Math.round(asset.scale * 100);
@@ -36669,6 +37107,71 @@ function timelineWidth() {
 }
 function timelineX(milliseconds) {
   return milliseconds / 1e3 * pixelsPerSecond;
+}
+function hideTimelineSnapGuide() {
+  elements.timeline_snap_guide.hidden = true;
+  elements.timeline_snap_guide.textContent = "";
+  elements.timeline_snap_guide.removeAttribute("data-label");
+  elements.timeline_snap_guide.removeAttribute("aria-label");
+}
+function showTimelineSnapGuide(match) {
+  if (!match) {
+    hideTimelineSnapGuide();
+    return;
+  }
+  const label = `${match.label || "\uC815\uB82C\uC810"} \xB7 ${formatTime(match.timeMs, { compact: true })}`;
+  elements.timeline_snap_guide.hidden = false;
+  elements.timeline_snap_guide.style.left = `${timelineX(match.timeMs)}px`;
+  elements.timeline_snap_guide.dataset.label = label;
+  elements.timeline_snap_guide.setAttribute("aria-label", label);
+  elements.timeline_snap_guide.textContent = label;
+}
+function findTimelineSnap(rawTimelineMs, {
+  clipId,
+  movingKind,
+  itemId,
+  altKey = false,
+  minimumTimelineMs = -Infinity,
+  maximumTimelineMs = Infinity
+} = {}) {
+  if (!timelineSnapEnabled || altKey) {
+    return null;
+  }
+  const preferredKind = movingKind === "subtitle" ? "asset" : "subtitle";
+  const candidates = timelineSnapCandidates(project, {
+    clipId,
+    excludeCueId: movingKind === "subtitle" ? itemId : null,
+    excludeImageAssetId: movingKind === "asset" ? itemId : null,
+    preferredKind
+  }).filter((candidate) => candidate.timeMs >= minimumTimelineMs && candidate.timeMs <= maximumTimelineMs);
+  return resolveTimelineSnap(rawTimelineMs, candidates, {
+    thresholdMs: timelineSnapThresholdMs(pixelsPerSecond, {
+      thresholdPx: TIMELINE_SNAP_THRESHOLD_PX
+    })
+  });
+}
+function snappedTimelinePoint(rawTimelineMs, options) {
+  const match = findTimelineSnap(rawTimelineMs, options);
+  showTimelineSnapGuide(match);
+  return match?.timeMs ?? Math.round(rawTimelineMs);
+}
+function suppressNextTimedBlockClick(kind, itemId) {
+  clearTimeout(suppressedTimedBlockClickTimer);
+  suppressedTimedBlockClick = `${kind}:${itemId}`;
+  suppressedTimedBlockClickTimer = setTimeout(() => {
+    suppressedTimedBlockClick = null;
+    suppressedTimedBlockClickTimer = null;
+  }, 0);
+}
+function consumeSuppressedTimedBlockClick(kind, itemId) {
+  const key = `${kind}:${itemId}`;
+  if (suppressedTimedBlockClick !== key) {
+    return false;
+  }
+  clearTimeout(suppressedTimedBlockClickTimer);
+  suppressedTimedBlockClick = null;
+  suppressedTimedBlockClickTimer = null;
+  return true;
 }
 function clampTimelineMs(milliseconds) {
   return Math.max(
@@ -36997,6 +37500,7 @@ function beginPointerHistory() {
 }
 function endPointerHistory({ clipStructureChanged = false } = {}) {
   pointerEditActive = false;
+  hideTimelineSnapGuide();
   if (liveTimelineGeometryFrame !== null) {
     cancelAnimationFrame(liveTimelineGeometryFrame);
     liveTimelineGeometryFrame = null;
@@ -37078,9 +37582,44 @@ function bindCueTrim(handle, cue, side, event) {
       return;
     }
     const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1e3);
-    const startOffsetMs = side === "left" ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta)) : originalStart;
-    const endOffsetMs = side === "right" ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta)) : originalEnd;
-    const nextProject = updateSubtitleCue(originalProject, cue.id, { startOffsetMs, endOffsetMs });
+    const rawStartOffsetMs = side === "left" ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta)) : originalStart;
+    const rawEndOffsetMs = side === "right" ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta)) : originalEnd;
+    const rawBoundaryTimelineMs = clip.timelineStartMs + (side === "left" ? rawStartOffsetMs : rawEndOffsetMs);
+    const snappedBoundaryTimelineMs = snappedTimelinePoint(
+      rawBoundaryTimelineMs,
+      {
+        clipId: clip.id,
+        movingKind: "subtitle",
+        itemId: cue.id,
+        altKey: moveEvent.altKey,
+        minimumTimelineMs: clip.timelineStartMs + (side === "left" ? 0 : originalStart + 100),
+        maximumTimelineMs: clip.timelineStartMs + (side === "left" ? originalEnd - 100 : duration)
+      }
+    );
+    const startOffsetMs = side === "left" ? snappedBoundaryTimelineMs - clip.timelineStartMs : originalStart;
+    const endOffsetMs = side === "right" ? snappedBoundaryTimelineMs - clip.timelineStartMs : originalEnd;
+    let nextProject = updateSubtitleCue(originalProject, cue.id, {
+      startOffsetMs,
+      endOffsetMs
+    });
+    if (cueHasOverlap(nextProject, cue.id)) {
+      if (snappedBoundaryTimelineMs !== rawBoundaryTimelineMs) {
+        const fallbackProject = updateSubtitleCue(originalProject, cue.id, {
+          startOffsetMs: rawStartOffsetMs,
+          endOffsetMs: rawEndOffsetMs
+        });
+        if (!cueHasOverlap(fallbackProject, cue.id)) {
+          nextProject = fallbackProject;
+          hideTimelineSnapGuide();
+        } else {
+          overlapBlocked = true;
+          return;
+        }
+      } else {
+        overlapBlocked = true;
+        return;
+      }
+    }
     if (cueHasOverlap(nextProject, cue.id)) {
       overlapBlocked = true;
       return;
@@ -37093,6 +37632,7 @@ function bindCueTrim(handle, cue, side, event) {
       block.style.left = `${timelineX(range.startMs)}px`;
       block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
     }
+    renderCueInspector();
   };
   const finish = (finishEvent) => {
     if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
@@ -37138,8 +37678,22 @@ function bindImageAssetTrim(handle, asset, side, event) {
       return;
     }
     const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1e3);
-    const startOffsetMs = side === "left" ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta)) : originalStart;
-    const endOffsetMs = side === "right" ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta)) : originalEnd;
+    const rawStartOffsetMs = side === "left" ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta)) : originalStart;
+    const rawEndOffsetMs = side === "right" ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta)) : originalEnd;
+    const rawBoundaryTimelineMs = clip.timelineStartMs + (side === "left" ? rawStartOffsetMs : rawEndOffsetMs);
+    const snappedBoundaryTimelineMs = snappedTimelinePoint(
+      rawBoundaryTimelineMs,
+      {
+        clipId: clip.id,
+        movingKind: "asset",
+        itemId: asset.id,
+        altKey: moveEvent.altKey,
+        minimumTimelineMs: clip.timelineStartMs + (side === "left" ? 0 : originalStart + 100),
+        maximumTimelineMs: clip.timelineStartMs + (side === "left" ? originalEnd - 100 : duration)
+      }
+    );
+    const startOffsetMs = side === "left" ? snappedBoundaryTimelineMs - clip.timelineStartMs : originalStart;
+    const endOffsetMs = side === "right" ? snappedBoundaryTimelineMs - clip.timelineStartMs : originalEnd;
     project = updateImageAsset(originalProject, asset.id, { startOffsetMs, endOffsetMs });
     const nextAsset = selectedImageAsset();
     const range = imageAssetTimelineRange(project, nextAsset);
@@ -37160,6 +37714,144 @@ function bindImageAssetTrim(handle, asset, side, event) {
       handle.releasePointerCapture(pointerId);
     }
     endPointerHistory();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+function bindTimedBlockMove(body, item, kind, event) {
+  if (event.button !== 0) {
+    return;
+  }
+  event.stopPropagation();
+  const pointerId = event.pointerId;
+  const startX = event.clientX;
+  const originalStart = item.startOffsetMs;
+  const originalEnd = item.endOffsetMs;
+  const itemDuration = originalEnd - originalStart;
+  const clip = project.clips.find((candidate) => candidate.id === item.clipId);
+  const clipDuration = clipDurationMs(clip);
+  const maximumStart = Math.max(0, clipDuration - itemDuration);
+  const block = body.closest(kind === "subtitle" ? ".cue-block" : ".asset-block");
+  let originalProject = null;
+  let dragging = false;
+  let overlapBlocked = false;
+  body.setPointerCapture(pointerId);
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const deltaX = moveEvent.clientX - startX;
+    if (!dragging && Math.abs(deltaX) < TIMED_BLOCK_DRAG_ACTIVATION_PX) {
+      return;
+    }
+    moveEvent.preventDefault();
+    if (!dragging) {
+      dragging = true;
+      beginPointerHistory();
+      originalProject = kind === "subtitle" ? {
+        ...project,
+        selectedCueId: item.id,
+        selectedClipId: item.clipId
+      } : {
+        ...project,
+        selectedImageAssetId: item.id,
+        selectedClipId: item.clipId
+      };
+      project = originalProject;
+      propertyInspectorMode = kind === "subtitle" ? "caption" : "asset";
+      if (kind === "subtitle") {
+        inspectorMode = "selected";
+      }
+      block?.classList.add("moving", "selected");
+    }
+    const rawDeltaMs = Math.round(deltaX / pixelsPerSecond * 1e3);
+    const rawStartOffsetMs = Math.max(
+      0,
+      Math.min(maximumStart, originalStart + rawDeltaMs)
+    );
+    const rawEndOffsetMs = rawStartOffsetMs + itemDuration;
+    const rawStartTimelineMs = clip.timelineStartMs + rawStartOffsetMs;
+    const rawEndTimelineMs = clip.timelineStartMs + rawEndOffsetMs;
+    const baseSnapOptions = {
+      clipId: clip.id,
+      movingKind: kind,
+      itemId: item.id,
+      altKey: moveEvent.altKey
+    };
+    const startMatch = findTimelineSnap(rawStartTimelineMs, {
+      ...baseSnapOptions,
+      minimumTimelineMs: clip.timelineStartMs,
+      maximumTimelineMs: clip.timelineStartMs + maximumStart
+    });
+    const endMatch = findTimelineSnap(rawEndTimelineMs, {
+      ...baseSnapOptions,
+      minimumTimelineMs: clip.timelineStartMs + itemDuration,
+      maximumTimelineMs: clip.timelineStartMs + clipDuration
+    });
+    const match = [startMatch, endMatch].filter(Boolean).sort((first, second) => first.distanceMs - second.distanceMs || first.priority - second.priority || first.timeMs - second.timeMs)[0] || null;
+    const snappedDeltaMs = match?.deltaMs || 0;
+    let nextStartOffsetMs = Math.max(
+      0,
+      Math.min(maximumStart, rawStartOffsetMs + snappedDeltaMs)
+    );
+    let nextEndOffsetMs = nextStartOffsetMs + itemDuration;
+    let nextProject = kind === "subtitle" ? updateSubtitleCue(originalProject, item.id, {
+      startOffsetMs: nextStartOffsetMs,
+      endOffsetMs: nextEndOffsetMs
+    }) : updateImageAsset(originalProject, item.id, {
+      startOffsetMs: nextStartOffsetMs,
+      endOffsetMs: nextEndOffsetMs
+    });
+    if (kind === "subtitle" && cueHasOverlap(nextProject, item.id) && match) {
+      nextStartOffsetMs = rawStartOffsetMs;
+      nextEndOffsetMs = rawEndOffsetMs;
+      nextProject = updateSubtitleCue(originalProject, item.id, {
+        startOffsetMs: nextStartOffsetMs,
+        endOffsetMs: nextEndOffsetMs
+      });
+      showTimelineSnapGuide(null);
+    } else {
+      showTimelineSnapGuide(match);
+    }
+    if (kind === "subtitle" && cueHasOverlap(nextProject, item.id)) {
+      overlapBlocked = true;
+      return;
+    }
+    overlapBlocked = false;
+    project = nextProject;
+    const nextItem = kind === "subtitle" ? project.subtitles.find((candidate) => candidate.id === item.id) : project.imageAssets.find((candidate) => candidate.id === item.id);
+    const range = kind === "subtitle" ? cueTimelineRange(project, nextItem) : imageAssetTimelineRange(project, nextItem);
+    if (block && range) {
+      block.style.left = `${timelineX(range.startMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    }
+    if (kind === "subtitle") {
+      renderCueInspector();
+    } else {
+      renderImageAssetInspector();
+    }
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== void 0 && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (body.hasPointerCapture(pointerId)) {
+      body.releasePointerCapture(pointerId);
+    }
+    block?.classList.remove("moving");
+    if (!dragging) {
+      hideTimelineSnapGuide();
+      return;
+    }
+    suppressNextTimedBlockClick(kind, item.id);
+    endPointerHistory();
+    if (overlapBlocked) {
+      showToast("\uAC19\uC740 \uC790\uB9C9 \uB808\uC778 \uC548\uC5D0\uC11C\uB294 \uC790\uB9C9\uC774 \uACB9\uCE60 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
+    }
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", finish);
@@ -37352,7 +38044,15 @@ function renderTimeline({ keepScroll = false } = {}) {
     body.className = "asset-block-body";
     body.textContent = asset.name || `\uC774\uBBF8\uC9C0 ${assetIndex + 1}`;
     body.title = `${asset.name || "\uC774\uBBF8\uC9C0 \uC5D0\uC14B"} \xB7 \uACB9\uCE5C \uC774\uBBF8\uC9C0\uB294 \uC5D0\uC14B \uD2B8\uB799\uC758 \uBCC4\uB3C4 \uC904\uC5D0 \uD45C\uC2DC\uB429\uB2C8\uB2E4.`;
-    body.addEventListener("click", () => selectImageAsset(asset.id, { seek: true }));
+    body.addEventListener("pointerdown", (event) => {
+      bindTimedBlockMove(body, asset, "asset", event);
+    });
+    body.addEventListener("click", () => {
+      if (consumeSuppressedTimedBlockClick("asset", asset.id)) {
+        return;
+      }
+      selectImageAsset(asset.id, { seek: true });
+    });
     const assetClip = project.clips.find((candidate) => candidate.id === asset.clipId);
     const nudgeAsset = (side, delta) => {
       const current = project.imageAssets.find((candidate) => candidate.id === asset.id);
@@ -37475,7 +38175,13 @@ function renderTimeline({ keepScroll = false } = {}) {
     body.type = "button";
     body.className = "cue-block-body";
     body.textContent = cue.text || "(\uBE48 \uC790\uB9C9)";
+    body.addEventListener("pointerdown", (event) => {
+      bindTimedBlockMove(body, cue, "subtitle", event);
+    });
     body.addEventListener("click", () => {
+      if (consumeSuppressedTimedBlockClick("subtitle", cue.id)) {
+        return;
+      }
       selectCue(cue.id, { seek: true });
       elements.cue_text.focus({ preventScroll: true });
     });
@@ -38694,21 +39400,59 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
   }
 }
 function readCaptionAgentConfig() {
+  const model = elements.caption_model.value;
+  const solarMode = isSolarCaptionModel(model);
   return {
     endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
     token: elements.caption_agent_token.value,
-    model: elements.caption_model.value,
-    providerConfig: {
+    model,
+    providerConfig: solarMode ? {
       sttEndpoint: elements.caption_stt_endpoint.value,
       sttModel: elements.caption_stt_model.value,
       sttApiKey: elements.caption_stt_api_key.value,
       upstageApiKey: elements.caption_upstage_api_key.value
+    } : {
+      sttEndpoint: "",
+      sttModel: "",
+      sttApiKey: "",
+      upstageApiKey: ""
     }
   };
 }
 function setCaptionLocalStatus(message, state = "idle") {
   elements.caption_local_status.textContent = message;
   elements.caption_local_status.dataset.state = state;
+}
+function renderCaptionModeControls() {
+  const solar = isSolarCaptionModel(elements.caption_model.value);
+  const actualStt = captionAgentRuntime?.sttModel || "Tiny \uAE30\uBCF8";
+  const upstageField = elements.caption_upstage_api_key.closest(".select-field");
+  if (upstageField) {
+    upstageField.hidden = !solar;
+  }
+  elements.caption_upstage_api_key.disabled = !solar;
+  elements.caption_upstage_api_key.setAttribute(
+    "aria-hidden",
+    String(!solar)
+  );
+  for (const input of [
+    elements.caption_stt_endpoint,
+    elements.caption_stt_model,
+    elements.caption_stt_api_key
+  ]) {
+    const field = input.closest(".select-field");
+    if (field) {
+      field.hidden = !solar;
+    }
+    input.disabled = !solar;
+    input.setAttribute("aria-hidden", String(!solar));
+  }
+  if (elements.caption_local_status.dataset.state === "ready") {
+    setCaptionLocalStatus(
+      solar ? `STT ${actualStt} \uC900\uBE44\uB428 \xB7 \uC120\uD0DD\uD55C Solar \uACE0\uAE09 \uCD08\uBC8C\uC744 \uC2E4\uD589\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4` : `\uB85C\uCEEC Whisper ${actualStt} \uC900\uBE44\uB428 \xB7 Upstage \uD638\uCD9C 0\uD68C`,
+      "ready"
+    );
+  }
 }
 async function ensureLocalCaptionSession(config, signal) {
   if (!isLoopbackCaptionAgentEndpoint(config.endpoint)) {
@@ -38724,14 +39468,31 @@ async function ensureLocalCaptionSession(config, signal) {
     signal
   });
   elements.caption_agent_token.value = token;
+  const capability = await probeCaptionAgent({
+    endpoint: config.endpoint,
+    token,
+    providerConfig: config.providerConfig,
+    signal
+  });
+  const runtime = captionAgentRuntimeIdentity(capability, {
+    model: config.model,
+    sttEndpoint: config.providerConfig.sttEndpoint
+  });
+  captionAgentRuntime = runtime;
+  const actualStt = runtime.sttModel;
   setCaptionLocalStatus(
-    "\uB85C\uCEEC STT \uC900\uBE44\uB428 \xB7 Solar API \uD0A4\uB9CC \uD604\uC7AC \uD0ED\uC5D0 \uC785\uB825\uD558\uC138\uC694",
+    isSolarCaptionModel(config.model) ? `STT ${actualStt} \uC900\uBE44\uB428 \xB7 Solar \uACE0\uAE09 \uC635\uC158\uC758 API \uD0A4\uB97C \uD655\uC778\uD558\uC138\uC694` : `\uB85C\uCEEC Whisper ${actualStt} \uC900\uBE44\uB428 \xB7 Upstage \uD638\uCD9C 0\uD68C`,
     "ready"
   );
-  return { ...config, token };
+  return { ...config, token, capability, runtime };
 }
 async function prepareCaptionAgentConfig() {
   let config = readCaptionAgentConfig();
+  if (!isSolarCaptionModel(config.model) && !isLoopbackCaptionAgentEndpoint(config.endpoint)) {
+    throw new Error(
+      "Whisper Tiny \uB85C\uCEEC \uCD08\uBC8C \uC8FC\uC18C\uB294 127.0.0.1 \uB610\uB294 localhost\uC5EC\uC57C \uD569\uB2C8\uB2E4."
+    );
+  }
   const permissionGranted = await ensureCaptionAgentPermission(config.endpoint);
   if (!permissionGranted) {
     throw new Error("\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC8FC\uC18C \uC811\uADFC \uAD8C\uD55C\uC774 \uD5C8\uC6A9\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
@@ -38740,23 +39501,38 @@ async function prepareCaptionAgentConfig() {
     config,
     activeJobController?.signal
   );
+  const capability = config.capability || await probeCaptionAgent({
+    endpoint: config.endpoint,
+    token: config.token,
+    providerConfig: config.providerConfig,
+    signal: activeJobController?.signal
+  });
+  const runtime = config.runtime || captionAgentRuntimeIdentity(capability, {
+    model: config.model,
+    sttEndpoint: config.providerConfig.sttEndpoint
+  });
+  captionAgentRuntime = runtime;
+  const ready = isSolarCaptionModel(config.model) ? capability.configured?.solarReady !== false : capability.configured?.ready !== false;
+  if (!ready) {
+    throw new Error(
+      isSolarCaptionModel(config.model) ? "Solar API \uD0A4 \uB610\uB294 STT \uC124\uC815\uC774 \uC900\uBE44\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4." : "\uB85C\uCEEC Whisper STT\uAC00 \uC900\uBE44\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4."
+    );
+  }
   captionAgentSettings = await saveCaptionAgentSettings({
     endpoint: config.endpoint,
     model: config.model,
-    sttEndpoint: config.providerConfig.sttEndpoint,
-    sttModel: config.providerConfig.sttModel
+    sttEndpoint: elements.caption_stt_endpoint.value,
+    sttModel: elements.caption_stt_model.value
   });
   elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
   elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
   elements.caption_stt_model.value = captionAgentSettings.sttModel;
   return {
     ...config,
-    ...captionAgentSettings,
-    providerConfig: {
-      ...config.providerConfig,
-      sttEndpoint: captionAgentSettings.sttEndpoint,
-      sttModel: captionAgentSettings.sttModel
-    }
+    endpoint: captionAgentSettings.endpoint,
+    model: captionAgentSettings.model,
+    capability,
+    runtime
   };
 }
 function formatCaptionRunDuration(milliseconds) {
@@ -38771,17 +39547,34 @@ function formatCaptionRunDuration(milliseconds) {
   ].filter(Boolean).join(" ");
 }
 function confirmCaptionAgentRun(enabledClips, { skippedClipCount = 0 } = {}) {
-  const estimate = captionAgentRunEstimate(enabledClips);
-  const selectedModel = elements.caption_model.value === "solar-mini" ? "Solar Mini" : "Solar Pro 3";
+  const model = elements.caption_model.value;
+  const solar = isSolarCaptionModel(model);
+  const estimate = captionAgentRunEstimate(enabledClips, {
+    model
+  });
+  const selectedModel = model === "solar-mini" ? "Solar Mini" : model === "solar-pro3" ? "Solar Pro 3" : `\uB85C\uCEEC Whisper ${captionAgentRuntime?.sttModel || "Tiny \uAE30\uBCF8"}`;
   let externalStt = false;
   try {
-    externalStt = Boolean(
+    externalStt = solar && Boolean(
       elements.caption_stt_endpoint.value.trim() && !isLoopbackCaptionAgentEndpoint(elements.caption_stt_endpoint.value)
     );
   } catch {
     externalStt = true;
   }
   const sttNotice = externalStt ? "\uACE0\uAE09 \uC124\uC815\uC758 \uC678\uBD80 STT\uB3C4 \uBCC4\uB3C4 \uACFC\uAE08\uB420 \uC218 \uC788\uC2B5\uB2C8\uB2E4" : "\uB85C\uCEEC STT\uB294 \uBCC4\uB3C4 API \uACFC\uAE08\uC774 \uC5C6\uC2B5\uB2C8\uB2E4";
+  if (!solar) {
+    return window.confirm([
+      skippedClipCount > 0 ? "\uC911\uB2E8\uB41C Whisper Tiny \uC790\uB9C9 \uCD08\uBC8C\uC744 \uC774\uC5B4\uC11C \uD560\uAE4C\uC694?" : "Whisper Tiny \uB85C\uCEEC \uC790\uB9C9 \uCD08\uBC8C\uC744 \uC2DC\uC791\uD560\uAE4C\uC694?",
+      "",
+      ...skippedClipCount > 0 ? [`\uC800\uC7A5 \uC644\uB8CC\uB41C \uCEF7 ${skippedClipCount}\uAC1C\uB294 \uAC74\uB108\uB701\uB2C8\uB2E4`] : [],
+      `\uD65C\uC131 \uCEF7 ${estimate.clipCount}\uAC1C \xB7 \uCD1D ${formatCaptionRunDuration(estimate.totalDurationMs)}`,
+      `${selectedModel} \xB7 Upstage \uC694\uCCAD 0\uD68C \xB7 \uC720\uB8CC LLM \uD638\uCD9C \uC5C6\uC74C`,
+      "STT\uAC00 \uB9CC\uB4E0 \uBC1C\uD654 \uC2DC\uC791\xB7\uB05D\uC744 \uC720\uC9C0\uD55C \uCC44 4\uCD08 \uC774\uD558\uB85C \uB098\uB215\uB2C8\uB2E4",
+      sttNotice,
+      "",
+      "\uCDE8\uC18C\uD558\uBA74 \uC624\uB514\uC624 \uCD94\uCD9C\uC744 \uC2DC\uC791\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."
+    ].join("\n"));
+  }
   return window.confirm([
     skippedClipCount > 0 ? "\uC911\uB2E8\uB41C Solar \uC790\uB9C9 \uCD08\uBC8C\uC744 \uC774\uC5B4\uC11C \uD560\uAE4C\uC694?" : "Solar \uC790\uB9C9 \uCD08\uBC8C\uC744 \uC2DC\uC791\uD560\uAE4C\uC694?",
     "",
@@ -38803,25 +39596,25 @@ async function testCaptionAgentConnection() {
   elements.test_caption_agent.disabled = true;
   try {
     const config = await prepareCaptionAgentConfig();
-    const result = await probeCaptionAgent({
-      ...config,
-      signal: controller.signal
-    });
+    const result = config.capability;
     const availableModels = Array.isArray(result.availableModels) ? result.availableModels.map((model2) => String(model2)) : [];
     if (availableModels.length > 0 && !availableModels.includes(config.model)) {
       throw new Error(`\uB85C\uCEEC companion\uC774 ${config.model} \uBAA8\uB378\uC744 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.`);
     }
     const provider = result.provider ? ` \xB7 ${result.provider}` : "";
+    const actualStt = config.runtime?.sttModel || result.models?.stt || "\uD655\uC778 \uBD88\uAC00";
     const model = config.model;
-    const readiness = result.configured?.ready === false ? " \xB7 STT/Upstage \uC124\uC815 \uBBF8\uC644\uB8CC" : "";
+    const solar = isSolarCaptionModel(model);
+    const ready = solar ? result.configured?.solarReady !== false : result.configured?.ready !== false;
+    const readiness = !ready ? solar ? " \xB7 Solar API \uD0A4 \uB610\uB294 STT \uC124\uC815 \uBBF8\uC644\uB8CC" : " \xB7 \uB85C\uCEEC STT \uC124\uC815 \uBBF8\uC644\uB8CC" : "";
     showToast(
-      `\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC5F0\uACB0 \uD655\uC778 \uC644\uB8CC${provider} \xB7 ${model}${readiness}`,
-      result.configured?.ready === false ? "error" : "success",
-      result.configured?.ready === false ? 0 : 5200
+      `\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC5F0\uACB0 \uD655\uC778 \uC644\uB8CC${provider} \xB7 ${model} \xB7 STT ${actualStt}${readiness}`,
+      ready ? "success" : "error",
+      ready ? 5200 : 0
     );
     setCaptionLocalStatus(
-      result.configured?.ready === false ? "\uB85C\uCEEC STT \uC5F0\uACB0\uB428 \xB7 Solar API \uD0A4\uB97C \uD604\uC7AC \uD0ED\uC5D0 \uC785\uB825\uD558\uC138\uC694" : "\uB85C\uCEEC STT \uC900\uBE44\uB428 \xB7 Solar \uC790\uB9C9 \uCD08\uBC8C\uC744 \uC2DC\uC791\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4",
-      result.configured?.ready === false ? "waiting" : "ready"
+      ready ? solar ? `STT ${actualStt} \uC900\uBE44\uB428 \xB7 \uC120\uD0DD\uD55C Solar \uACE0\uAE09 \uCD08\uBC8C\uC744 \uC2E4\uD589\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4` : `\uB85C\uCEEC Whisper ${actualStt} \uC900\uBE44\uB428 \xB7 Upstage \uD638\uCD9C 0\uD68C` : solar ? "\uB85C\uCEEC STT \uC5F0\uACB0\uB428 \xB7 Solar \uACE0\uAE09 \uC635\uC158\uC758 API \uD0A4\uB97C \uC785\uB825\uD558\uC138\uC694" : "\uB85C\uCEEC Whisper \uC124\uC815\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694",
+      ready ? "ready" : "waiting"
     );
   } catch (error) {
     const canceled = error.name === "AbortError";
@@ -38876,44 +39669,14 @@ async function generateCaptions() {
     return;
   }
   const selectedModel = elements.caption_model.value;
-  const trustedContextFingerprint = captionAgentEditorialContextFingerprint(project);
-  const resumeEligible = ["running", "error", "canceled"].includes(
-    project.ai?.status
-  );
-  const resumePlan = captionAgentResumePlan(
-    allEnabledClips,
-    project.ai?.captionCheckpoints,
-    selectedModel,
-    {
-      resume: resumeEligible,
-      editorialContextFingerprint: trustedContextFingerprint
-    }
-  );
-  const enabledClips = resumePlan.clips;
-  if (enabledClips.length === 0 && resumePlan.skippedClipIds.length > 0) {
-    project = {
-      ...project,
-      ai: {
-        ...project.ai,
-        status: "done",
-        progress: 1,
-        lastRunAt: (/* @__PURE__ */ new Date()).toISOString(),
-        error: null
-      }
-    };
-    await saveProject(project);
-    renderAll({ keepScroll: true });
+  const solarMode = isSolarCaptionModel(selectedModel);
+  if (solarMode && !String(elements.caption_upstage_api_key.value || "").trim()) {
     showToast(
-      "\uC800\uC7A5\uB41C \uCEF7\uBCC4 \uC790\uB9C9 \uCCB4\uD06C\uD3EC\uC778\uD2B8\uB97C \uD655\uC778\uD588\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uACFC\uAE08\uD560 \uCEF7\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
-      "success",
-      6500
+      "Solar \uACE0\uAE09 \uCD08\uBC8C\uC744 \uC4F0\uB824\uBA74 \uD604\uC7AC \uD0ED\uC5D0 Upstage API \uD0A4\uB97C \uC785\uB825\uD574 \uC8FC\uC138\uC694.",
+      "error",
+      0
     );
-    return;
-  }
-  if (!confirmCaptionAgentRun(enabledClips, {
-    skippedClipCount: resumePlan.skippedClipIds.length
-  })) {
-    showToast("Solar \uC790\uB9C9 \uCD08\uBC8C\uC744 \uC2DC\uC791\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.", "info");
+    elements.caption_upstage_api_key.focus();
     return;
   }
   const returnFocus = document.activeElement;
@@ -38937,7 +39700,58 @@ async function generateCaptions() {
     }
     return;
   }
-  const { endpoint, token, model, providerConfig } = config;
+  const { endpoint, token, model, providerConfig, runtime } = config;
+  const trustedContextFingerprint = captionAgentEditorialContextFingerprint(project);
+  const resumeEligible = ["running", "error", "canceled"].includes(
+    project.ai?.status
+  );
+  const resumePlan = captionAgentResumePlan(
+    allEnabledClips,
+    project.ai?.captionCheckpoints,
+    selectedModel,
+    {
+      resume: resumeEligible,
+      editorialContextFingerprint: trustedContextFingerprint,
+      pipelineFingerprint: runtime.fingerprint
+    }
+  );
+  const enabledClips = resumePlan.clips;
+  if (enabledClips.length === 0 && resumePlan.skippedClipIds.length > 0) {
+    project = {
+      ...project,
+      ai: {
+        ...project.ai,
+        status: "done",
+        progress: 1,
+        lastRunAt: (/* @__PURE__ */ new Date()).toISOString(),
+        error: null
+      }
+    };
+    await saveProject(project);
+    renderAll({ keepScroll: true });
+    showToast(
+      "\uC800\uC7A5\uB41C \uCEF7\uBCC4 \uC790\uB9C9 \uCCB4\uD06C\uD3EC\uC778\uD2B8\uB97C \uD655\uC778\uD588\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uCC98\uB9AC\uD560 \uCEF7\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
+      "success",
+      6500
+    );
+    activeJobController = null;
+    elements.generate_captions.disabled = false;
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+    }
+    return;
+  }
+  if (!confirmCaptionAgentRun(enabledClips, {
+    skippedClipCount: resumePlan.skippedClipIds.length
+  })) {
+    showToast("\uC790\uB9C9 \uCD08\uBC8C\uC744 \uC2DC\uC791\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.", "info");
+    activeJobController = null;
+    elements.generate_captions.disabled = false;
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+    }
+    return;
+  }
   let activeCaptionSessionToken = token;
   const undoSnapshot = cloneProject(project);
   let undoRecorded = false;
@@ -38945,8 +39759,8 @@ async function generateCaptions() {
   let captionWarnings = resumePlan.skippedClipIds.length > 0 ? [...project.ai?.warnings || []] : [];
   let generatedCueCount = 0;
   showJob(
-    "Solar \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4DC\uB294 \uC911",
-    resumePlan.skippedClipIds.length > 0 ? `\uC774\uBBF8 \uC800\uC7A5\uB41C ${resumePlan.skippedClipIds.length}\uAC1C \uCEF7\uC740 \uAC74\uB108\uB6F0\uACE0 \uC2E4\uD328 \uC9C0\uC810\uBD80\uD130 \uC774\uC5B4\uC11C \uCC98\uB9AC\uD569\uB2C8\uB2E4.` : "\uD65C\uC131\uD654\uB41C \uBAA8\uB4E0 \uC120\uD0DD \uCEF7\uC758 \uC74C\uC131\uC744 \uCC28\uB840\uB85C \uB85C\uCEEC STT\uC5D0 \uBCF4\uB0B4\uACE0, \uC804\uC0AC\uBB38\uACFC \uACE0\uC9C0\uB41C \uC774\uB984\xB7\uBA54\uBAA8 \uBB38\uB9E5\uC740 Solar\uC5D0 \uBCF4\uB0C5\uB2C8\uB2E4.",
+    solarMode ? "Solar \uACE0\uAE09 \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4DC\uB294 \uC911" : "\uB85C\uCEEC Whisper \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4DC\uB294 \uC911",
+    resumePlan.skippedClipIds.length > 0 ? `\uC774\uBBF8 \uC800\uC7A5\uB41C ${resumePlan.skippedClipIds.length}\uAC1C \uCEF7\uC740 \uAC74\uB108\uB6F0\uACE0 \uC2E4\uD328 \uC9C0\uC810\uBD80\uD130 \uC774\uC5B4\uC11C \uCC98\uB9AC\uD569\uB2C8\uB2E4.` : solarMode ? "\uD65C\uC131 \uCEF7 \uC74C\uC131\uC740 \uB85C\uCEEC STT\uB85C \uC804\uC0AC\uD558\uACE0, \uC81C\uD55C\uB41C \uC804\uC0AC\uBB38\xB7\uD3B8\uC9D1 \uBB38\uB9E5\uB9CC \uC120\uD0DD\uD55C Solar\uC5D0 \uBCF4\uB0C5\uB2C8\uB2E4." : `\uD65C\uC131 \uCEF7 \uC74C\uC131\uC744 \uC774 \uAE30\uAE30\uC758 Whisper ${runtime.sttModel}\uB85C \uC804\uC0AC\uD558\uACE0 \uC2E4\uC81C \uB2E8\uC5B4 \uD0C0\uC784\uC2A4\uD0EC\uD504\uB97C \uC6B0\uC120\uD574 \uCD08\uBC8C \uC790\uB9C9\uC73C\uB85C \uB9CC\uB4ED\uB2C8\uB2E4.`,
     0,
     { cancelable: true, returnFocus }
   );
@@ -38976,47 +39790,52 @@ async function generateCaptions() {
       const base = index / clips.length;
       const span = 1 / clips.length;
       captionAgentAudioFootprint(clipDurationMs(clip));
-      setAiProgress(base, `${index + 1}/${clips.length} \xB7 \uD654\uBA74 \uC548\uC804 \uC601\uC5ED\uC744 \uB85C\uCEEC \uBD84\uC11D\uD558\uB294 \uC911`);
-      let placementHints;
-      try {
-        placementHints = await extractClipCaptionPlacementHints(
-          mediaFile,
-          clip,
-          {
-            signal: controller.signal,
-            onProgress: (value) => {
-              setAiProgress(
-                base + span * value * 0.1,
-                `${index + 1}/${clips.length} \xB7 \uB300\uD45C \uD504\uB808\uC784 \uC548\uC804 \uC601\uC5ED \uBD84\uC11D \uC911`
-              );
+      let placementHints = fallbackCaptionPlacementHints(
+        clipDurationMs(clip)
+      );
+      if (solarMode) {
+        setAiProgress(base, `${index + 1}/${clips.length} \xB7 \uD654\uBA74 \uC548\uC804 \uC601\uC5ED\uC744 \uB85C\uCEEC \uBD84\uC11D\uD558\uB294 \uC911`);
+        try {
+          placementHints = await extractClipCaptionPlacementHints(
+            mediaFile,
+            clip,
+            {
+              signal: controller.signal,
+              onProgress: (value) => {
+                setAiProgress(
+                  base + span * value * 0.1,
+                  `${index + 1}/${clips.length} \xB7 \uB300\uD45C \uD504\uB808\uC784 \uC548\uC804 \uC601\uC5ED \uBD84\uC11D \uC911`
+                );
+              }
             }
+          );
+        } catch (error) {
+          if (controller.signal.aborted || error?.name === "AbortError") {
+            throw error;
           }
-        );
-      } catch (error) {
-        if (controller.signal.aborted || error?.name === "AbortError") {
-          throw error;
+          console.warn("\uB300\uD45C \uD504\uB808\uC784 \uC790\uB9C9 \uC704\uCE58 \uBD84\uC11D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", error);
+          captionWarnings = mergeAiWarnings(
+            captionWarnings,
+            [{
+              code: "LOCAL_VISUAL_ANALYSIS_FAILED",
+              cueIndex: 0
+            }],
+            clip.id
+          );
         }
-        console.warn("\uB300\uD45C \uD504\uB808\uC784 \uC790\uB9C9 \uC704\uCE58 \uBD84\uC11D\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.", error);
-        placementHints = fallbackCaptionPlacementHints(clipDurationMs(clip));
-        captionWarnings = mergeAiWarnings(
-          captionWarnings,
-          [{
-            code: "LOCAL_VISUAL_ANALYSIS_FAILED",
-            cueIndex: 0
-          }],
-          clip.id
-        );
       }
+      const audioProgressStart = solarMode ? 0.1 : 0;
+      const audioProgressSpan = solarMode ? 0.16 : 0.26;
       setAiProgress(
-        base + span * 0.1,
+        base + span * audioProgressStart,
         `${index + 1}/${clips.length} \xB7 \uC120\uD0DD \uAD6C\uAC04\uC758 \uC74C\uC131\uC744 \uC900\uBE44\uD558\uB294 \uC911`
       );
       const pcm = await extractClipPcm16k(mediaFile, clip, {
         signal: controller.signal,
         onProgress: (value) => {
           setAiProgress(
-            base + span * (0.1 + value * 0.16),
-            `${index + 1}/${clips.length} \xB7 \uC804\uC1A1\uD560 \uC74C\uC131 \uCD94\uCD9C \uC911`
+            base + span * (audioProgressStart + value * audioProgressSpan),
+            `${index + 1}/${clips.length} \xB7 \uB85C\uCEEC \uC804\uC0AC\uC6A9 \uC74C\uC131 \uCD94\uCD9C \uC911`
           );
         }
       });
@@ -39039,7 +39858,7 @@ async function generateCaptions() {
           activeCaptionSessionToken = nextToken;
           elements.caption_agent_token.value = nextToken;
           setCaptionLocalStatus(
-            "\uB85C\uCEEC \uC790\uB9C9 \uC5D4\uC9C4\uC5D0 \uB2E4\uC2DC \uC5F0\uACB0\uB428 \xB7 \uC791\uC5C5\uC744 \uC774\uC5B4\uAC11\uB2C8\uB2E4",
+            solarMode ? `STT ${runtime.sttModel}\uC5D0 \uB2E4\uC2DC \uC5F0\uACB0\uB428 \xB7 Solar \uACE0\uAE09 \uCD08\uBC8C\uC744 \uC774\uC5B4\uAC11\uB2C8\uB2E4` : `\uB85C\uCEEC Whisper ${runtime.sttModel}\uC5D0 \uB2E4\uC2DC \uC5F0\uACB0\uB428 \xB7 \uCD08\uBC8C\uC744 \uC774\uC5B4\uAC11\uB2C8\uB2E4`,
             "ready"
           );
         },
@@ -39048,6 +39867,11 @@ async function generateCaptions() {
           setAiProgress(base + span * local, `${index + 1}/${clips.length} \xB7 ${label}`);
         }
       });
+      if (String(result.sttModel || "") !== runtime.sttModel) {
+        throw new Error(
+          "\uC790\uB9C9 \uC2E4\uD589 \uC911 \uC2E4\uC81C STT \uBAA8\uB378\uC774 \uBC14\uB00C\uC5C8\uC2B5\uB2C8\uB2E4. \uC11C\uB85C \uB2E4\uB978 \uC804\uC0AC \uACB0\uACFC\uB97C \uC11E\uC9C0 \uC54A\uACE0 \uC911\uB2E8\uD569\uB2C8\uB2E4."
+        );
+      }
       const normalizedDrafts = normalizeCaptionAgentCues(
         result.cues,
         clipDurationMs(clip)
@@ -39088,7 +39912,8 @@ async function generateCaptions() {
             project.ai?.captionCheckpoints,
             createCaptionAgentCheckpoint(clip, model, {
               requestId: result.requestId,
-              editorialContextFingerprint: trustedContextFingerprint
+              editorialContextFingerprint: trustedContextFingerprint,
+              pipelineFingerprint: runtime.fingerprint
             })
           ),
           status: "running",
@@ -39117,8 +39942,9 @@ async function generateCaptions() {
     const reviewWarningCount = captionWarnings.filter(
       (warning) => CAPTION_REVIEW_WARNING_CODES.has(warning.code)
     ).length;
+    const draftLabel = solarMode ? "Solar \uACE0\uAE09 \uC790\uB9C9" : `\uB85C\uCEEC Whisper ${runtime.sttModel} \uC790\uB9C9`;
     showToast(
-      reviewWarningCount > 0 ? `Solar \uC790\uB9C9\uACFC \uB85C\uCEEC \uD558\uB124\uC2A4 \uCC98\uB9AC\uB97C \uB9C8\uCCE4\uC2B5\uB2C8\uB2E4. \uC7AC\uD655\uC778\uC774 \uD544\uC694\uD55C \uD488\uC9C8 \uACBD\uACE0 ${reviewWarningCount}\uAC74\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.` : reviewRequiredCount > 0 ? `Solar \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uC7AC\uD655\uC778\uC774 \uD544\uC694\uD55C ${reviewRequiredCount}\uAC1C \uC790\uB9C9\uC740 \uB178\uB780\uC0C9\uC73C\uB85C \uD45C\uC2DC\uD588\uC2B5\uB2C8\uB2E4.` : captionWarnings.length > 0 ? `Solar \uCD08\uC548\uC744 \uB9CC\uB4E4\uACE0 \uD0A4\uB9AC\uB204\uD0A4 \uD488\uC9C8 \uD558\uB124\uC2A4\uAC00 ${captionWarnings.length}\uAC74\uC744 \uC790\uB3D9 \uC815\uB9AC\uD588\uC2B5\uB2C8\uB2E4.` : "Solar \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uD14D\uC2A4\uD2B8\xB7\uC2DC\uAC04\uC744 \uD55C \uBC88 \uAC80\uC218\uD574 \uC8FC\uC138\uC694.",
+      reviewWarningCount > 0 ? `${draftLabel}\uACFC \uB85C\uCEEC \uD558\uB124\uC2A4 \uCC98\uB9AC\uB97C \uB9C8\uCCE4\uC2B5\uB2C8\uB2E4. \uC7AC\uD655\uC778\uC774 \uD544\uC694\uD55C \uD488\uC9C8 \uACBD\uACE0 ${reviewWarningCount}\uAC74\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.` : reviewRequiredCount > 0 ? `${draftLabel} \uCD08\uC548\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uC7AC\uD655\uC778\uC774 \uD544\uC694\uD55C ${reviewRequiredCount}\uAC1C \uC790\uB9C9\uC740 \uB178\uB780\uC0C9\uC73C\uB85C \uD45C\uC2DC\uD588\uC2B5\uB2C8\uB2E4.` : captionWarnings.length > 0 ? `${draftLabel} \uCD08\uC548\uC744 \uB9CC\uB4E4\uACE0 \uD0A4\uB9AC\uB204\uD0A4 \uD488\uC9C8 \uD558\uB124\uC2A4\uAC00 ${captionWarnings.length}\uAC74\uC744 \uC790\uB3D9 \uC815\uB9AC\uD588\uC2B5\uB2C8\uB2E4.` : `${draftLabel} \uCD08\uC548\uC744 \uB9CC\uB4E4\uC5C8\uC2B5\uB2C8\uB2E4. \uD14D\uC2A4\uD2B8\xB7\uC2DC\uAC04\uC744 \uD55C \uBC88 \uAC80\uC218\uD574 \uC8FC\uC138\uC694.`,
       reviewWarningCount > 0 ? "error" : "success",
       reviewWarningCount > 0 ? 9e3 : 6500
     );
@@ -40026,12 +40852,44 @@ function bindActions() {
     }
   });
   elements.font_size.addEventListener("change", () => endFieldEdit("font-size"));
-  elements.font_color.addEventListener("change", () => endFieldEdit("font-color"));
+  elements.font_color.addEventListener("change", () => {
+    applyFieldProject(
+      rememberSubtitleColor(project, elements.font_color.value),
+      "font-color"
+    );
+    endFieldEdit("font-color");
+  });
+  elements.caption_color_register.addEventListener("click", (event) => {
+    const button = event.target.closest(".caption-color-swatch[data-color]");
+    const cue = selectedCue();
+    if (!button || !cue) {
+      return;
+    }
+    const color = button.dataset.color;
+    const colored = updateSubtitleCue(project, cue.id, { color });
+    applyProject(rememberSubtitleColor(colored, color));
+  });
   elements.reset_font_color.addEventListener("click", () => {
     const cue = selectedCue();
     if (cue) {
-      updateSelectedCue({ color: project.subtitleDefaults.color || "#ffffff" });
+      updateSelectedCue({ color: DEFAULT_SUBTITLE_COLOR });
     }
+  });
+  elements.match_cue_to_asset.addEventListener("click", () => {
+    const cue = selectedCue();
+    const asset = selectedImageAsset();
+    if (!cue || !asset || cue.clipId !== asset.clipId) {
+      showToast("\uAC19\uC740 \uCEF7\uC758 \uC790\uB9C9\uACFC \uC5D0\uC14B\uC744 \uBA3C\uC800 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.", "error");
+      renderCueInspector();
+      return;
+    }
+    const next = matchSubtitleCueToImageAsset(project, cue.id, asset.id);
+    if (cueHasOverlap(next, cue.id)) {
+      showToast("\uB9DE\uCD98 \uAD6C\uAC04\uC774 \uAC19\uC740 \uC790\uB9C9 \uB808\uC778\uC758 \uB2E4\uB978 \uC790\uB9C9\uACFC \uACB9\uCE69\uB2C8\uB2E4.", "error");
+      return;
+    }
+    applyProject(next);
+    showToast("\uC790\uB9C9\uC744 \uC120\uD0DD \uC5D0\uC14B\uC758 \uC2DC\uC791\xB7\uB05D \uC2DC\uAC01\uC5D0 \uC815\uD655\uD788 \uB9DE\uCDC4\uC2B5\uB2C8\uB2E4.", "success");
   });
   elements.delete_cue.addEventListener("click", () => {
     const cue = selectedCue();
@@ -40098,6 +40956,17 @@ function bindActions() {
     }
     updateSelectedImageAsset({ endOffsetMs: timelineMs - clip.timelineStartMs });
     restoreAssetTimeFields();
+  });
+  elements.match_asset_to_cue.addEventListener("click", () => {
+    const asset = selectedImageAsset();
+    const cue = selectedCue();
+    if (!asset || !cue || asset.clipId !== cue.clipId) {
+      showToast("\uAC19\uC740 \uCEF7\uC758 \uC5D0\uC14B\uACFC \uC790\uB9C9\uC744 \uBA3C\uC800 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.", "error");
+      renderImageAssetInspector();
+      return;
+    }
+    applyProject(matchImageAssetToSubtitleCue(project, asset.id, cue.id));
+    showToast("\uC5D0\uC14B\uC744 \uC120\uD0DD \uC790\uB9C9\uC758 \uC2DC\uC791\xB7\uB05D \uC2DC\uAC01\uC5D0 \uC815\uD655\uD788 \uB9DE\uCDC4\uC2B5\uB2C8\uB2E4.", "success");
   });
   elements.asset_x.addEventListener("input", () => {
     updateSelectedImageAsset(
@@ -40214,6 +41083,11 @@ function bindActions() {
     }
   });
   elements.generate_captions.addEventListener("click", () => void generateCaptions());
+  elements.reset_ai_caption_positions.addEventListener("click", () => {
+    void queueLocalDraftOperation(resetAllAiCaptionPositions).catch((error) => {
+      showToast(`AI \uC790\uB9C9 \uC704\uCE58\uB97C \uC815\uB82C\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${error.message}`, "error", 0);
+    });
+  });
   elements.test_caption_agent.addEventListener("click", () => void testCaptionAgentConnection());
   elements.caption_style_preset.addEventListener("change", () => {
     const preset = captionStylePreset(elements.caption_style_preset.value);
@@ -40228,19 +41102,17 @@ function bindActions() {
     showToast(`${preset.displayName} \uC2A4\uD0C0\uC77C\uC744 \uC801\uC6A9\uD588\uC2B5\uB2C8\uB2E4.`, "success", 3600);
   });
   elements.caption_model.addEventListener("change", () => {
-    applyProject({
-      ...project,
-      ai: {
-        ...project.ai,
-        provider: "caption-agent",
-        model: elements.caption_model.value
-      }
-    });
+    renderCaptionModeControls();
     void saveCaptionAgentSettings({
       endpoint: elements.caption_agent_endpoint.value,
       model: elements.caption_model.value,
       sttEndpoint: elements.caption_stt_endpoint.value,
       sttModel: elements.caption_stt_model.value
+    }).then((settings) => {
+      captionAgentSettings = settings;
+      elements.caption_agent_endpoint.value = settings.endpoint;
+      elements.caption_stt_endpoint.value = settings.sttEndpoint;
+      elements.caption_stt_model.value = settings.sttModel;
     }).catch((error) => {
       showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
     });
@@ -40262,6 +41134,9 @@ function bindActions() {
       sttModel: elements.caption_stt_model.value
     }).then((settings) => {
       captionAgentSettings = settings;
+      elements.caption_agent_endpoint.value = settings.endpoint;
+      elements.caption_stt_endpoint.value = settings.sttEndpoint;
+      elements.caption_stt_model.value = settings.sttModel;
     }).catch((error) => {
       showToast(`\uC790\uB9C9 \uC5D0\uC774\uC804\uD2B8 \uC124\uC815 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
     });
@@ -40306,13 +41181,27 @@ function bindActions() {
   });
   elements.timeline_zoom.addEventListener("input", () => {
     pixelsPerSecond = Number(elements.timeline_zoom.value);
+    hideTimelineSnapGuide();
     renderTimeline();
   });
   elements.fit_timeline.addEventListener("click", () => {
     const durationSeconds = Math.max(1, projectDurationMs(project) / 1e3);
     pixelsPerSecond = Math.max(20, Math.min(240, (elements.timeline_scroll.clientWidth - 20) / durationSeconds));
     elements.timeline_zoom.value = String(Math.round(pixelsPerSecond));
+    hideTimelineSnapGuide();
     renderTimeline();
+  });
+  elements.toggle_timeline_snap.addEventListener("click", () => {
+    timelineSnapEnabled = !timelineSnapEnabled;
+    elements.toggle_timeline_snap.classList.toggle("active", timelineSnapEnabled);
+    elements.toggle_timeline_snap.setAttribute("aria-pressed", String(timelineSnapEnabled));
+    elements.toggle_timeline_snap.title = timelineSnapEnabled ? "\uD0C0\uC784\uB77C\uC778 \uC790\uC11D \uCF1C\uC9D0 \xB7 \uB4DC\uB798\uADF8 \uC911 Alt\uB85C \uC7A0\uC2DC \uD574\uC81C" : "\uD0C0\uC784\uB77C\uC778 \uC790\uC11D \uAEBC\uC9D0";
+    if (!timelineSnapEnabled) {
+      hideTimelineSnapGuide();
+    }
+    showToast(
+      timelineSnapEnabled ? "\uD0C0\uC784\uB77C\uC778 \uC790\uC11D\uC744 \uCF30\uC2B5\uB2C8\uB2E4. \uB4DC\uB798\uADF8 \uC911 Alt\uB85C \uC7A0\uC2DC \uD574\uC81C\uD560 \uC218 \uC788\uC5B4\uC694." : "\uD0C0\uC784\uB77C\uC778 \uC790\uC11D\uC744 \uAED0\uC2B5\uB2C8\uB2E4."
+    );
   });
   elements.video_track.addEventListener("contextmenu", openTimelineContextMenu);
   elements.caption_tracks.addEventListener("contextmenu", openTimelineContextMenu);
@@ -40538,6 +41427,7 @@ async function initialize() {
   elements.caption_model.value = captionAgentSettings.model;
   elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
   elements.caption_stt_model.value = captionAgentSettings.sttModel;
+  renderCaptionModeControls();
   if (isLoopbackCaptionAgentEndpoint(captionAgentSettings.endpoint)) {
     void ensureCaptionAgentPermission(captionAgentSettings.endpoint).then((granted) => {
       if (!granted) {
@@ -40683,7 +41573,6 @@ function normalizeLocalCaptionFirstPass(detail) {
     if (!text || text.length > 500) {
       throw new TypeError(`${index + 1}\uBC88 \uB85C\uCEEC \uC790\uB9C9 \uD14D\uC2A4\uD2B8\uAC00 \uBE44\uC5C8\uAC70\uB098 \uB108\uBB34 \uAE41\uB2C8\uB2E4.`);
     }
-    const placement = String(rawCue.remoteMeta?.placement || "bottom").toLowerCase();
     return {
       ...rawCue,
       id: String(rawCue.id || `cue-codex-${crypto.randomUUID()}`),
@@ -40691,6 +41580,8 @@ function normalizeLocalCaptionFirstPass(detail) {
       startOffsetMs,
       endOffsetMs,
       text,
+      x: 0.5,
+      y: 0.84,
       origin: "ai",
       humanEdited: false,
       remoteMeta: {
@@ -40698,7 +41589,7 @@ function normalizeLocalCaptionFirstPass(detail) {
           rawCue.remoteMeta?.speakerId || "codex-local-first-pass"
         ).slice(0, 80),
         reviewRequired: rawCue.remoteMeta?.reviewRequired !== false,
-        placement: ["top", "center", "bottom"].includes(placement) ? placement : "bottom"
+        placement: "bottom"
       }
     };
   });

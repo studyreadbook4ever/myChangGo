@@ -9,9 +9,13 @@ import {
   captionEditorialContextFingerprint
 } from "../src/caption-agent/editorial-context.js";
 import {
+  CAPTION_AGENT_SETTINGS_KEY,
+  CAPTION_AGENT_CAPABILITY_SCHEMA,
   CAPTION_AGENT_REQUEST_SCHEMA,
   CAPTION_AGENT_RESPONSE_SCHEMA,
   CAPTION_AGENT_SESSION_SCHEMA,
+  DEFAULT_CAPTION_AGENT_SETTINGS,
+  LEGACY_CAPTION_AGENT_SETTINGS_KEY,
   MAX_CAPTION_AGENT_CLIPS_PER_RUN,
   MAX_CAPTION_AGENT_CLIP_DURATION_MS,
   MAX_CAPTION_AGENT_CUES_PER_RUN,
@@ -19,6 +23,7 @@ import {
   captionAgentAudioFootprint,
   captionAgentPermissionOrigin,
   captionAgentResumePlan,
+  captionAgentRuntimeIdentity,
   captionAgentRunEstimate,
   captionAgentSessionEndpoint,
   captionProviderHeaders,
@@ -27,6 +32,7 @@ import {
   discardCaptionAgentCheckpointsForClips,
   encodePcm16WavBase64,
   ensureCaptionAgentSession,
+  loadCaptionAgentSettings,
   normalizeCaptionAgentCues,
   normalizeCaptionAgentEndpoint,
   normalizeCaptionAgentSettings,
@@ -52,11 +58,13 @@ function jsonResponse(payload, {
 function agentRequest({
   requestId = "request-1",
   clipId = "clip-1",
-  durationMs = 5_000
+  durationMs = 5_000,
+  model = "whisper-tiny"
 } = {}) {
   return {
     schema: CAPTION_AGENT_REQUEST_SCHEMA,
     requestId,
+    model,
     clip: {
       id: clipId,
       durationMs
@@ -65,6 +73,7 @@ function agentRequest({
 }
 
 function completedAgentResponse(request, overrides = {}) {
+  const local = request.model === "whisper-tiny";
   const qualityEnvelope = {
     qualityProfile: CAPTION_QUALITY_PROFILE_ID,
     harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
@@ -86,15 +95,36 @@ function completedAgentResponse(request, overrides = {}) {
     requestId: request.requestId,
     clipId: request.clip.id,
     language: "ko",
-    sttModel: "external-stt",
-    captionModel: "solar-pro3",
-    model: "solar-pro3",
-    resolvedModel: "solar-pro3",
-    provider: "upstage",
+    sttModel: "tiny-q5_1",
+    captionModel: request.model,
+    model: request.model,
+    resolvedModel: local ? "tiny-q5_1" : request.model,
+    provider: local ? "local-whispercpp" : "upstage",
     status: "completed",
     cues: [],
     warnings: [],
     ...qualityEnvelope,
+    ...overrides
+  };
+}
+
+function captionCapability(overrides = {}) {
+  return {
+    schema: CAPTION_AGENT_CAPABILITY_SCHEMA,
+    status: "ok",
+    provider: "local-whispercpp",
+    models: {
+      stt: "ggml-tiny-q5_1.bin",
+      captions: "whisper-tiny"
+    },
+    availableModels: ["whisper-tiny", "solar-mini", "solar-pro3"],
+    transcription: {
+      mode: "local-whispercpp"
+    },
+    configured: {
+      ready: true,
+      solarReady: false
+    },
     ...overrides
   };
 }
@@ -263,13 +293,21 @@ test("작업 중 만료된 로컬 세션은 한 번만 재발급해 같은 요�
   );
 });
 
-test("자막 실행 예상량은 활성 컷과 유료 요청 상한을 실행 전에 계산한다", () => {
-  const estimate = captionAgentRunEstimate([
+test("자막 실행 예상량은 로컬 기본값은 무과금, 명시한 Solar만 컷당 한 번으로 계산한다", () => {
+  const clips = [
     { sourceStartMs: 1_000, sourceEndMs: 5_000 },
     { sourceStartMs: 5_000, sourceEndMs: 20_000 },
     { sourceStartMs: 0, sourceEndMs: 99_000, enabled: false }
-  ]);
-  assert.deepEqual(estimate, {
+  ];
+  assert.deepEqual(captionAgentRunEstimate(clips), {
+    clipCount: 2,
+    totalDurationMs: 19_000,
+    plannedSolarRequests: 0,
+    maximumSolarRequests: 0
+  });
+  assert.deepEqual(captionAgentRunEstimate(clips, {
+    model: "solar-pro3"
+  }), {
     clipCount: 2,
     totalDurationMs: 19_000,
     plannedSolarRequests: 2,
@@ -326,6 +364,106 @@ test("실패 재개 계획은 같은 컷 범위·Solar 모델의 완료 체크�
       clips,
       skippedClipIds: []
     }
+  );
+});
+
+test("자막 pipeline 지문은 실제 STT 모델·실행 방식·외부 endpoint 변경을 구분한다", () => {
+  const localTiny = captionAgentRuntimeIdentity(captionCapability(), {
+    model: "whisper-tiny"
+  });
+  const localSmall = captionAgentRuntimeIdentity(captionCapability({
+    models: {
+      stt: "ggml-small-q5_1.bin",
+      captions: "whisper-tiny"
+    }
+  }), {
+    model: "whisper-tiny"
+  });
+  const externalFirst = captionAgentRuntimeIdentity(captionCapability({
+    provider: "timed-stt",
+    models: {
+      stt: "timestamp-model",
+      captions: "whisper-tiny"
+    },
+    transcription: {
+      mode: "external-timed-stt"
+    }
+  }), {
+    model: "solar-pro3",
+    sttEndpoint: "https://stt-one.example/v1/transcriptions"
+  });
+  const externalSecond = captionAgentRuntimeIdentity(captionCapability({
+    provider: "timed-stt",
+    models: {
+      stt: "timestamp-model",
+      captions: "whisper-tiny"
+    },
+    transcription: {
+      mode: "external-timed-stt"
+    }
+  }), {
+    model: "solar-pro3",
+    sttEndpoint: "https://stt-two.example/v1/transcriptions"
+  });
+
+  assert.equal(localTiny.sttModel, "ggml-tiny-q5_1.bin");
+  assert.notEqual(localTiny.fingerprint, localSmall.fingerprint);
+  assert.notEqual(externalFirst.fingerprint, externalSecond.fingerprint);
+  assert.throws(
+    () => captionAgentRuntimeIdentity(captionCapability({
+      provider: "timed-stt",
+      transcription: { mode: "external-timed-stt" }
+    }), {
+      model: "whisper-tiny"
+    }),
+    /local-whispercpp/u
+  );
+  assert.throws(
+    () => captionAgentRuntimeIdentity(captionCapability({
+      transcription: { mode: "external-timed-stt" }
+    }), {
+      model: "whisper-tiny"
+    }),
+    /local-whispercpp/u
+  );
+  assert.throws(
+    () => captionAgentRuntimeIdentity({ status: "ok" }),
+    /capability/u
+  );
+});
+
+test("재개 체크포인트는 실제 STT pipeline 지문이 달라지면 재사용하지 않는다", () => {
+  const clip = {
+    id: "clip-stt-fingerprint",
+    sourceStartMs: 10_000,
+    sourceEndMs: 14_000
+  };
+  const checkpoint = createCaptionAgentCheckpoint(clip, "whisper-tiny", {
+    pipelineFingerprint: "caption-pipeline-v1-tiny"
+  });
+
+  assert.deepEqual(
+    captionAgentResumePlan([clip], [checkpoint], "whisper-tiny", {
+      resume: true,
+      pipelineFingerprint: "caption-pipeline-v1-tiny"
+    }).skippedClipIds,
+    ["clip-stt-fingerprint"]
+  );
+  assert.deepEqual(
+    captionAgentResumePlan([clip], [checkpoint], "whisper-tiny", {
+      resume: true,
+      pipelineFingerprint: "caption-pipeline-v1-small"
+    }).skippedClipIds,
+    []
+  );
+  const legacyCheckpoint = { ...checkpoint };
+  delete legacyCheckpoint.pipelineFingerprint;
+  assert.deepEqual(
+    captionAgentResumePlan([clip], [legacyCheckpoint], "whisper-tiny", {
+      resume: true,
+      pipelineFingerprint: "caption-pipeline-v1-tiny"
+    }).skippedClipIds,
+    []
   );
 });
 
@@ -557,8 +695,12 @@ test("비밀 API 키는 자막 에이전트 저장 설정에 포함하지 않는
     sttModel: "timestamp-model"
   });
   assert.deepEqual(
-    persisted["chzzk-kirinuki-caption-agent-settings-v1"],
+    persisted[CAPTION_AGENT_SETTINGS_KEY],
     settings
+  );
+  assert.equal(
+    Object.hasOwn(persisted, LEGACY_CAPTION_AGENT_SETTINGS_KEY),
+    false
   );
   assert.equal(JSON.stringify(persisted).includes("must-not-persist"), false);
   assert.deepEqual(normalizeCaptionAgentSettings(settings), settings);
@@ -568,8 +710,50 @@ test("비밀 API 키는 자막 에이전트 저장 설정에 포함하지 않는
   );
   assert.equal(
     normalizeCaptionAgentSettings({ ...settings, model: "solar-pro2" }).model,
-    "solar-pro3"
+    "whisper-tiny"
   );
+});
+
+test("legacy v1 설정은 외부 endpoint·STT 값을 버리고 로컬 기본값으로 이관한다", async () => {
+  let requestedKeys = null;
+  const legacySettings = {
+    endpoint: "https://captions.example/v1/captions",
+    model: "solar-pro3",
+    sttEndpoint: "https://stt.example/v1/audio/transcriptions",
+    sttModel: "legacy-timestamp-model"
+  };
+  const loaded = await loadCaptionAgentSettings({
+    async get(keys) {
+      requestedKeys = keys;
+      return {
+        [LEGACY_CAPTION_AGENT_SETTINGS_KEY]: legacySettings
+      };
+    }
+  });
+  assert.deepEqual(requestedKeys, [
+    CAPTION_AGENT_SETTINGS_KEY,
+    LEGACY_CAPTION_AGENT_SETTINGS_KEY
+  ]);
+  assert.deepEqual(loaded, {
+    ...DEFAULT_CAPTION_AGENT_SETTINGS
+  });
+  assert.equal(loaded.model, "whisper-tiny");
+});
+
+test("현재 v2 로컬 설정도 원격 endpoint와 외부 STT 흔적을 복원하지 않는다", async () => {
+  const loaded = await loadCaptionAgentSettings({
+    async get() {
+      return {
+        [CAPTION_AGENT_SETTINGS_KEY]: {
+          endpoint: "https://captions.example/v1/captions",
+          model: "whisper-tiny",
+          sttEndpoint: "https://stt.example/v1/audio/transcriptions",
+          sttModel: "legacy-timestamp-model"
+        }
+      };
+    }
+  });
+  assert.deepEqual(loaded, DEFAULT_CAPTION_AGENT_SETTINGS);
 });
 
 test("16kHz mono Float32 PCM을 올바른 PCM16 WAV base64로 만든다", () => {
@@ -589,7 +773,7 @@ test("16kHz mono Float32 PCM을 올바른 PCM16 WAV base64로 만든다", () => 
   assert.equal(wav.readInt16LE(48), 32_767);
 });
 
-test("요청은 실제 컷 메모·길이와 한국어 키리누키 4초 정책을 담는다", () => {
+test("요청은 로컬 Whisper 기본 선택과 한국어 키리누키 4초 정책을 담는다", () => {
   const request = createCaptionAgentRequest({
     project: {
       id: "project-1",
@@ -602,7 +786,7 @@ test("요청은 실제 컷 메모·길이와 한국어 키리누키 4초 정책�
       sourceStartMs: 10_000,
       sourceEndMs: 15_500
     },
-    model: "solar-pro3",
+    model: "whisper-tiny",
     audioBase64: "UklGRg==",
     placementHints: {
       analysis: "local-three-band-edge-density-v1",
@@ -622,6 +806,7 @@ test("요청은 실제 컷 메모·길이와 한국어 키리누키 4초 정책�
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
   );
   assert.equal(request.clip.durationMs, 5_500);
+  assert.equal(request.model, "whisper-tiny");
   assert.equal(request.clip.title, "첫 장면");
   assert.equal(request.locale, "ko-KR");
   assert.equal(request.policy.includeAllRecognizableSpeech, true);
@@ -653,11 +838,11 @@ test("요청은 실제 컷 메모·길이와 한국어 키리누키 4초 정책�
       audioBase64: "UklGRg==",
       placementHints: request.visual
     }),
-    /지원하지 않는 Solar 모델/u
+    /지원하지 않는 자막 초벌 모델/u
   );
 });
 
-test("원격 cue는 정렬·경계·4초를 검증하고 동시 발화와 표시 메타를 보존한다", () => {
+test("원격 cue는 정렬·경계·4초를 검증하고 자동 위치를 기본값으로 고정한다", () => {
   const cues = normalizeCaptionAgentCues([
     {
       startMs: 1_000,
@@ -690,10 +875,10 @@ test("원격 cue는 정렬·경계·4초를 검증하고 동시 발화와 표시
   assert.deepEqual(cues[1].remoteMeta, {
     speakerId: "guest",
     reviewRequired: true,
-    placement: "top"
+    placement: "bottom"
   });
   assert.equal(cues[1].color, "#00ff88");
-  assert.equal(cues[1].y, 0.18);
+  assert.equal(cues[1].y, 0.84);
 
   assert.throws(
     () => normalizeCaptionAgentCues([{
@@ -948,8 +1133,8 @@ test("비동기 폴링은 same-origin 상대 URL을 따르고 AbortSignal로 즉
         retryAfterMs: 10_000
       }, { status: 202 });
     },
-    onProgress: (_progress, message) => {
-      if (message.includes("Solar")) {
+    onProgress: (progress) => {
+      if (progress >= 0.12) {
         controller.abort();
       }
     }
@@ -1022,7 +1207,20 @@ test("완료 응답은 요청 ID·컷 ID와 모든 필수 필드 타입을 검�
     {
       name: "제공자 계약 위반",
       response: completedAgentResponse(request, { provider: "unknown" }),
-      pattern: /Upstage/u
+      pattern: /제공자가 올바르지/u
+    },
+    {
+      name: "요청과 다른 자막 모델",
+      response: completedAgentResponse(request, {
+        captionModel: "solar-pro3",
+        model: "solar-pro3"
+      }),
+      pattern: /현재 요청과 다릅니다/u
+    },
+    {
+      name: "로컬 초벌에 Upstage 제공자 응답",
+      response: completedAgentResponse(request, { provider: "upstage" }),
+      pattern: /선택한 초벌 방식/u
     },
     {
       name: "품질 envelope 전체 누락",
