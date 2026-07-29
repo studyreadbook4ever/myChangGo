@@ -16,6 +16,16 @@
 
 기존에 열려 있던 지원 영상 탭에도 첫 통신 때 콘텐츠 브리지를 주입하므로 대개 새로고침 없이 동작합니다. 브라우저 정책으로 주입이 막힌 경우 해당 탭을 한 번 새로고침하세요.
 
+Linux에서 로컬 자막 초벌까지 쓰려면 최초 한 번 다음을 이어서 실행합니다.
+
+```bash
+npm run caption-stack:doctor
+npm run caption-stack:setup
+npm run caption-stack:start
+```
+
+`setup`은 고정 revision과 SHA-256의 whisper.cpp·다국어 모델·Silero VAD를 사용자 데이터 폴더에 설치하고 제3자 고지문도 함께 둡니다. API 키는 받거나 저장하지 않습니다. 실행 중 setup을 다시 하면 검증 성공 뒤 서비스에 새 profile·Origin을 자동 적용합니다. 다음 작업부터는 `npm run caption-stack:start`만 실행하면 되고, 저사양 PC는 `npm run caption-stack:setup -- --profile light`를 사용할 수 있습니다. 상세 운영법과 개발 불변조건은 [AGENTS.md](AGENTS.md)에 있습니다.
+
 ### 전용 Chromium 프로필로 실행하기 (선택)
 
 기존 브라우저 프로필과 분리하고 싶다면 저장소 최상위에서 다음처럼 실행할 수 있습니다.
@@ -40,57 +50,51 @@ Extension 소스를 수정한 뒤에는 `chrome://extensions`에서 다시 로�
 6. **원본 연결**에서 해당 소스의 사용 권한이 있는 로컬 영상 파일을 선택합니다.
 7. 로컬 파일의 시작점이 페이지 영상 시각과 다르면 **페이지 시각 ↔ 로컬 원본 정렬** 오프셋을 먼저 맞춥니다.
 8. 필요하면 컷 트랙 양끝 손잡이를 끌어 경계를 직접 조정합니다.
-9. 편집기의 **자막 에이전트 연결**에서 endpoint와 세션 토큰을 입력하고 **연결 확인**을 누른 뒤 **활성 컷 전체 Solar 자막**을 실행합니다. 브라우저는 활성화된 모든 선택 컷의 오디오를 각각 16kHz WAV로 만들고 제한된 프로젝트 문맥과 함께 설정한 자막 에이전트에 차례로 보냅니다. 대표 프레임은 로컬에서만 저해상도 분석하고 픽셀 대신 시간별 화면 방해도 점수를 보냅니다.
+9. 편집기의 **Solar API 키 · 현재 탭에서만**에 Upstage 키를 넣고 Mini 또는 Pro 3를 고른 뒤 **활성 컷 전체 Solar 자막**을 실행합니다. managed companion은 로컬 Whisper와 process-memory session을 자동 연결합니다. endpoint·STT 키·세션 토큰은 일반 사용자가 입력하지 않습니다.
 10. `영상 → 에셋 → 음성 → 자막` 타임라인에서 이미지·자막·음성을 검수합니다. 영상 중간을 덜어낼 때는 재생헤드에서 `시작 [I]`와 `끝 [O]`을 찍고 **구간 삭제**를 누릅니다. 삭제 뒤 영상과 연결된 에셋·음성·자막은 함께 당겨집니다. 웹 이미지 자체를 복사한 뒤 편집기에서 `Ctrl/Cmd+V`를 누르면 현재 위치에 에셋으로 들어가며 PNG·WebP의 투명 영역도 보존됩니다. 자막 레인은 기본 2개이며 `+`로 늘릴 수 있습니다.
 11. 큰 편집 전에는 **지금 임시저장**을 누를 수 있습니다. 편집기는 5분마다 자동 임시저장하며, **저장 목록**에서 이 기기의 최근 5개 중 하나를 고르면 현재 상태를 먼저 임시저장한 뒤 불러옵니다.
 12. **영상 내보내기**에서 폴더를 한 번 고르면 선택 컷·이미지 에셋·자막이 들어간 MP4 또는 WebM, 프로젝트 JSON, 자막이 있을 때의 SRT가 같은 폴더에 저장됩니다.
 
 긴 원본을 통째로 메모리에 복사하지 않습니다. 미리보기·자막용 오디오 추출·렌더링은 사용자가 선택한 구간을 기준으로 디스크에서 필요한 부분만 읽습니다.
 
-자막 에이전트는 선택 컷 오디오를 외부 STT로 전사한 다음, 타임코드가 있는 전사문을 Upstage Solar에 보내 의미 단위 cue로 정리합니다. `solar-pro3`는 품질 우선으로 `reasoning_effort: high`와 최소 16,384 completion token 예산을 사용하고, `solar-mini`는 빠른 초벌용으로 reasoning 필드를 보내지 않습니다. 둘 다 음성을 직접 전사하는 모델이 아니므로 시간 정보가 있는 STT가 반드시 필요합니다. 편집기는 각 컷의 대표 프레임 7장을 이 기기에서만 축소 분석해 top·center·bottom의 방해도 점수를 만들고, Solar는 cue 시각에 가까운 점수를 바탕으로 위치를 고릅니다. 결과는 인식된 발화를 빠뜨리지 않고 cue당 최대 4초로 나누며, 문장 끝 마침표는 제거하되 물음표 등 의미 있는 문장부호는 유지하는 검수용 초안입니다.
+자막 에이전트의 기본 파이프라인은 결정적입니다.
 
-한 번의 실행은 활성 컷 최대 500개, 새 AI cue 최대 10,000개로 제한합니다. 모델의 context보다 긴 단일 컷 전사문은 Solar 요청이 실패할 수 있으므로 긴 장면은 먼저 여러 컷으로 나눠 실행하세요. 더 큰 작업은 활성 컷을 나눠 실행해 브라우저 메모리와 외부 API 비용을 통제하세요.
+```text
+활성 컷 오디오
+→ 이 기기의 whisper.cpp timed STT
+→ 중복 필드를 제거한 canonical timed units
+→ 컷당 정확히 한 번의 유료 Upstage Solar 호출
+→ 추가 유료 호출이 0회인 로컬 kr-vtuber-clean-v1 품질 하네스
+→ 편집기의 검수용 자막 초안
+```
+
+`solar-pro3`는 품질 우선으로 `reasoning_effort: high`와 최소 16,384 completion token 예산을 사용하고, `solar-mini`는 빠른 초벌용으로 reasoning 필드를 보내지 않습니다. 형식 오류나 빈 응답을 다른 유료 요청으로 자동 재시도하지 않으며, 로컬 품질 하네스가 Solar 응답을 같은 입력에 대해 재현 가능하게 정리합니다.
+
+`kr-vtuber-clean-v1`의 자동 본문 자막은 **배경 없는 한 줄·하단 고정**입니다. 한글·한자·이모지는 1, 공백은 0.35, 라틴 문자는 0.55처럼 계산한 한국어 폭 단위를 기준으로 한 줄 20을 상한으로 사용합니다. 표시 시간은 650ms 이상을 목표로 하며 최대 4초, 읽기 속도는 초당 16폭 단위 이하를 목표로 합니다. 문장 끝의 `.`은 제거하지만 `?`, `!`, `…`, `~`는 유지합니다. 기본 화자는 흰색, 구분 가능한 다른 화자는 안정적인 고유 색을 사용합니다. 사람이 만든 자막, 사람이 고친 AI 자막과 강조용 추가 레인은 덮어쓰지 않습니다.
+
+한 번의 실행은 활성 컷 최대 16개, 새 AI cue 최대 10,000개로 제한합니다. 실행 전 활성 컷 수·총 길이와 **활성 컷 수와 같은 최대 Solar 요청 수**를 표시하며 취소하면 WAV 추출과 유료 호출을 시작하지 않습니다. 컷 하나가 끝날 때마다 결과와 체크포인트를 저장하므로 중간 실패·취소·탭 종료 뒤 같은 범위·Solar 모델·`kr-vtuber-clean-v1` 하네스 지문으로 다시 누르면 완료 컷을 건너뛰고 실패 지점부터 재개합니다. 하네스 지문이 없거나 달라진 예전 체크포인트, 새 전체 실행과 다른 원본 연결의 체크포인트는 재사용하지 않습니다.
+
+로컬 하네스가 공백·종결 마침표, 길이·표시 시간, 하단 위치나 같은 화자 겹침을 안전하게 고친 경우에는 **자동 정리 경고**로 알려 줍니다. STT 대비 발화 누락·추가 가능성, 해결되지 않은 읽기 속도·너비·짧은 표시 시간·겹침은 **품질 검수 필요 경고**로 구분하며 원음을 듣고 확인해야 합니다.
 
 ### 자막 에이전트와 API 키 연결
 
-2026-07-29 현재 Upstage의 [공식 모델 목록](https://console.upstage.ai/docs/models), [API 키 화면](https://console.upstage.ai/api-keys), [API 가격표](https://www.upstage.ai/pricing/api)에는 공개 STT가 없습니다. 따라서 가상의 “Upstage STT” endpoint를 만들지 않고, **호환 외부 STT가 타임스탬프 전사 → Upstage Solar가 자막 cue 정리** 순서로 처리합니다.
+2026-07-29 현재 Upstage의 공개 API에서 Solar Mini와 Pro 3는 텍스트 모델입니다. 이 저장소는 가상의 “Upstage STT”를 만들지 않고 **로컬 whisper.cpp timed transcript → Upstage Solar 자막 cue** 순서를 사용합니다.
 
-편집기에는 다음 값을 입력합니다.
+일반 사용자가 입력할 값은 다음 두 가지뿐입니다.
 
-- **자막 에이전트 Endpoint**: 기본값 `http://127.0.0.1:4319/v1/captions`
-- **세션 토큰**: companion의 `KIRINUKI_AGENT_TOKEN`과 같은 값
-- **Solar 모델**: 품질 우선 `solar-pro3`(기본값) 또는 빠른 초벌 `solar-mini`
-- **STT API 주소·모델명·API 키**: 사용 중인 호환 STT 제공자의 값
-- **Upstage API 키**: Solar Chat API를 호출할 키
+- **Solar 모델**: 빠른 초벌 `solar-mini` 또는 품질 우선 `solar-pro3`
+- **Upstage API 키**: 현재 편집기 탭에서만 유지
 
-자막 에이전트 endpoint·Solar 모델·STT 주소·STT 모델명 같은 비밀이 아닌 설정만 `chrome.storage.local`에 저장됩니다. 세션 토큰과 두 API 키는 프로젝트·임시저장·IndexedDB·Chrome 저장소에 넣지 않고 현재 편집기 탭의 메모리에만 둡니다. **입력한 API 키 지우기**로 즉시 비울 수 있습니다. 제공자 API 키는 비어 있지 않은 Bearer 세션 토큰과 함께 `127.0.0.1` 또는 `localhost` companion에만 요청 헤더로 전달하며, 토큰이 없으면 요청 전에 중단하고 원격 HTTPS 자막 에이전트에는 전달하지 않습니다.
-
-Extension ID를 `chrome://extensions`에서 확인하고, reference gateway는 최소한 다음처럼 실행합니다.
+managed gateway는 `127.0.0.1`에만 바인딩되고, 정확한 Extension Origin에만 process-memory bearer session을 자동 발급합니다. session과 Upstage 키는 프로젝트·임시저장·IndexedDB·Chrome 저장소·CLI 설정·systemd unit·로그에 기록하지 않습니다. **지우기** 또는 탭 닫기로 현재 탭의 키가 사라집니다.
 
 ```bash
-export KIRINUKI_ALLOWED_ORIGIN='chrome-extension://<확장프로그램-ID>'
-export KIRINUKI_AGENT_TOKEN='<충분히 긴 임의 토큰>'
-npm run caption-gateway
+npm run caption-stack:doctor
+npm run caption-stack:start
+npm run caption-stack:status
+npm run caption-stack:stop
 ```
 
-gateway는 `127.0.0.1`에만 바인딩됩니다. `KIRINUKI_ALLOWED_ORIGIN`에는 와일드카드가 아니라 현재 Extension의 정확한 origin 하나를 지정하고, 편집기에 같은 세션 토큰과 STT·Upstage 값을 넣은 뒤 **연결 확인**을 누르세요. 로컬 companion 프로세스나 해당 포트를 신뢰할 수 없는 환경에서는 API 키를 편집기에 넣지 말고 아래 환경 변수 방식으로 companion에 직접 보관하세요.
-
-Solar Chat의 공식 입력은 텍스트이므로 **Upstage API 키 하나만 입력한 raw audio 요청은 준비 완료로 표시하지 않습니다.** gateway core에는 검증된 로컬 STT를 연결할 수 있는 `transcribeAudio` 경계가 있지만 이 저장소는 로컬 음성인식 모델을 번들하지 않습니다. 기본 reference gateway는 외부 timed STT 주소·키가 빠지면 `TIMED_STT_REQUIRED`로 중단하며, WAV를 Solar Chat 요청에 넣는 가상의 폴백은 사용하지 않습니다.
-
-API 키를 편집기에 매번 넣고 싶지 않다면 companion 환경 변수에 두는 기존 방식도 지원합니다.
-
-```bash
-export KIRINUKI_STT_ENDPOINT='https://<STT-제공자>/v1/audio/transcriptions'
-export KIRINUKI_STT_API_KEY='<STT-API-키>'
-export KIRINUKI_STT_MODEL='<STT-모델-이름>'
-export UPSTAGE_API_KEY='<Upstage-API-키>'
-export KIRINUKI_SOLAR_MODEL='solar-pro3'
-export KIRINUKI_AGENT_PORT='4319'
-# 선택: 전체 파이프라인 제한시간(ms), 최대 20분
-export KIRINUKI_PIPELINE_TIMEOUT_MS='900000'
-```
-
-호환 STT endpoint에는 Bearer 인증과 함께 multipart `file`, `model`, `language=ko`, `response_format=verbose_json`, `timestamp_granularities[]=segment`, `timestamp_granularities[]=word`를 보냅니다. 응답은 시간 정보가 있는 `segments`, `chunks` 또는 `words` JSON이어야 합니다. 편집기에서 입력한 endpoint는 비밀이 아닌 설정으로 저장되므로 사용자 정보·API 키·쿼리 문자열을 URL에 넣지 못하며 키는 전용 API 키 필드에만 입력합니다. 제공자별 API 계약·보존 정책·비용을 확인하세요. Solar 호출 규격은 Upstage의 [Chat API Reference](https://console.upstage.ai/api/chat)와 [Structured outputs](https://console.upstage.ai/docs/capabilities/generate/structured-outputs)를 따릅니다.
+외부 timed STT가 필요한 고급 환경은 기존 endpoint·model·API key 필드를 계속 사용할 수 있습니다. 원격 endpoint는 HTTPS여야 하며 로컬 STT 실패가 외부 유료 STT로 자동 전환되지는 않습니다. 전체 설치·프로필·복구·보안·트러블슈팅은 [AGENTS.md](AGENTS.md), 화면별 사용법은 [HELP.md](HELP.md)를 참고하세요. Solar 호출 규격은 Upstage의 [Chat API Reference](https://console.upstage.ai/api/chat)와 [Structured outputs](https://console.upstage.ai/docs/capabilities/generate/structured-outputs)를 따릅니다.
 
 ### YouTube 타임스탬프 지원
 
@@ -207,14 +211,16 @@ Codex가 프로젝트 폴더의 `AGENTS.md`를 지속 지침으로 읽는 구조
 - 치지직 라이브 상태 메타데이터를 읽을 수 없을 때는 HTML 플레이어 시각으로 폴백하므로, 생성 프롬프트의 캡처 방법과 신뢰도를 검수해야 합니다.
 - 사이드패널의 작은 캡처 상태는 `chrome.storage.local`, 편집 프로젝트·자막·파일 핸들·붙여넣은 이미지 Blob은 IndexedDB에 자동 저장됩니다.
 - 편집기의 수동·5분 자동·복원 직전 임시저장은 프로젝트별 최근 5개만 같은 IndexedDB에 보관합니다. 서버로 전송하지 않으며 Extension 데이터 삭제나 제거 시 함께 사라질 수 있습니다.
-- 원본 전체, 대표 프레임 픽셀, 이미지 에셋과 최종 렌더는 자막 에이전트에 보내지 않습니다. 사용자가 **활성 컷 전체 Solar 자막**을 누르면 활성화된 모든 선택 컷의 16kHz 오디오와 프로젝트 식별자·이름, 스트리머명, 각 컷 메모, 로컬에서 계산한 시간별 top·center·bottom 방해도 점수가 설정한 endpoint로 차례로 전송됩니다. reference gateway는 각 음성을 외부 STT에 보내고, timed transcript와 이름·메모 문맥·숫자형 위치 요약을 Upstage에 보냅니다.
-- 세션 토큰과 Upstage·외부 STT API 키는 저장하지 않습니다. API 키는 현재 편집기 탭 메모리 또는 companion 환경 변수에만 두고, endpoint와 모델 선택만 `chrome.storage.local`에 보관합니다.
+- 원본 전체, 대표 프레임 픽셀, 이미지 에셋과 최종 렌더는 자막 에이전트에 보내지 않습니다. 사용자가 **활성 컷 전체 Solar 자막**을 누르면 활성 컷의 16kHz 오디오는 이 기기의 whisper.cpp로 가고, timed transcript와 이름·메모 문맥·숫자형 위치 요약만 Upstage로 갑니다.
+- 자동 session token과 Upstage API 키는 저장하지 않습니다. 둘 다 현재 편집기 탭·companion 프로세스 메모리에만 두고 endpoint와 모델 선택만 `chrome.storage.local`에 보관합니다.
 - 다른 영상 탭으로 이동했을 때 기존 구간과 원본이 섞이지 않도록 플랫폼과 회차·영상 ID 충돌을 감지해 새 기록을 막습니다.
 - 같은 채널의 서로 다른 생방송은 `channelId + broadcastStartedAt`으로 구분합니다.
 - 같은 YouTube 영상 ID의 watch·Shorts·embed·짧은 URL은 같은 회차로, 서로 다른 ID는 다른 회차로 구분합니다.
 - 여러 Chrome 창의 사이드패널은 revision을 확인해 최신 상태를 동기화하며, 입력 중인 텍스트는 다른 창의 변경 위에 보존·재저장합니다.
 - Codex 작업 규칙은 원본을 덮어쓰지 않으며, 자막 생성 UI에서 명시적으로 허용한 선택 컷 오디오 외에는 외부 서비스에 미디어를 업로드하지 않도록 요구합니다.
-- 새 프로젝트의 기본 자막은 이전 5.2% 기준보다 약 30% 큰 화면 높이 6.75%의 배경 없는 흰색 `Pretendard ExtraBold`로 표시합니다. 기존 저장 프로젝트에서 이미 정한 크기는 그대로 유지합니다. 저장소에는 공식 Pretendard 1.3.9 WOFF2 원본과 SIL Open Font License 1.1 고지를 함께 포함합니다.
+- 새 프로젝트의 기본 `한국 버튜버 키리누키 · 클린` 스타일은 사용자의 완성본 2개에서 뽑은 190개 표본 프레임을 기준으로 측정한 화면 높이 6.75%의 배경 없는 흰색 `Pretendard ExtraBold` 800, 검정 외곽선, 하단 `y=0.84`입니다. `Paperlogy ExtraBold` 800을 쓰는 한 줄 OFL 대안도 스타일 선택에서 고를 수 있습니다. 사람이 이미 정한 기존 프로젝트 스타일은 유지됩니다.
+
+두 글꼴은 SIL Open Font License 1.1 원문과 출처를 함께 배포합니다. Pretendard는 공식 `v1.3.9` WOFF2를 고정했으며 글꼴 SHA-256은 `dd7c1e156f508eb962acc7a33a7a1896d1e0b71e11156fad96e731689ceb6dc3`, 라이선스 SHA-256은 `d31ddd9f2bed32fd7e302a205cf2380ba0de6529152d239ef99cfb6f261bfc04`입니다. Paperlogy는 공식 commit `8ef35f53b318c7ca914c52b1b382b9a8bad07a61`의 `Paperlogy-8ExtraBold.woff2`를 고정했으며 글꼴 SHA-256은 `5047db061c39ec5ed5c9d0b71c7aaad4b9547ed15ce48d1cd74090169f132bc0`, upstream 라이선스 SHA-256은 `603b2e7ef9effb9037b0b67f0530cacdc05e71a4e569032d7e4d98c2e6763135`입니다. 정확한 소스 링크, bundled license 해시와 준수 문구는 [Third-party notices](legal/THIRD_PARTY_NOTICES.md)를 기준으로 합니다.
 
 저장된 원본 권한이 만료되면 **원본 연결**을 다시 눌러 같은 파일을 선택하세요. 사이드패널의 **모든 로컬 작업 초기화**는 저장된 모든 구간·편집 프로젝트·임시저장·파일 핸들을 지우지만 디스크의 원본 영상과 이미 내보낸 파일은 삭제하지 않습니다. Extension을 제거하면 브라우저에 저장된 프로젝트와 연결 설정이 사라질 수 있습니다.
 
@@ -225,18 +231,18 @@ Codex가 프로젝트 폴더의 `AGENTS.md`를 지속 지침으로 읽는 구조
 - `storage`, `unlimitedStorage`: 선택 구간·편집 프로젝트·자막·에셋·임시저장과 endpoint·모델 설정을 로컬에 보존합니다.
 - 치지직 host 권한: LIVE/VOD 메타데이터와 플레이어 시각을 읽습니다.
 - YouTube host 권한: watch·Shorts·embed·짧은 URL의 영상 ID와 주 플레이어 시각을 읽습니다.
-- loopback host 권한: 기본 reference gateway인 `127.0.0.1` 또는 `localhost`에 연결합니다.
+- loopback host 권한: managed local companion인 `127.0.0.1` 또는 `localhost`에 연결합니다.
 - 선택적 HTTPS host 권한: 사용자가 다른 자막 에이전트 endpoint를 설정하고 연결을 실행할 때 그 정확한 origin에 대한 권한을 Chrome에서 요청합니다. 일반 `http` endpoint는 loopback만 허용합니다.
 
-편집기에 직접 입력한 세션 토큰과 API 키는 탭을 닫으면 사라지고, 저장된 프로젝트·임시저장·Chrome 저장소에는 들어가지 않습니다. 제공자 키를 직접 입력하는 경로는 인증된 loopback companion에만 허용됩니다.
+자동 session token과 편집기에 입력한 API 키는 탭을 닫으면 사라지고, 저장된 프로젝트·임시저장·Chrome 저장소에는 들어가지 않습니다. 제공자 키를 직접 입력하는 경로는 인증된 loopback companion에만 허용됩니다.
 
 ## 알려진 제한
 
 - Extension 자체는 치지직·YouTube 영상을 다운로드하거나 DRM·접근 제한을 우회하지 않습니다. YouTube의 선택적 로컬 획득 CLI도 본인이 소유하거나 다운로드·편집 권한을 받은 VOD에만 사용해야 합니다.
 - YouTube는 VOD만 지원합니다. 진행 중인 라이브, 광고 재생 시각, 임의 사이트 내부 iframe은 타임스탬프 대상으로 사용하지 않습니다.
 - 입력 컨테이너를 읽을 수 있어도 Chrome이 영상·오디오 코덱을 디코딩하지 못하면 미리보기·자막용 오디오 추출·렌더가 실패할 수 있습니다.
-- Upstage에는 이 흐름에 사용할 공개 STT가 없고 Solar Pro 3는 텍스트 모델이라 음성을 직접 전사할 수 없습니다. 자막 생성에는 호환되는 별도 외부 STT와 네트워크 연결이 필요합니다.
-- 자막 생성 시 선택 컷 오디오가 설정한 STT 제공자와 timed transcript가 Upstage로 전송됩니다. 각 제공자의 보존 정책·지역·요금·rate limit을 확인하고, 민감한 방송은 보내기 전에 동의를 검토하세요.
+- Upstage에는 이 흐름에 사용할 공개 STT가 없고 Solar는 텍스트 모델입니다. Linux 기본 경로는 로컬 whisper.cpp가 전사하며, 외부 STT는 고급 호환 경로입니다.
+- 기본 자막 생성에서 선택 컷 오디오는 이 기기의 Whisper에만 전달되고 timed transcript만 Upstage로 전송됩니다. Upstage의 보존 정책·지역·요금·rate limit을 확인하고, 민감한 방송은 보내기 전에 동의를 검토하세요.
 - 주 영상 트랙과 주 오디오 트랙만 사용합니다. 출력은 최대 1920×1080, 최대 60fps이며 VFR 입력은 컷 경계를 보존하는 CFR 출력으로 바뀝니다.
 - 이미지 에셋은 PNG·JPEG·WebP·GIF를 지원하며 GIF는 정지 프레임 에셋으로 처리합니다. 같은 시각의 에셋은 선택 가능한 하위 줄로 펼쳐지고, 내보낼 때는 현재 필요한 이미지만 순차 디코드합니다. 동시에 표시되는 이미지의 실제 RGBA 메모리 상한은 256MiB입니다. SVG와 원격 URL만 붙여넣는 방식은 지원하지 않습니다.
 - 음성은 고정 1개 레인에서 구간별 음량·뮤트·페이드만 조절합니다. 음원 분리, 다중 오디오 트랙과 플러그인 효과는 제공하지 않습니다.
@@ -276,7 +282,7 @@ npm run check:policy-links
 
 ## 검증 상태
 
-순수 프로젝트 모델에서는 방송 회차 분리, 사용자 확정 컷 변환, 시간축 매핑, v1/v2→v3 마이그레이션, 투명 이미지 에셋, 다중 자막 레인·cue별 색상, 구간별 음성 자동화, AI 재실행 시 사람 수정 보존, 컷 재정렬과 SRT 출력을 단위 테스트합니다. 자막 에이전트 테스트는 `chzzk-kirinuki-caption-*/v1` 요청·응답, 최대 4초 cue와 잘못된 응답 거부를 확인하고, reference gateway 테스트는 origin·세션 토큰 검증과 외부 STT·Solar 응답 처리를 mock으로 확인합니다. 브라우저 E2E는 이미지 붙여넣기·겹침 하위 줄·고아 Blob 정리와 재로딩, 자막·에셋 양끝의 실제 포인터 드래그, 0.12초 음소거의 정밀 미리보기 시계, 파일 연결과 IndexedDB 복구를 확인합니다. 합성 영상 E2E는 불투명·반투명·완전 투명 픽셀의 실제 WebCodecs 렌더 결과와 JSON/SRT·최종 ZIP 로드를 확인합니다.
+순수 프로젝트 모델에서는 방송 회차 분리, 사용자 확정 컷 변환, 시간축 매핑, v1/v2→v3 마이그레이션, 투명 이미지 에셋, 다중 자막 레인·cue별 색상, 구간별 음성 자동화, AI 재실행 시 사람 수정 보존, 컷 재정렬과 SRT 출력을 단위 테스트합니다. 자막 에이전트 테스트는 `chzzk-kirinuki-caption-*/v1` 요청·응답, canonical timed units, 컷당 Solar 호출 1회 상한, `kr-vtuber-clean-v1`의 한 줄·하단·폭·시간·읽기 속도·문장부호·화자색·검수 경고와 잘못된 응답 거부를 확인합니다. gateway 테스트는 origin·세션 토큰 검증과 외부 STT·Solar 응답 처리를 mock으로 확인합니다. 브라우저 E2E는 이미지 붙여넣기·겹침 하위 줄·고아 Blob 정리와 재로딩, 자막·에셋 양끝의 실제 포인터 드래그, 0.12초 음소거의 정밀 미리보기 시계, 파일 연결과 IndexedDB 복구를 확인합니다. 합성 영상 E2E는 불투명·반투명·완전 투명 픽셀의 실제 WebCodecs 렌더 결과와 JSON/SRT·최종 ZIP 로드를 확인합니다.
 
 마지막 로컬 검증 환경은 Arch Linux, Node.js 26.4.0, npm 11.18.0, Chromium/ChromeDriver 150.0.7871.46, FFmpeg/ffprobe 8.1.2입니다. 선언한 Node 20.9·Chrome 120 하한은 빌드 target과 API 기준이며 동일 버전 CI 매트릭스에서 직접 실행한 결과는 아닙니다.
 

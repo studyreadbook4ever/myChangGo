@@ -20,9 +20,11 @@ import {
   createImageAssetRenderCache,
   drawImageAsset,
   fallbackCaptionPlacementHints,
+  fitSingleLineCaptionFontSize,
   imageAssetDrawRect,
   MAX_ACTIVE_IMAGE_ASSET_RGBA_BYTES,
   normalizeMediaTimeline,
+  singleLineCaptionText,
   validateRenderTimeline,
   validateRenderClips,
   wrapCaption
@@ -257,6 +259,26 @@ test("겹치는 사람 자막과 네 줄을 넘는 텍스트를 렌더 단계에
   assert.deepEqual(
     wrapCaption(context, "하나\n둘\n셋\n넷\n다섯", 100),
     ["하나", "둘", "셋", "넷", "다섯"]
+  );
+  assert.equal(
+    singleLineCaptionText("  하나\n 둘\t셋  "),
+    "하나 둘 셋"
+  );
+  assert.equal(
+    fitSingleLineCaptionFontSize({
+      baseFontSize: 72,
+      measuredWidth: 1_800,
+      maxWidth: 1_500
+    }),
+    57
+  );
+  assert.equal(
+    fitSingleLineCaptionFontSize({
+      baseFontSize: 72,
+      measuredWidth: 1_400,
+      maxWidth: 1_500
+    }),
+    72
   );
 });
 

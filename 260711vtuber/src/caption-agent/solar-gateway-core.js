@@ -1,5 +1,6 @@
 import {
   KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT,
+  MAX_CAPTION_WARNINGS,
   SUPPORTED_SOLAR_CAPTION_MODELS,
   UPSTAGE_CAPTION_JSON_SCHEMA,
   CaptionProtocolError,
@@ -7,17 +8,25 @@ import {
   normalizeCaptionCuesDetailed,
   validateCaptionAgentRequest
 } from "./protocol.js";
+import {
+  CAPTION_QUALITY_PROFILE_ID,
+  canonicalTimedTranscript,
+  repairCaptionDraft
+} from "./caption-quality-harness.js";
 
 export const UPSTAGE_CHAT_COMPLETIONS_URL =
   "https://api.upstage.ai/v1/chat/completions";
 export const DEFAULT_SOLAR_MODEL = "solar-pro3";
 export const DEFAULT_TRANSCRIPTION_MODE = "external-timed-stt";
+export const LOCAL_WHISPERCPP_TRANSCRIPTION_MODE = "local-whispercpp";
 export const DEFAULT_STT_MODEL = "whisper-1";
 export const DEFAULT_MAX_AUDIO_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_SOLAR_MAX_TOKENS = 16_384;
 export const SOLAR_PRO3_HIGH_REASONING_MIN_TOKENS = 16_384;
-export const DEFAULT_PIPELINE_TIMEOUT_MS = 15 * 60 * 1_000;
-export const MAX_PIPELINE_TIMEOUT_MS = 20 * 60 * 1_000;
+export const MAX_SOLAR_CALLS_PER_CLIP = 1;
+export const DEFAULT_PIPELINE_TIMEOUT_MS = 45 * 60 * 1_000;
+export const MAX_PIPELINE_TIMEOUT_MS = 60 * 60 * 1_000;
+export const DEFAULT_STT_TIMEOUT_MS = DEFAULT_PIPELINE_TIMEOUT_MS;
 export const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024 * 1024;
 export const MAX_STT_SEGMENTS = 10_000;
 export const MAX_STT_WORDS = 50_000;
@@ -25,6 +34,33 @@ export const MAX_SOLAR_PROMPT_BYTES = 2 * 1024 * 1024;
 export const MAX_PROVIDER_API_KEY_LENGTH = 4_096;
 export const MAX_STT_ENDPOINT_LENGTH = 2_048;
 export const MAX_STT_MODEL_LENGTH = 160;
+
+function boundedCaptionWarnings(...groups) {
+  const warnings = [];
+  const seen = new Set();
+  let truncated = false;
+  for (const warning of groups.flat()) {
+    const code = String(warning?.code || "").trim().slice(0, 128);
+    const cueIndex = Number(warning?.cueIndex);
+    if (!code || !Number.isInteger(cueIndex) || cueIndex < 0) {
+      continue;
+    }
+    const key = `${code}\u0000${cueIndex}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    if (warnings.length >= MAX_CAPTION_WARNINGS - 1) {
+      truncated = true;
+      break;
+    }
+    warnings.push({ code, cueIndex });
+  }
+  if (truncated) {
+    warnings.push({ code: "TRIMMED_WARNING_COUNT", cueIndex: 0 });
+  }
+  return warnings;
+}
 
 export class CaptionGatewayError extends Error {
   constructor(message, {
@@ -56,6 +92,34 @@ function requiredConfigurationValue(value, name, {
 
 function isLoopbackHostname(hostname) {
   return hostname === "127.0.0.1" || hostname === "localhost";
+}
+
+function isLoopbackEndpoint(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeTranscriptionMode(value, { httpStatus = 500 } = {}) {
+  const normalized = String(
+    value || DEFAULT_TRANSCRIPTION_MODE
+  ).trim() || DEFAULT_TRANSCRIPTION_MODE;
+  if (![
+    DEFAULT_TRANSCRIPTION_MODE,
+    LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+  ].includes(normalized)) {
+    throw new CaptionGatewayError(
+      "STT 모드는 external-timed-stt 또는 local-whispercpp여야 합니다.",
+      {
+        code: "UNSUPPORTED_TRANSCRIPTION_MODE",
+        httpStatus
+      }
+    );
+  }
+  return normalized;
 }
 
 function externalEndpoint(value, name, {
@@ -173,7 +237,18 @@ export function resolveCaptionPipelineConfig(
     required: !allowMissingProviderConfig,
     httpStatus: 500
   };
+  const transcriptionMode = normalizeTranscriptionMode(
+    env.KIRINUKI_STT_MODE
+  );
+  const sttKeyOptions = {
+    required: (
+      transcriptionMode !== LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+      && !allowMissingProviderConfig
+    ),
+    httpStatus: 500
+  };
   return {
+    transcriptionMode,
     sttEndpoint: externalEndpoint(
       env.KIRINUKI_STT_ENDPOINT,
       "KIRINUKI_STT_ENDPOINT",
@@ -182,7 +257,7 @@ export function resolveCaptionPipelineConfig(
     sttApiKey: providerApiKey(
       env.KIRINUKI_STT_API_KEY,
       "KIRINUKI_STT_API_KEY",
-      providerOptions
+      sttKeyOptions
     ),
     sttModel: sttModelName(env.KIRINUKI_STT_MODEL),
     upstageApiKey: providerApiKey(
@@ -238,10 +313,19 @@ export function resolveCaptionPipelineRequestConfig(
     "STT API 키",
     optionalRequestOptions
   );
+  const requestedTranscriptionMode = normalizeTranscriptionMode(
+    baseConfig.transcriptionMode,
+    { httpStatus: 400 }
+  );
+  const localWhisperMode = (
+    requestedTranscriptionMode === LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+    && isLoopbackEndpoint(sttEndpoint)
+  );
   if (
     overrideSttEndpoint
     && sttEndpoint !== baseSttEndpoint
     && !overrideSttApiKey
+    && !localWhisperMode
   ) {
     throw new CaptionGatewayError(
       "STT API 주소를 바꾸려면 같은 요청의 STT API 키도 함께 입력해야 합니다.",
@@ -256,9 +340,9 @@ export function resolveCaptionPipelineRequestConfig(
     "STT API 키",
     optionalRequestOptions
   );
-  if (!sttEndpoint || !sttApiKey) {
+  if (!sttEndpoint || (!localWhisperMode && !sttApiKey)) {
     throw new CaptionGatewayError(
-      "Solar Chat은 음성을 직접 전사하지 않습니다. 시간 정보가 있는 외부 STT API 주소와 키가 필요합니다.",
+      "Solar Chat은 음성을 직접 전사하지 않습니다. 로컬 Whisper 또는 시간 정보가 있는 외부 STT API 주소와 키가 필요합니다.",
       {
         code: "TIMED_STT_REQUIRED",
         httpStatus: 400
@@ -267,6 +351,9 @@ export function resolveCaptionPipelineRequestConfig(
   }
   return {
     ...baseConfig,
+    transcriptionMode: localWhisperMode
+      ? LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+      : DEFAULT_TRANSCRIPTION_MODE,
     sttEndpoint,
     sttApiKey,
     sttModel: sttModelName(
@@ -601,7 +688,8 @@ export async function requestExternalStt(request, {
   sttModel = DEFAULT_STT_MODEL,
   maxAudioBytes = DEFAULT_MAX_AUDIO_BYTES,
   wavBytes,
-  signal
+  signal,
+  timeoutMs = DEFAULT_STT_TIMEOUT_MS
 }) {
   if (typeof fetchImpl !== "function") {
     throw new CaptionGatewayError("fetch 구현이 없습니다.", {
@@ -620,16 +708,44 @@ export async function requestExternalStt(request, {
   form.append("timestamp_granularities[]", "segment");
   form.append("timestamp_granularities[]", "word");
 
-  const response = await externalFetch(fetchImpl, sttEndpoint, {
-    method: "POST",
-    redirect: "error",
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${sttApiKey}`
-    },
-    body: form,
-    signal: requestSignal(signal, 10 * 60 * 1_000)
-  }, "stt");
+  const requestedTimeoutMs = Number(timeoutMs);
+  const sttTimeoutMs = (
+    Number.isFinite(requestedTimeoutMs)
+    && requestedTimeoutMs >= 1
+  )
+    ? Math.min(MAX_PIPELINE_TIMEOUT_MS, Math.floor(requestedTimeoutMs))
+    : DEFAULT_STT_TIMEOUT_MS;
+  const sttSignal = requestSignal(signal, sttTimeoutMs);
+  let response;
+  try {
+    response = await externalFetch(fetchImpl, sttEndpoint, {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        accept: "application/json",
+        ...(sttApiKey
+          ? { authorization: `Bearer ${sttApiKey}` }
+          : {})
+      },
+      body: form,
+      signal: sttSignal
+    }, "stt");
+  } catch (error) {
+    if (
+      !signal?.aborted
+      && sttSignal.aborted
+      && sttSignal.reason?.name === "TimeoutError"
+    ) {
+      throw new CaptionGatewayError(
+        "음성 전사 제한 시간을 초과했습니다.",
+        {
+          code: "STT_TIMEOUT",
+          httpStatus: 504
+        }
+      );
+    }
+    throw error;
+  }
   const payload = await responsePayload(response, { serviceName: "외부 STT" });
   if (!response.ok || !payload.json) {
     throw new CaptionGatewayError("외부 STT 요청이 실패했습니다.", {
@@ -643,8 +759,20 @@ export async function requestExternalStt(request, {
 }
 
 export function buildSolarCaptionUserPrompt(request, transcript) {
+  const canonical = Array.isArray(transcript?.units)
+    ? transcript
+    : canonicalTimedTranscript(transcript, {
+      clipDurationMs: request.clipDurationMs
+    });
   const prompt = JSON.stringify({
-    instruction: "STT 근거를 키리누키 자막 cue JSON으로 다듬어 주세요.",
+    instruction: [
+      "timedUnits만 근거로 발화의 맞춤법·말맛·화자를 정리해",
+      "한국 VTuber 키리누키용 cue JSON을 만드세요.",
+      "본문은 하단 고정 한 줄이며 한 cue가 한글 폭 약 20자를 넘지 않게",
+      "의미·호흡·질문·반응 경계에서 다음 시간 cue로 나누세요.",
+      "시각 스타일은 로컬 품질 하네스가 결정하므로 꾸밈 지시를 만들지 마세요."
+    ].join(" "),
+    qualityProfile: CAPTION_QUALITY_PROFILE_ID,
     clipDurationMs: request.clipDurationMs,
     context: {
       projectName: request.projectName,
@@ -652,7 +780,7 @@ export function buildSolarCaptionUserPrompt(request, transcript) {
       clipNote: request.clipNote
     },
     visualPlacement: request.visualPlacement,
-    transcript
+    timedUnits: canonical.units
   });
   if (Buffer.byteLength(prompt) > MAX_SOLAR_PROMPT_BYTES) {
     throw new CaptionGatewayError("Solar 자막 프롬프트가 허용 상한을 넘었습니다.", {
@@ -673,6 +801,18 @@ function responseFormatForAttempt(attempt) {
     return { type: "json_object" };
   }
   return null;
+}
+
+function orderedResponseFormatAttempts(cache, model) {
+  const supported = ["json_schema", "json_object", "plain"];
+  const cached = cache?.get?.(model);
+  if (!supported.includes(cached)) {
+    return supported;
+  }
+  return [
+    cached,
+    ...supported.filter((attempt) => attempt !== cached)
+  ];
 }
 
 function messageContent(payload) {
@@ -731,10 +871,14 @@ export async function requestSolarCaptions(request, transcript, {
   upstageApiKey,
   solarModel = DEFAULT_SOLAR_MODEL,
   solarMaxTokens = DEFAULT_SOLAR_MAX_TOKENS,
+  responseFormatCache,
   signal
 }) {
   const selectedModel = normalizeSolarCaptionModel(solarModel, {
     httpStatus: 400
+  });
+  const canonicalTranscript = canonicalTimedTranscript(transcript, {
+    clipDurationMs: request.clipDurationMs
   });
   const apiKey = providerApiKey(
     upstageApiKey,
@@ -743,9 +887,15 @@ export async function requestSolarCaptions(request, transcript, {
   );
   const messages = [
     { role: "system", content: KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT },
-    { role: "user", content: buildSolarCaptionUserPrompt(request, transcript) }
+    {
+      role: "user",
+      content: buildSolarCaptionUserPrompt(request, canonicalTranscript)
+    }
   ];
-  const attempts = ["json_schema", "json_object", "plain"];
+  const attempts = orderedResponseFormatAttempts(
+    responseFormatCache,
+    selectedModel
+  ).slice(0, MAX_SOLAR_CALLS_PER_CLIP);
   const effectiveMaxTokens = selectedModel === "solar-pro3"
     ? Math.max(SOLAR_PRO3_HIGH_REASONING_MIN_TOKENS, solarMaxTokens)
     : solarMaxTokens;
@@ -781,6 +931,15 @@ export async function requestSolarCaptions(request, transcript, {
       ) {
         continue;
       }
+      if (unsupportedResponseFormat(response.status, payload.text)) {
+        throw new CaptionGatewayError(
+          "이 Solar 모델이 요청한 JSON 형식을 지원하지 않습니다. 유료 자동 재호출은 하지 않았습니다.",
+          {
+            code: "SOLAR_RESPONSE_FORMAT_UNSUPPORTED",
+            httpStatus: 502
+          }
+        );
+      }
       throw new CaptionGatewayError("Upstage Solar 요청이 실패했습니다.", {
         code: "SOLAR_REQUEST_FAILED",
         httpStatus: 502
@@ -806,17 +965,38 @@ export async function requestSolarCaptions(request, transcript, {
       const normalized = normalizeCaptionCuesDetailed(rawCues, {
         clipDurationMs: request.clipDurationMs
       });
+      const repaired = repairCaptionDraft(normalized.cues, {
+        clipDurationMs: request.clipDurationMs,
+        transcript: canonicalTranscript,
+        visualPlacement: request.visualPlacement
+      });
+      const finalized = normalizeCaptionCuesDetailed(repaired.cues, {
+        clipDurationMs: request.clipDurationMs
+      });
       if (
         transcriptHasRecognizableContent(transcript)
-        && normalized.cues.length === 0
+        && finalized.cues.length === 0
       ) {
         throw new CaptionGatewayError(
           "Solar가 인식된 발화에 대한 자막 cue를 반환하지 않았습니다.",
           { code: "EMPTY_SOLAR_CAPTIONS" }
         );
       }
+      responseFormatCache?.set?.(selectedModel, attempt);
       return {
-        ...normalized,
+        cues: finalized.cues,
+        warnings: boundedCaptionWarnings(
+          canonicalTranscript.warnings,
+          normalized.warnings,
+          repaired.warnings,
+          finalized.warnings,
+          repaired.report.violations.map(({ code, cueIndex }) => ({
+            code,
+            cueIndex
+          }))
+        ),
+        qualityProfile: repaired.profileId,
+        qualityReport: repaired.report,
         resolvedModel: String(payload.json.model || selectedModel)
       };
     } catch (error) {
@@ -882,7 +1062,8 @@ export async function runCaptionPipeline(rawRequest, {
       sttModel: config.sttModel,
       maxAudioBytes: config.maxAudioBytes,
       wavBytes,
-      signal: pipelineSignal
+      signal: pipelineSignal,
+      timeoutMs: deadlineMs
     });
     const transcript = normalizeSttTranscript(transcriptPayload, {
       clipDurationMs: request.clipDurationMs
@@ -904,6 +1085,7 @@ export async function runCaptionPipeline(rawRequest, {
       fetchImpl,
       ...config,
       solarModel: captionModel,
+      responseFormatCache: config.solarResponseFormatCache,
       signal: pipelineSignal
     });
     return createCaptionAgentResponse({

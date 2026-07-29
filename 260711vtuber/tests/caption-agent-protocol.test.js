@@ -354,6 +354,28 @@ test("[불명확] 자막은 Solar가 false를 반환해도 사람 검수를 강�
   assert.equal(result.cues[0].reviewRequired, true);
 });
 
+test("Solar의 0.1초 미만 cue는 클립 경계 안에서 안전하게 늘린다", () => {
+  const result = normalizeCaptionCuesDetailed([{
+    startMs: 9_950,
+    endMs: 10_000,
+    text: "어",
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom"
+  }], {
+    clipDurationMs: 10_000
+  });
+  assert.deepEqual(
+    [result.cues[0].startMs, result.cues[0].endMs],
+    [9_900, 10_000]
+  );
+  assert(
+    result.warnings.some(
+      (warning) => warning.code === "EXPANDED_SHORT_CUE"
+    )
+  );
+});
+
 test("Solar 원시 cue와 응답 warning 개수 상한을 처리 전에 강제한다", () => {
   assert.throws(
     () => normalizeCaptionCuesDetailed(

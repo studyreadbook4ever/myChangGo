@@ -298,6 +298,34 @@ async function clickElement(selector) {
   return element;
 }
 
+async function clickAndAcceptSolarConfirmation(
+  selector,
+  expectedRequestCount
+) {
+  try {
+    await clickElement(selector);
+  } catch (error) {
+    if (!/unexpected alert open/i.test(String(error?.message || error))) {
+      throw error;
+    }
+  }
+  const confirmationText = await webdriver(
+    "GET",
+    `/session/${sessionId}/alert/text`
+  );
+  assert(
+    confirmationText.includes(
+      `Solar Pro 3 요청 ${expectedRequestCount}회 · 컷당 1회`
+    ) &&
+      confirmationText.includes(
+        `로컬 품질 보정 추가 Solar 호출 0회 · 최대 ${expectedRequestCount}회`
+      ),
+    `Solar 1회/clip 비용 계약 안내가 다릅니다: ${confirmationText}`
+  );
+  await webdriver("POST", `/session/${sessionId}/alert/accept`);
+  return confirmationText;
+}
+
 async function pressKey(value) {
   try {
     await webdriver("POST", `/session/${sessionId}/actions`, {
@@ -1046,11 +1074,21 @@ async function main() {
     const button = document.querySelector("#generate-captions");
     globalThis.__kirinukiE2eOriginalFetch = globalThis.fetch;
     globalThis.__kirinukiE2eCaptionFetch = {
+      probes: 0,
       requests: 0,
       aborted: 0
     };
     globalThis.fetch = (input, init = {}) => {
       if (String(input).startsWith("http://127.0.0.1:4319/")) {
+        if (String(init.method || "GET").toUpperCase() === "GET") {
+          globalThis.__kirinukiE2eCaptionFetch.probes += 1;
+          return Promise.resolve(new Response(JSON.stringify({
+            status: "ok"
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }));
+        }
         globalThis.__kirinukiE2eCaptionFetch.requests += 1;
         return new Promise((_resolve, reject) => {
           const abort = () => {
@@ -1104,7 +1142,8 @@ async function main() {
   let aiDialogCanceled = null;
   let aiFetchProbe = null;
   try {
-    await clickElement("#generate-captions");
+    await clickAndAcceptSolarConfirmation("#generate-captions", 2);
+
     aiDialogOpened = await waitUntil(async () => {
       const state = await executeSync(`
         const dialog = document.querySelector("#job-dialog");
@@ -1203,7 +1242,9 @@ async function main() {
     `).catch(() => null);
   }
   assert(
-    aiFetchProbe?.requests === 1 && aiFetchProbe?.aborted === 1,
+    aiFetchProbe?.probes === 1 &&
+      aiFetchProbe?.requests === 1 &&
+      aiFetchProbe?.aborted === 1,
     `외부 자막 요청 취소 계약이 지켜지지 않았습니다: ${JSON.stringify(aiFetchProbe)}`
   );
 
@@ -1217,6 +1258,7 @@ async function main() {
     const endpointPrefix = "http://127.0.0.1:4319/";
     globalThis.__kirinukiE2eAiSuccessOriginalFetch = globalThis.fetch;
     globalThis.__kirinukiE2eAiSuccessFetch = {
+      probes: 0,
       requests: [],
       unexpected: []
     };
@@ -1230,10 +1272,20 @@ async function main() {
         return globalThis.__kirinukiE2eAiSuccessOriginalFetch(input, init);
       }
       const trace = globalThis.__kirinukiE2eAiSuccessFetch;
-      if (String(init.method || "GET").toUpperCase() !== "POST") {
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "GET") {
+        trace.probes += 1;
+        return new Response(JSON.stringify({
+          status: "ok"
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      if (method !== "POST") {
         trace.unexpected.push({
           url: String(input),
-          method: String(init.method || "GET").toUpperCase()
+          method
         });
         return new Response(JSON.stringify({ error: "unexpected method" }), {
           status: 405,
@@ -1316,7 +1368,7 @@ async function main() {
   let aiSuccessFetch = null;
   let aiSuccessRestored = null;
   try {
-    await clickElement("#generate-captions");
+    await clickAndAcceptSolarConfirmation("#generate-captions", 2);
     aiSuccessProject = await waitForStoredProject(
       (candidate) => (
         candidate.ai?.status === "done" &&

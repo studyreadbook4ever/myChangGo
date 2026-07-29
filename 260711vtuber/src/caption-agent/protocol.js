@@ -8,6 +8,7 @@ export const SUPPORTED_SOLAR_CAPTION_MODELS = Object.freeze([
 ]);
 
 export const MAX_CAPTION_CUE_DURATION_MS = 4_000;
+export const MIN_CAPTION_CUE_DURATION_MS = 100;
 export const MAX_CAPTION_CUES = 4_000;
 export const MAX_CAPTION_WARNINGS = 4_000;
 export const MAX_CLIP_DURATION_MS = 30 * 60 * 1_000;
@@ -291,14 +292,15 @@ export const KOREAN_VTUBER_SOLAR_SYSTEM_PROMPT = `
 1. 발화 내용과 발화 시각은 제공된 외부 STT만 근거로 삼고, 영상에 없던 말이나 화자의 신원을 지어내지 않는다. 화면 위치는 픽셀이 아닌 visualPlacement의 로컬 분석 점수만 근거로 삼는다.
 2. 말로 인식되는 부분은 가능한 한 전부 자막으로 만든다. 알아듣기 어려운 곳도 들리는 조각은 보존하고, 완전히 판독할 수 없으면 [불명확]으로 표시한다.
 3. 일반적인 한국어 유튜브 키리누키처럼 짧고 한눈에 읽히게 다듬되, 말투·감탄·웃음·질문 의도와 VTuber의 캐릭터성은 함부로 평문화하지 않는다.
-4. 자막 하나는 절대로 4초를 넘기지 않는다. 긴 발화는 의미·호흡·반응이 자연스럽게 끊기는 지점에서 여러 자막으로 나눈다.
-5. 발화가 시작되는 자연스러운 순간에 자막을 열고 의미 단위가 끝나는 순간에 닫는다. 서로 무관한 말을 한 자막에 합치지 않는다.
-6. 문장 끝의 마침표(.)·온점(。)은 쓰지 않는다. 물음표(?)와 느낌표(!)는 말의 의도에 맞으면 보존한다.
-7. 화자가 구분되면 같은 화자에는 일관된 speakerId 값을 쓴다. 실명을 확신하지 못하면 main, speaker-2 같은 중립 표식을 쓴다.
-8. 모든 startMs와 endMs는 클립 시작을 0으로 한 정수 밀리초다. 0 <= startMs < endMs <= clipDurationMs를 지킨다.
-9. 불확실하거나 [불명확] 표식이 필요한 자막은 reviewRequired를 true로 한다.
-10. visualPlacement.samples는 브라우저가 대표 프레임을 로컬 분석한 시각별 방해도 점수다. cue 시각에 가장 가까운 표본에서 점수가 낮은 top, center, bottom을 우선하되 화자·반응 흐름도 함께 고려해 placement를 고른다. 프레임 자체는 공유되지 않았으므로 점수가 비슷해 확신할 근거가 없으면 bottom을 쓴다.
-11. 설명, 마크다운, 코드 펜스를 붙이지 말고 요청된 JSON 객체만 반환한다.
+4. 본문 자막은 한 줄을 원칙으로 하고 한글 폭 약 20자를 넘기지 않는다. 길면 줄바꿈하지 말고 의미·호흡·질문·반응이 자연스럽게 끊기는 지점에서 다음 시간 자막으로 나눈다.
+5. 자막 하나는 절대로 4초를 넘기지 않는다. 일반 발화는 약 0.65~3초 안에서 읽히게 하고, 초당 읽기량이 지나치게 높지 않게 나눈다.
+6. 발화가 시작되는 자연스러운 순간에 자막을 열고 의미 단위가 끝나는 순간에 닫는다. 서로 무관한 말을 한 자막에 합치지 않는다.
+7. 문장 끝의 마침표(.)·온점(。)은 쓰지 않는다. 물음표(?)와 느낌표(!)는 말의 의도에 맞으면 보존한다.
+8. 화자가 구분되면 같은 화자에는 일관된 speakerId 값을 쓴다. 실명을 확신하지 못하면 main, speaker-2 같은 중립 표식을 쓴다.
+9. 모든 startMs와 endMs는 클립 시작을 0으로 한 정수 밀리초다. 0 <= startMs < endMs <= clipDurationMs를 지킨다.
+10. 불확실하거나 [불명확] 표식이 필요한 자막은 reviewRequired를 true로 한다.
+11. 자동 본문 자막의 placement는 bottom을 쓴다. top과 center는 사람이 만드는 강조·보조 자막을 위해 남겨 둔다.
+12. 설명, 마크다운, 코드 펜스를 붙이지 말고 요청된 JSON 객체만 반환한다.
 `.trim();
 
 export class CaptionProtocolError extends Error {
@@ -713,11 +715,22 @@ export function normalizeCaptionCuesDetailed(rawCues, { clipDurationMs } = {}) {
       appendWarning({ code: "DROPPED_INVALID_CUE", cueIndex });
       continue;
     }
-    const startMs = Math.max(0, Math.min(duration, rawStart));
-    const endMs = Math.max(0, Math.min(duration, rawEnd));
+    let startMs = Math.max(0, Math.min(duration, rawStart));
+    let endMs = Math.max(0, Math.min(duration, rawEnd));
     if (endMs <= startMs) {
       appendWarning({ code: "DROPPED_EMPTY_RANGE", cueIndex });
       continue;
+    }
+    if (
+      endMs - startMs < MIN_CAPTION_CUE_DURATION_MS
+      && duration >= MIN_CAPTION_CUE_DURATION_MS
+    ) {
+      startMs = Math.min(startMs, duration - MIN_CAPTION_CUE_DURATION_MS);
+      endMs = Math.max(
+        endMs,
+        Math.min(duration, startMs + MIN_CAPTION_CUE_DURATION_MS)
+      );
+      appendWarning({ code: "EXPANDED_SHORT_CUE", cueIndex });
     }
 
     const boundedText = text.slice(0, 300).trim();

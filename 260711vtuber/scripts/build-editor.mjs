@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
+import { PAPERLOGY_FONT } from "./paperlogy-font.mjs";
 import { PRETENDARD_FONT } from "./pretendard-font.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -17,20 +18,22 @@ await mkdir(outputRoot, { recursive: true });
 await mkdir(fontRoot, { recursive: true });
 await mkdir(licenseRoot, { recursive: true });
 
-async function assertSha256(relativePath, expectedSha256) {
+async function assertSha256(relativePath, expectedSha256, label) {
   const file = await readFile(path.join(root, relativePath));
   const actualSha256 = createHash("sha256").update(file).digest("hex");
   if (actualSha256 !== expectedSha256) {
     throw new Error(
-      `Pretendard 원본 무결성 검증 실패: ${relativePath}\n` +
+      `${label} 원본 무결성 검증 실패: ${relativePath}\n` +
       `expected=${expectedSha256}\nactual=${actualSha256}`
     );
   }
 }
 
 await Promise.all([
-  assertSha256(PRETENDARD_FONT.sourceFontPath, PRETENDARD_FONT.fontSha256),
-  assertSha256(PRETENDARD_FONT.sourceLicensePath, PRETENDARD_FONT.licenseSha256)
+  assertSha256(PRETENDARD_FONT.sourceFontPath, PRETENDARD_FONT.fontSha256, "Pretendard"),
+  assertSha256(PRETENDARD_FONT.sourceLicensePath, PRETENDARD_FONT.licenseSha256, "Pretendard"),
+  assertSha256(PAPERLOGY_FONT.sourceFontPath, PAPERLOGY_FONT.fontSha256, "Paperlogy"),
+  assertSha256(PAPERLOGY_FONT.sourceLicensePath, PAPERLOGY_FONT.licenseSha256, "Paperlogy")
 ]);
 
 const shared = {
@@ -74,10 +77,19 @@ await Promise.all([
   copyFile(
     path.join(root, PRETENDARD_FONT.sourceLicensePath),
     path.join(extensionRoot, PRETENDARD_FONT.extensionLicensePath)
+  ),
+  copyFile(
+    path.join(root, PAPERLOGY_FONT.sourceFontPath),
+    path.join(extensionRoot, PAPERLOGY_FONT.extensionFontPath)
+  ),
+  copyFile(
+    path.join(root, PAPERLOGY_FONT.sourceLicensePath),
+    path.join(extensionRoot, PAPERLOGY_FONT.extensionLicensePath)
   )
 ]);
 
 console.log(
-  `Editor/content bridge bundles and Pretendard ${PRETENDARD_FONT.version} ` +
+  `Editor/content bridge bundles, Pretendard ${PRETENDARD_FONT.version}, ` +
+  `and Paperlogy ${PAPERLOGY_FONT.version} ` +
   `written to ${path.relative(root, extensionRoot)}`
 );

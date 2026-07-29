@@ -6,6 +6,14 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "Paperlogy";
+  src: url("fonts/Paperlogy-8ExtraBold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
   --bg: #090b0f;
@@ -1399,6 +1407,31 @@ svg {
   border-color: rgba(154, 134, 255, 0.24);
   color: #c9c1ef;
   white-space: nowrap;
+}
+
+.caption-local-status {
+  margin: 8px 1px 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(120, 216, 184, 0.2);
+  border-radius: 6px;
+  color: #a9cfc2;
+  background: rgba(63, 155, 125, 0.08);
+  font-size: 7.5px;
+  line-height: 1.45;
+}
+
+.caption-local-status[data-state="connecting"],
+.caption-local-status[data-state="waiting"] {
+  border-color: rgba(225, 193, 107, 0.26);
+  color: #ddc986;
+  background: rgba(190, 145, 37, 0.08);
+}
+
+.caption-local-status[data-state="offline"],
+.caption-local-status[data-state="error"] {
+  border-color: rgba(232, 111, 124, 0.25);
+  color: #e0a1aa;
+  background: rgba(183, 63, 78, 0.08);
 }
 
 .caption-agent-row {

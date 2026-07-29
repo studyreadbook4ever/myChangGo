@@ -3,6 +3,7 @@ import {
   MAX_SUBTITLE_LANES,
   addSubtitleLane,
   appendAiSubtitleDrafts,
+  applyCaptionStylePreset,
   applyMediaAlignmentOffset,
   audioRegionAtTimeline,
   audioRegionTimelineRange,
@@ -38,14 +39,22 @@ import {
   updateImageAsset,
   updateSubtitleCue
 } from "../../extension/lib/editor-core.js";
+import {
+  DEFAULT_CAPTION_STYLE_PRESET_ID,
+  captionSpeakerColor,
+  captionSpeakerColorAssignments,
+  captionStylePreset
+} from "../../extension/lib/caption-style.js";
 import { STORAGE_KEY } from "../../extension/lib/core.js";
 import {
   extractClipCaptionPlacementHints,
   extractClipPcm16k,
   fallbackCaptionPlacementHints,
+  fitSingleLineCaptionFontSize,
   getPreferredOutputProfile,
   inspectMediaFile,
-  renderProjectVideo
+  renderProjectVideo,
+  singleLineCaptionText
 } from "./media-engine.js";
 import {
   deleteMediaHandle,
@@ -66,21 +75,45 @@ import {
   MAX_CAPTION_AGENT_CLIPS_PER_RUN,
   MAX_CAPTION_AGENT_CUES_PER_RUN,
   captionAgentAudioFootprint,
+  captionAgentResumePlan,
+  captionAgentRunEstimate,
+  createCaptionAgentCheckpoint,
   createCaptionAgentRequest,
+  discardCaptionAgentCheckpointsForClips,
   encodePcm16WavBase64,
   ensureCaptionAgentPermission,
+  ensureCaptionAgentSession,
+  isLoopbackCaptionAgentEndpoint,
   loadCaptionAgentSettings,
   normalizeCaptionAgentCues,
   normalizeCaptionAgentEndpoint,
   probeCaptionAgent,
-  requestCaptionAgent,
-  saveCaptionAgentSettings
+  requestCaptionAgentWithSessionRetry,
+  sameCaptionMediaIdentity,
+  saveCaptionAgentSettings,
+  upsertCaptionAgentCheckpoint
 } from "./caption-agent.js";
 import {
   nextEnabledPreviewClip,
   preparedPreviewMatches,
   previewReachedClipBoundary
 } from "./preview-transition.js";
+
+const CAPTION_REVIEW_WARNING_CODES = new Set([
+  "NO_RECOGNIZABLE_SPEECH",
+  "DROPPED_INVALID_CUE",
+  "DROPPED_EMPTY_RANGE",
+  "TRIMMED_CUE_COUNT",
+  "TRIMMED_WARNING_COUNT",
+  "HARNESS_READING_RATE_EXCEEDED",
+  "HARNESS_TRANSCRIPT_COVERAGE_LOW",
+  "HARNESS_TRANSCRIPT_PRECISION_LOW",
+  "HARNESS_SHORT_CUE_UNRESOLVED",
+  "HARNESS_UNRESOLVED_SAME_SPEAKER_OVERLAP",
+  "HARNESS_CUE_TEXT_TOO_WIDE",
+  "HARNESS_LINE_TOO_WIDE",
+  "HARNESS_TOO_MANY_LINES"
+]);
 
 const elements = Object.fromEntries([
   "project-name",
@@ -137,7 +170,9 @@ const elements = Object.fromEntries([
   "caption-stt-api-key",
   "caption-upstage-api-key",
   "clear-caption-provider-keys",
+  "caption-style-preset",
   "caption-model",
+  "caption-local-status",
   "caption-advanced-settings",
   "test-caption-agent",
   "caption-agent-warning",
@@ -1030,6 +1065,12 @@ function renderHeader() {
   ) {
     elements.caption_model.value = project.ai.model;
   }
+  if (document.activeElement !== elements.caption_style_preset) {
+    elements.caption_style_preset.value = (
+      project.subtitleDefaults?.stylePresetId
+      || DEFAULT_CAPTION_STYLE_PRESET_ID
+    );
+  }
   const warnings = Array.isArray(project.ai?.warnings)
     ? project.ai.warnings.filter((warning) => (
       warning &&
@@ -1044,10 +1085,25 @@ function renderHeader() {
       LOCAL_VISUAL_ANALYSIS_FAILED: "화면 위치 분석 실패·하단 기본값 사용",
       DROPPED_INVALID_CUE: "유효하지 않은 자막 제외",
       DROPPED_EMPTY_RANGE: "빈 시간 자막 제외",
+      EXPANDED_SHORT_CUE: "0.1초 미만 자막 자동 보정",
       TRIMMED_LONG_TEXT: "긴 텍스트 축약",
       SPLIT_LONG_CUE: "4초 이하로 자동 분할",
       TRIMMED_WARNING_COUNT: "추가 처리 경고 생략",
-      TRIMMED_CUE_COUNT: "자막 개수 상한으로 일부 제외"
+      TRIMMED_CUE_COUNT: "자막 개수 상한으로 일부 제외",
+      HARNESS_NORMALIZED_CUE_TEXT: "공백·종결 마침표 정리",
+      HARNESS_SPLIT_CUE: "한 줄 길이·읽기속도 기준 시간 분할",
+      HARNESS_EXPANDED_CUE_RANGE: "읽을 시간 확보",
+      HARNESS_EXPANDED_SHORT_CUE: "짧은 자막 표시시간 확보",
+      HARNESS_STABILIZED_PLACEMENT: "완성본 기준 하단 고정",
+      HARNESS_REPAIRED_SAME_SPEAKER_OVERLAP: "같은 화자 겹침 보정",
+      HARNESS_READING_RATE_EXCEEDED: "읽기속도 재검수 필요",
+      HARNESS_TRANSCRIPT_COVERAGE_LOW: "STT 대비 발화 누락 가능성",
+      HARNESS_TRANSCRIPT_PRECISION_LOW: "STT에 없는 문구 가능성",
+      HARNESS_SHORT_CUE_UNRESOLVED: "너무 짧은 자막 재검수 필요",
+      HARNESS_UNRESOLVED_SAME_SPEAKER_OVERLAP: "같은 화자 겹침 재검수 필요",
+      HARNESS_CUE_TEXT_TOO_WIDE: "한 줄 폭 재검수 필요",
+      HARNESS_LINE_TOO_WIDE: "한 줄 폭 재검수 필요",
+      HARNESS_TOO_MANY_LINES: "여러 줄 자막 재검수 필요"
     };
     const counts = new Map();
     for (const warning of warnings) {
@@ -1057,9 +1113,12 @@ function renderHeader() {
     const summary = [...counts.entries()]
       .map(([label, count]) => `${label} ${count}건`)
       .join(" · ");
-    elements.caption_agent_warning.textContent = (
-      `AI 처리 경고 ${warnings.length}건 · ${summary}. 누락 가능성이 있으니 해당 컷 원음을 확인해 주세요.`
-    );
+    const reviewCount = warnings.filter(
+      (warning) => CAPTION_REVIEW_WARNING_CODES.has(warning.code)
+    ).length;
+    elements.caption_agent_warning.textContent = reviewCount > 0
+      ? `품질 검수 필요 ${reviewCount}건 · ${summary}. 표시된 컷 원음을 확인해 주세요.`
+      : `키리누키 품질 하네스 자동 정리 ${warnings.length}건 · ${summary}`;
   } else {
     elements.caption_agent_warning.textContent = "";
   }
@@ -2527,18 +2586,61 @@ function renderSubtitleOverlay() {
     overlay.dataset.cueId = cue.id;
     overlay.setAttribute("aria-label", `${cue.lane + 1}번 레인 자막: ${cue.text || "빈 자막"}`);
     const text = document.createElement("span");
-    text.textContent = cue.text || " ";
+    const maximumLines = Math.max(
+      1,
+      Math.min(2, Math.round(Number(project.subtitleDefaults.maxLines) || 1))
+    );
+    const displayText = maximumLines === 1
+      ? singleLineCaptionText(cue.text)
+      : String(cue.text || "");
+    text.textContent = displayText || " ";
     const indicator = document.createElement("i");
     indicator.className = "drag-indicator";
     indicator.setAttribute("aria-hidden", "true");
     overlay.append(text, indicator);
     overlay.style.left = `${contentRect.left + contentRect.width * cue.x}px`;
     overlay.style.top = `${contentRect.top + contentRect.height * cue.y}px`;
-    overlay.style.maxWidth = `${contentRect.width * (project.subtitleDefaults.maxWidth || 0.86)}px`;
-    const fontSize = Math.max(14, contentRect.height * (project.subtitleDefaults.fontScale || 0.0675));
+    const maxWidth = contentRect.width * (
+      project.subtitleDefaults.maxWidth || 0.86
+    );
+    overlay.style.maxWidth = `${maxWidth}px`;
+    overlay.style.whiteSpace = maximumLines === 1 ? "nowrap" : "pre-wrap";
+    const fontScale = project.subtitleDefaults.fontScale || 0.0675;
+    let fontSize = Math.max(14, Math.min(
+      contentRect.height * fontScale,
+      contentRect.width * fontScale * 9 / 16
+    ));
+    const fontFamily = String(
+      project.subtitleDefaults.fontFamily || "Pretendard"
+    ).replace(/["\\]/gu, "");
+    const fontWeight = Math.round(
+      Number(project.subtitleDefaults.fontWeight) || 800
+    );
+    if (maximumLines === 1 && displayText) {
+      const measureContext = document.createElement("canvas").getContext("2d");
+      if (measureContext) {
+        measureContext.font = `${fontWeight} ${fontSize}px "${fontFamily}", "Noto Sans KR", sans-serif`;
+        fontSize = fitSingleLineCaptionFontSize({
+          baseFontSize: fontSize,
+          measuredWidth: measureContext.measureText(displayText).width,
+          maxWidth
+        });
+      }
+    }
     overlay.style.fontSize = `${fontSize}px`;
+    overlay.style.fontFamily = `"${fontFamily}", "Noto Sans KR", sans-serif`;
+    overlay.style.fontWeight = String(fontWeight);
+    overlay.style.lineHeight = String(
+      Number(project.subtitleDefaults.lineHeight) || 1.24
+    );
     overlay.style.color = cue.color || project.subtitleDefaults.color || "#ffffff";
     overlay.style.background = "transparent";
+    overlay.style.textShadow = [
+      `${Number(project.subtitleDefaults.shadowOffsetXEm) || 0}em`,
+      `${Number(project.subtitleDefaults.shadowOffsetYEm) || 0}em`,
+      `${Math.max(0, Number(project.subtitleDefaults.shadowBlurEm) || 0)}em`,
+      String(project.subtitleDefaults.shadowColor || "rgba(0, 0, 0, 0.45)")
+    ].join(" ");
     overlay.style.setProperty(
       "--subtitle-stroke",
       `${Math.max(1.5, contentRect.height * (project.subtitleDefaults.outlineWidth || 0.006))}px`
@@ -3633,8 +3735,20 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
       elements.preview_video.addEventListener("error", onError);
       elements.preview_video.src = nextMediaUrl;
     });
+    const mediaIdentityChanged = !sameCaptionMediaIdentity(
+      project.mediaAsset,
+      asset
+    );
     const nextProject = {
       ...project,
+      ...(mediaIdentityChanged
+        ? {
+          ai: {
+            ...project.ai,
+            captionCheckpoints: []
+          }
+        }
+        : {}),
       mediaAsset: {
         ...asset,
         fileHandleStored
@@ -3694,12 +3808,44 @@ function readCaptionAgentConfig() {
   };
 }
 
+function setCaptionLocalStatus(message, state = "idle") {
+  elements.caption_local_status.textContent = message;
+  elements.caption_local_status.dataset.state = state;
+}
+
+async function ensureLocalCaptionSession(config, signal) {
+  if (!isLoopbackCaptionAgentEndpoint(config.endpoint)) {
+    return config;
+  }
+  setCaptionLocalStatus(
+    String(config.token || "").trim()
+      ? "로컬 자막 엔진 세션을 확인하는 중"
+      : "로컬 자막 엔진에 자동 연결하는 중",
+    "connecting"
+  );
+  const token = await ensureCaptionAgentSession({
+    endpoint: config.endpoint,
+    token: config.token,
+    signal
+  });
+  elements.caption_agent_token.value = token;
+  setCaptionLocalStatus(
+    "로컬 STT 준비됨 · Solar API 키만 현재 탭에 입력하세요",
+    "ready"
+  );
+  return { ...config, token };
+}
+
 async function prepareCaptionAgentConfig() {
-  const config = readCaptionAgentConfig();
+  let config = readCaptionAgentConfig();
   const permissionGranted = await ensureCaptionAgentPermission(config.endpoint);
   if (!permissionGranted) {
     throw new Error("자막 에이전트 주소 접근 권한이 허용되지 않았습니다.");
   }
+  config = await ensureLocalCaptionSession(
+    config,
+    activeJobController?.signal
+  );
   captionAgentSettings = await saveCaptionAgentSettings({
     endpoint: config.endpoint,
     model: config.model,
@@ -3718,6 +3864,52 @@ async function prepareCaptionAgentConfig() {
       sttModel: captionAgentSettings.sttModel
     }
   };
+}
+
+function formatCaptionRunDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  return [
+    hours > 0 ? `${hours}시간` : "",
+    minutes > 0 ? `${minutes}분` : "",
+    `${seconds}초`
+  ].filter(Boolean).join(" ");
+}
+
+function confirmCaptionAgentRun(enabledClips, { skippedClipCount = 0 } = {}) {
+  const estimate = captionAgentRunEstimate(enabledClips);
+  const selectedModel = elements.caption_model.value === "solar-mini"
+    ? "Solar Mini"
+    : "Solar Pro 3";
+  let externalStt = false;
+  try {
+    externalStt = Boolean(
+      elements.caption_stt_endpoint.value.trim()
+      && !isLoopbackCaptionAgentEndpoint(elements.caption_stt_endpoint.value)
+    );
+  } catch {
+    externalStt = true;
+  }
+  const sttNotice = externalStt
+    ? "고급 설정의 외부 STT도 별도 과금될 수 있습니다"
+    : "로컬 STT는 별도 API 과금이 없습니다";
+  return window.confirm([
+    skippedClipCount > 0
+      ? "중단된 Solar 자막 초벌을 이어서 할까요?"
+      : "Solar 자막 초벌을 시작할까요?",
+    "",
+    ...(skippedClipCount > 0
+      ? [`저장 완료된 컷 ${skippedClipCount}개는 건너뜁니다`]
+      : []),
+    `활성 컷 ${estimate.clipCount}개 · 총 ${formatCaptionRunDuration(estimate.totalDurationMs)}`,
+    `${selectedModel} 요청 ${estimate.plannedSolarRequests}회 · 컷당 1회`,
+    `로컬 품질 보정 추가 Solar 호출 0회 · 최대 ${estimate.maximumSolarRequests}회`,
+    sttNotice,
+    "",
+    "취소하면 오디오 추출과 유료 API 요청은 시작되지 않습니다."
+  ].join("\n"));
 }
 
 async function testCaptionAgentConnection() {
@@ -3752,6 +3944,12 @@ async function testCaptionAgentConnection() {
       result.configured?.ready === false ? "error" : "success",
       result.configured?.ready === false ? 0 : 5200
     );
+    setCaptionLocalStatus(
+      result.configured?.ready === false
+        ? "로컬 STT 연결됨 · Solar API 키를 현재 탭에 입력하세요"
+        : "로컬 STT 준비됨 · Solar 자막 초벌을 시작할 수 있습니다",
+      result.configured?.ready === false ? "waiting" : "ready"
+    );
   } catch (error) {
     const canceled = error.name === "AbortError";
     if (!canceled) {
@@ -3761,6 +3959,10 @@ async function testCaptionAgentConnection() {
       canceled ? "자막 에이전트 연결 확인을 취소했습니다." : `자막 에이전트 연결 실패: ${error.message}`,
       canceled ? "info" : "error",
       0
+    );
+    setCaptionLocalStatus(
+      "로컬 자막 엔진 연결 필요 · 세부설정에서 실행 상태를 확인하세요",
+      "error"
     );
   } finally {
     activeJobController = null;
@@ -3784,14 +3986,14 @@ async function generateCaptions() {
     showToast("AI 자막을 만들려면 먼저 원본 영상을 연결해 주세요.", "error");
     return;
   }
-  const enabledClips = project.clips.filter(
+  const allEnabledClips = project.clips.filter(
     (clip) => clip.enabled !== false
   );
-  if (enabledClips.length === 0) {
+  if (allEnabledClips.length === 0) {
     showToast("선택한 구간이 없습니다.", "error");
     return;
   }
-  if (enabledClips.length > MAX_CAPTION_AGENT_CLIPS_PER_RUN) {
+  if (allEnabledClips.length > MAX_CAPTION_AGENT_CLIPS_PER_RUN) {
     showToast(
       `한 번에 자막을 만들 수 있는 활성 컷은 최대 ${MAX_CAPTION_AGENT_CLIPS_PER_RUN}개입니다.`,
       "error",
@@ -3800,6 +4002,43 @@ async function generateCaptions() {
     return;
   }
   if (activeJobController || projectMutationLockCount > 0) {
+    return;
+  }
+  const selectedModel = elements.caption_model.value;
+  const resumeEligible = ["running", "error", "canceled"].includes(
+    project.ai?.status
+  );
+  const resumePlan = captionAgentResumePlan(
+    allEnabledClips,
+    project.ai?.captionCheckpoints,
+    selectedModel,
+    { resume: resumeEligible }
+  );
+  const enabledClips = resumePlan.clips;
+  if (enabledClips.length === 0 && resumePlan.skippedClipIds.length > 0) {
+    project = {
+      ...project,
+      ai: {
+        ...project.ai,
+        status: "done",
+        progress: 1,
+        lastRunAt: new Date().toISOString(),
+        error: null
+      }
+    };
+    await saveProject(project);
+    renderAll({ keepScroll: true });
+    showToast(
+      "저장된 컷별 자막 체크포인트를 확인했습니다. 다시 과금할 컷이 없습니다.",
+      "success",
+      6500
+    );
+    return;
+  }
+  if (!confirmCaptionAgentRun(enabledClips, {
+    skippedClipCount: resumePlan.skippedClipIds.length
+  })) {
+    showToast("Solar 자막 초벌을 시작하지 않았습니다.", "info");
     return;
   }
   const returnFocus = document.activeElement;
@@ -3812,6 +4051,10 @@ async function generateCaptions() {
   } catch (error) {
     elements.caption_advanced_settings.open = true;
     showToast(`자막 에이전트 설정을 확인해 주세요: ${error.message}`, "error", 0);
+    setCaptionLocalStatus(
+      "로컬 자막 엔진 연결 필요 · 세부설정에서 실행 상태를 확인하세요",
+      "error"
+    );
     activeJobController = null;
     elements.generate_captions.disabled = false;
     if (returnFocus?.isConnected) {
@@ -3820,14 +4063,19 @@ async function generateCaptions() {
     return;
   }
   const { endpoint, token, model, providerConfig } = config;
+  let activeCaptionSessionToken = token;
   const undoSnapshot = cloneProject(project);
   let undoRecorded = false;
   let reviewRequiredCount = 0;
-  let captionWarnings = [];
+  let captionWarnings = resumePlan.skippedClipIds.length > 0
+    ? [...(project.ai?.warnings || [])]
+    : [];
   let generatedCueCount = 0;
   showJob(
     "Solar 자막 초안을 만드는 중",
-    "활성화된 모든 선택 컷의 음성을 차례로 외부 STT에 보내고, 전사문과 고지된 이름·메모 문맥은 Solar에 보냅니다.",
+    resumePlan.skippedClipIds.length > 0
+      ? `이미 저장된 ${resumePlan.skippedClipIds.length}개 컷은 건너뛰고 실패 지점부터 이어서 처리합니다.`
+      : "활성화된 모든 선택 컷의 음성을 차례로 로컬 STT에 보내고, 전사문과 고지된 이름·메모 문맥은 Solar에 보냅니다.",
     0,
     { cancelable: true, returnFocus }
   );
@@ -3840,13 +4088,20 @@ async function generateCaptions() {
       status: "running",
       progress: 0,
       error: null,
-      warnings: []
+      warnings: captionWarnings,
+      captionCheckpoints: resumeEligible
+        ? project.ai?.captionCheckpoints
+        : discardCaptionAgentCheckpointsForClips(
+          project.ai?.captionCheckpoints,
+          allEnabledClips
+      )
     }
   };
   renderHeader();
 
   lockProjectMutations();
   try {
+    await saveProject(project);
     const clips = enabledClips;
     for (let index = 0; index < clips.length; index += 1) {
       const clip = clips[index];
@@ -3906,21 +4161,39 @@ async function generateCaptions() {
         audioBase64: encodePcm16WavBase64(pcm),
         placementHints
       });
-      const result = await requestCaptionAgent({
+      const result = await requestCaptionAgentWithSessionRetry({
         endpoint,
-        token,
+        token: activeCaptionSessionToken,
         providerConfig,
         request,
         signal: controller.signal,
+        onSessionToken: (nextToken) => {
+          activeCaptionSessionToken = nextToken;
+          elements.caption_agent_token.value = nextToken;
+          setCaptionLocalStatus(
+            "로컬 자막 엔진에 다시 연결됨 · 작업을 이어갑니다",
+            "ready"
+          );
+        },
         onProgress: (progress, label) => {
           const local = 0.28 + Math.max(0, Math.min(1, progress)) * 0.7;
           setAiProgress(base + span * local, `${index + 1}/${clips.length} · ${label}`);
         }
       });
-      const drafts = normalizeCaptionAgentCues(
+      const normalizedDrafts = normalizeCaptionAgentCues(
         result.cues,
         clipDurationMs(clip)
       );
+      const speakerColors = captionSpeakerColorAssignments(
+        normalizedDrafts.map((draft) => draft.remoteMeta?.speakerId),
+        project.ai?.speakerColors
+      );
+      const drafts = normalizedDrafts.map((draft) => ({
+        ...draft,
+        color: speakerColors[
+          String(draft.remoteMeta?.speakerId || "").trim().toLowerCase()
+        ] || captionSpeakerColor(draft.remoteMeta?.speakerId)
+      }));
       generatedCueCount += drafts.length;
       if (generatedCueCount > MAX_CAPTION_AGENT_CUES_PER_RUN) {
         throw new Error(
@@ -3947,10 +4220,17 @@ async function generateCaptions() {
           model,
           resolvedModel: String(result.resolvedModel || result.model || model),
           lastRequestId: String(result.requestId || ""),
+          captionCheckpoints: upsertCaptionAgentCheckpoint(
+            project.ai?.captionCheckpoints,
+            createCaptionAgentCheckpoint(clip, model, {
+              requestId: result.requestId
+            })
+          ),
           status: "running",
           progress: Math.min(0.99, (index + 1) / clips.length),
           error: null,
-          warnings: captionWarnings
+          warnings: captionWarnings,
+          speakerColors
         }
       };
       await saveProject(project);
@@ -3969,14 +4249,19 @@ async function generateCaptions() {
     };
     await saveProject(project);
     setAiProgress(1, "선택 구간 자막 초안 완료");
+    const reviewWarningCount = captionWarnings.filter(
+      (warning) => CAPTION_REVIEW_WARNING_CODES.has(warning.code)
+    ).length;
     showToast(
-      captionWarnings.length > 0
-        ? `Solar 자막은 완료됐지만 처리 경고가 ${captionWarnings.length}건 있습니다. 노란 경고에서 누락 가능성을 확인해 주세요.`
+      reviewWarningCount > 0
+        ? `Solar 자막과 로컬 하네스 처리를 마쳤습니다. 재확인이 필요한 품질 경고 ${reviewWarningCount}건을 확인해 주세요.`
         : reviewRequiredCount > 0
         ? `Solar 자막 초안을 만들었습니다. 재확인이 필요한 ${reviewRequiredCount}개 자막은 노란색으로 표시했습니다.`
-        : "Solar 자막 초안을 만들었습니다. 텍스트·시간·위치를 한 번 검수해 주세요.",
-      captionWarnings.length > 0 ? "error" : "success",
-      captionWarnings.length > 0 ? 9000 : 6500
+        : captionWarnings.length > 0
+          ? `Solar 초안을 만들고 키리누키 품질 하네스가 ${captionWarnings.length}건을 자동 정리했습니다.`
+          : "Solar 자막 초안을 만들었습니다. 텍스트·시간을 한 번 검수해 주세요.",
+      reviewWarningCount > 0 ? "error" : "success",
+      reviewWarningCount > 0 ? 9000 : 6500
     );
   } catch (error) {
     const canceled = error.name === "AbortError";
@@ -4181,7 +4466,13 @@ async function exportVideo() {
   try {
     if (document.fonts?.load) {
       try {
-        await document.fonts.load('800 48px "Pretendard"');
+        const family = String(
+          project.subtitleDefaults?.fontFamily || "Pretendard"
+        ).replace(/["\\]/gu, "");
+        const weight = Math.round(
+          Number(project.subtitleDefaults?.fontWeight) || 800
+        );
+        await document.fonts.load(`${weight} 48px "${family}"`);
       } catch (error) {
         showToast(`자막 폰트를 준비하지 못했습니다: ${error.message}`, "error", 0);
         return;
@@ -5144,6 +5435,21 @@ function bindActions() {
 
   elements.generate_captions.addEventListener("click", () => void generateCaptions());
   elements.test_caption_agent.addEventListener("click", () => void testCaptionAgentConnection());
+  elements.caption_style_preset.addEventListener("change", () => {
+    const preset = captionStylePreset(elements.caption_style_preset.value);
+    applyProject(applyCaptionStylePreset(project, preset.id));
+    if (document.fonts?.load) {
+      void document.fonts
+        .load(
+          `${preset.typography.fontWeight} 48px "${preset.typography.fontFamily}"`
+        )
+        .then(renderSubtitleOverlay)
+        .catch((error) => {
+          showToast(`자막 폰트를 준비하지 못했습니다: ${error.message}`, "error", 0);
+        });
+    }
+    showToast(`${preset.displayName} 스타일을 적용했습니다.`, "success", 3600);
+  });
   elements.caption_model.addEventListener("change", () => {
     applyProject({
       ...project,
@@ -5446,6 +5752,21 @@ async function initialize() {
   elements.caption_model.value = captionAgentSettings.model;
   elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
   elements.caption_stt_model.value = captionAgentSettings.sttModel;
+  if (isLoopbackCaptionAgentEndpoint(captionAgentSettings.endpoint)) {
+    void ensureCaptionAgentPermission(captionAgentSettings.endpoint)
+      .then((granted) => {
+        if (!granted) {
+          throw new Error("로컬 companion 접근 권한이 없습니다.");
+        }
+        return ensureLocalCaptionSession(readCaptionAgentConfig());
+      })
+      .catch(() => {
+        setCaptionLocalStatus(
+          "로컬 자막 엔진이 꺼져 있습니다 · 세부설정의 실행 안내를 확인하세요",
+          "offline"
+        );
+      });
+  }
   const { projectId, captureState } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;
@@ -5467,11 +5788,17 @@ async function initialize() {
   await initializeSourceBinding();
   renderAll();
   if (document.fonts?.load) {
+    const family = String(
+      project.subtitleDefaults?.fontFamily || "Pretendard"
+    ).replace(/["\\]/gu, "");
+    const weight = Math.round(
+      Number(project.subtitleDefaults?.fontWeight) || 800
+    );
     void document.fonts
-      .load('800 48px "Pretendard"')
+      .load(`${weight} 48px "${family}"`)
       .then(renderSubtitleOverlay)
       .catch((error) => {
-        console.warn("Pretendard 폰트를 미리 불러오지 못했습니다.", error);
+        console.warn("자막 폰트를 미리 불러오지 못했습니다.", error);
       });
   }
   if (seedMergeError) {

@@ -4,22 +4,33 @@ import test from "node:test";
 import {
   CAPTION_AGENT_REQUEST_SCHEMA,
   CAPTION_AGENT_RESPONSE_SCHEMA,
+  CAPTION_AGENT_SESSION_SCHEMA,
   MAX_CAPTION_AGENT_CLIPS_PER_RUN,
   MAX_CAPTION_AGENT_CLIP_DURATION_MS,
   MAX_CAPTION_AGENT_CUES_PER_RUN,
   MAX_REMOTE_WARNINGS,
   captionAgentAudioFootprint,
   captionAgentPermissionOrigin,
+  captionAgentResumePlan,
+  captionAgentRunEstimate,
+  captionAgentSessionEndpoint,
   captionProviderHeaders,
+  createCaptionAgentCheckpoint,
   createCaptionAgentRequest,
+  discardCaptionAgentCheckpointsForClips,
   encodePcm16WavBase64,
+  ensureCaptionAgentSession,
   normalizeCaptionAgentCues,
   normalizeCaptionAgentEndpoint,
   normalizeCaptionAgentSettings,
   normalizeExternalSttEndpoint,
+  pairCaptionAgent,
   probeCaptionAgent,
   requestCaptionAgent,
-  saveCaptionAgentSettings
+  requestCaptionAgentWithSessionRetry,
+  sameCaptionMediaIdentity,
+  saveCaptionAgentSettings,
+  upsertCaptionAgentCheckpoint
 } from "../src/editor/caption-agent.js";
 
 function jsonResponse(payload, {
@@ -84,6 +95,317 @@ test("에이전트 주소는 HTTPS 또는 loopback HTTP만 허용하고 인증�
   assert.throws(
     () => normalizeCaptionAgentEndpoint("https://user:secret@captions.example/v1/captions"),
     /아이디나 비밀번호/u
+  );
+  assert.throws(
+    () => normalizeCaptionAgentEndpoint(
+      "https://captions.example/v1/captions?token=secret"
+    ),
+    /쿼리 문자열/u
+  );
+});
+
+test("로컬 companion 세션 주소는 경로만 치환하고 저장될 쿼리를 거부한다", () => {
+  assert.equal(
+    captionAgentSessionEndpoint(
+      "http://127.0.0.1:4319/custom/captions"
+    ),
+    "http://127.0.0.1:4319/v1/session"
+  );
+  assert.throws(
+    () => captionAgentSessionEndpoint(
+      "http://127.0.0.1:4319/custom/captions?token=secret"
+    ),
+    /쿼리 문자열/u
+  );
+  assert.throws(
+    () => captionAgentSessionEndpoint(
+      "https://captions.example/v1/captions"
+    ),
+    /로컬 companion/u
+  );
+});
+
+test("자동 연결 토큰은 로컬 session 응답에서만 받아 호출자 메모리로 반환한다", async () => {
+  const calls = [];
+  const token = await pairCaptionAgent({
+    endpoint: "http://127.0.0.1:4319/v1/captions",
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return jsonResponse({
+        schema: CAPTION_AGENT_SESSION_SCHEMA,
+        status: "ok",
+        authentication: "bearer-process-memory",
+        expires: "companion-restart",
+        token: "ephemeral-local-session"
+      });
+    }
+  });
+  assert.equal(token, "ephemeral-local-session");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:4319/v1/session");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(
+    calls[0].options.headers["X-Kirinuki-Protocol"],
+    CAPTION_AGENT_REQUEST_SCHEMA
+  );
+  assert.equal(calls[0].options.credentials, "omit");
+  assert.equal(calls[0].options.redirect, "error");
+  assert.equal("Authorization" in calls[0].options.headers, false);
+});
+
+test("gateway 재시작으로 만료된 로컬 세션은 무과금 probe 뒤 자동으로 다시 연결한다", async () => {
+  const calls = [];
+  const token = await ensureCaptionAgentSession({
+    endpoint: "http://127.0.0.1:4319/v1/captions",
+    token: "stale-process-session",
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (calls.length === 1) {
+        return jsonResponse({
+          error: {
+            code: "UNAUTHORIZED",
+            message: "세션이 만료되었습니다."
+          }
+        }, { status: 401 });
+      }
+      return jsonResponse({
+        schema: CAPTION_AGENT_SESSION_SCHEMA,
+        status: "ok",
+        authentication: "bearer-process-memory",
+        expires: "companion-restart",
+        token: "refreshed-process-session"
+      });
+    }
+  });
+  assert.equal(token, "refreshed-process-session");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(
+    calls[0].options.headers.Authorization,
+    "Bearer stale-process-session"
+  );
+  assert.equal(calls[1].url, "http://127.0.0.1:4319/v1/session");
+  assert.equal(calls[1].options.method, "POST");
+  assert.equal("Authorization" in calls[1].options.headers, false);
+});
+
+test("작업 중 만료된 로컬 세션은 한 번만 재발급해 같은 요청을 이어간다", async () => {
+  const request = agentRequest();
+  const calls = [];
+  let refreshedToken = "";
+  const result = await requestCaptionAgentWithSessionRetry({
+    endpoint: "http://127.0.0.1:4319/v1/captions",
+    token: "stale-process-session",
+    providerConfig: {
+      upstageApiKey: "upstage-memory-only"
+    },
+    request,
+    onSessionToken: (token) => {
+      refreshedToken = token;
+    },
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (calls.length === 1) {
+        return jsonResponse({
+          error: {
+            code: "UNAUTHORIZED",
+            message: "세션이 만료되었습니다."
+          }
+        }, { status: 401 });
+      }
+      if (calls.length === 2) {
+        return jsonResponse({
+          schema: CAPTION_AGENT_SESSION_SCHEMA,
+          status: "ok",
+          authentication: "bearer-process-memory",
+          expires: "companion-restart",
+          token: "refreshed-process-session"
+        });
+      }
+      return jsonResponse(completedAgentResponse(request));
+    }
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(refreshedToken, "refreshed-process-session");
+  assert.equal(calls.length, 3);
+  assert.equal(
+    calls[0].options.headers.Authorization,
+    "Bearer stale-process-session"
+  );
+  assert.equal(calls[1].url, "http://127.0.0.1:4319/v1/session");
+  assert.equal(
+    calls[2].options.headers.Authorization,
+    "Bearer refreshed-process-session"
+  );
+});
+
+test("자막 실행 예상량은 활성 컷과 유료 요청 상한을 실행 전에 계산한다", () => {
+  const estimate = captionAgentRunEstimate([
+    { sourceStartMs: 1_000, sourceEndMs: 5_000 },
+    { sourceStartMs: 5_000, sourceEndMs: 20_000 },
+    { sourceStartMs: 0, sourceEndMs: 99_000, enabled: false }
+  ]);
+  assert.deepEqual(estimate, {
+    clipCount: 2,
+    totalDurationMs: 19_000,
+    plannedSolarRequests: 2,
+    maximumSolarRequests: 2
+  });
+  assert.equal(MAX_CAPTION_AGENT_CLIPS_PER_RUN, 16);
+});
+
+test("실패 재개 계획은 같은 컷 범위·Solar 모델의 완료 체크포인트만 건너뛴다", () => {
+  const clips = [{
+    id: "clip-1",
+    sourceStartMs: 1_000,
+    sourceEndMs: 5_000
+  }, {
+    id: "clip-2",
+    sourceStartMs: 8_000,
+    sourceEndMs: 12_000
+  }];
+  const checkpoint = createCaptionAgentCheckpoint(
+    clips[0],
+    "solar-pro3",
+    {
+      requestId: "request-completed",
+      completedAt: "2026-07-29T00:00:00.000Z"
+    }
+  );
+  const stored = upsertCaptionAgentCheckpoint([], checkpoint);
+  assert.deepEqual(
+    captionAgentResumePlan(clips, stored, "solar-pro3", { resume: true }),
+    {
+      clips: [clips[1]],
+      skippedClipIds: ["clip-1"]
+    }
+  );
+  assert.deepEqual(
+    captionAgentResumePlan(clips, stored, "solar-mini", { resume: true }),
+    {
+      clips,
+      skippedClipIds: []
+    }
+  );
+  assert.deepEqual(
+    captionAgentResumePlan(
+      [{ ...clips[0], sourceEndMs: 5_100 }, clips[1]],
+      stored,
+      "solar-pro3",
+      { resume: true }
+    ).skippedClipIds,
+    []
+  );
+  assert.deepEqual(
+    captionAgentResumePlan(clips, stored, "solar-pro3", { resume: false }),
+    {
+      clips,
+      skippedClipIds: []
+    }
+  );
+});
+
+test("재개 체크포인트는 현재 자막 품질 하네스 프로필과 일치할 때만 재사용한다", () => {
+  const clip = {
+    id: "clip-harness",
+    sourceStartMs: 1_000,
+    sourceEndMs: 5_000
+  };
+  const matchingCheckpoint = createCaptionAgentCheckpoint(
+    clip,
+    "solar-pro3",
+    {
+      requestId: "request-current-harness",
+      completedAt: "2026-07-29T00:00:00.000Z"
+    }
+  );
+  const legacyCheckpoint = { ...matchingCheckpoint };
+  delete legacyCheckpoint.qualityProfile;
+  const differentCheckpoint = {
+    ...matchingCheckpoint,
+    qualityProfile: "legacy-unharnessed-v0"
+  };
+
+  assert.equal(matchingCheckpoint.qualityProfile, "kr-vtuber-clean-v1");
+  assert.deepEqual(
+    captionAgentResumePlan(
+      [clip],
+      [matchingCheckpoint],
+      "solar-pro3",
+      { resume: true }
+    ),
+    {
+      clips: [],
+      skippedClipIds: ["clip-harness"]
+    }
+  );
+  for (const staleCheckpoint of [legacyCheckpoint, differentCheckpoint]) {
+    assert.deepEqual(
+      captionAgentResumePlan(
+        [clip],
+        [staleCheckpoint],
+        "solar-pro3",
+        { resume: true }
+      ),
+      {
+        clips: [clip],
+        skippedClipIds: []
+      }
+    );
+  }
+});
+
+test("새 전체 실행은 대상 컷의 이전 체크포인트만 먼저 폐기한다", () => {
+  const clips = [{
+    id: "clip-1",
+    sourceStartMs: 1_000,
+    sourceEndMs: 5_000
+  }, {
+    id: "clip-2",
+    sourceStartMs: 8_000,
+    sourceEndMs: 12_000
+  }];
+  const checkpoints = clips.map((clip, index) => (
+    createCaptionAgentCheckpoint(clip, "solar-pro3", {
+      requestId: `old-request-${index + 1}`
+    })
+  ));
+  assert.deepEqual(
+    discardCaptionAgentCheckpointsForClips(checkpoints, [clips[0]]),
+    [checkpoints[1]]
+  );
+  assert.deepEqual(
+    discardCaptionAgentCheckpointsForClips(checkpoints, clips),
+    []
+  );
+});
+
+test("재개 체크포인트는 같은 로컬 원본 identity에서만 유지한다", () => {
+  const media = {
+    name: "source.webm",
+    size: 123_456,
+    lastModified: 1_753_700_000_000,
+    durationMs: 600_000,
+    mediaOriginMs: 0,
+    width: 1920,
+    height: 1080,
+    codec: "vp09",
+    audioCodec: "opus"
+  };
+  assert.equal(sameCaptionMediaIdentity(media, { ...media }), true);
+  assert.equal(
+    sameCaptionMediaIdentity(media, {
+      ...media,
+      lastModified: media.lastModified + 1
+    }),
+    false
+  );
+  assert.equal(
+    sameCaptionMediaIdentity(media, {
+      ...media,
+      durationMs: media.durationMs + 10
+    }),
+    false
   );
 });
 
@@ -353,7 +675,7 @@ test("오디오 추출 전에 컷 길이와 WAV 메모리 상한을 검사한다
     ),
     /30분/u
   );
-  assert.equal(MAX_CAPTION_AGENT_CLIPS_PER_RUN, 500);
+  assert.equal(MAX_CAPTION_AGENT_CLIPS_PER_RUN, 16);
   assert.equal(MAX_CAPTION_AGENT_CUES_PER_RUN, 10_000);
 });
 
@@ -442,6 +764,26 @@ test("제공자 설정은 세션 토큰이 없으면 fetch 전에 거부한다",
     /세션 토큰/u
   );
   assert.equal(fetchCount, 0);
+});
+
+test("원격 에이전트 오류 본문은 프로젝트에 저장될 Error message로 복사하지 않는다", async () => {
+  const echoedSecret = "upstage-secret-that-must-not-persist";
+  await assert.rejects(
+    probeCaptionAgent({
+      endpoint: "https://captions.example/v1/captions",
+      fetchImpl: async () => jsonResponse({
+        error: {
+          code: "REMOTE_FAILURE",
+          message: `echo ${echoedSecret}`
+        }
+      }, { status: 502 })
+    }),
+    (error) => (
+      error?.status === 502
+      && error?.code === "REMOTE_FAILURE"
+      && !error.message.includes(echoedSecret)
+    )
+  );
 });
 
 test("비동기 상태 URL은 최초 요청과 같은 origin만 허용한다", async () => {
