@@ -840,6 +840,29 @@ export function wrapCaption(context, text, maxWidth) {
   return lines;
 }
 
+export function singleLineCaptionText(text) {
+  return String(text ?? "").replace(/\s+/gu, " ").trim();
+}
+
+export function fitSingleLineCaptionFontSize({
+  baseFontSize,
+  measuredWidth,
+  maxWidth
+}) {
+  const normalizedBase = Math.max(1, Number(baseFontSize) || 1);
+  const normalizedMeasuredWidth = Math.max(0, Number(measuredWidth) || 0);
+  const normalizedMaxWidth = Math.max(1, Number(maxWidth) || 1);
+  if (normalizedMeasuredWidth <= normalizedMaxWidth) {
+    return normalizedBase;
+  }
+  return Math.max(
+    1,
+    Math.floor(
+      normalizedBase * normalizedMaxWidth / normalizedMeasuredWidth * 0.96
+    )
+  );
+}
+
 export function clampCaptionBoxCenter({
   requestedX,
   requestedY,
@@ -870,9 +893,23 @@ function drawCaption(context, canvas, project, cue) {
     return;
   }
   const defaults = project.subtitleDefaults;
-  let fontSize = Math.max(18, Math.round(canvas.height * (defaults.fontScale || 0.0675)));
+  const fontScale = defaults.fontScale || 0.0675;
+  let fontSize = Math.max(18, Math.round(Math.min(
+    canvas.height * fontScale,
+    canvas.width * fontScale * 9 / 16
+  )));
   const fontFamily = String(defaults.fontFamily || "Pretendard").replace(/["\\]/gu, "");
   const fontWeight = clamp(Math.round(Number(defaults.fontWeight) || 800), 100, 900);
+  const maximumLines = clamp(
+    Math.round(Number(defaults.maxLines) || 1),
+    1,
+    2
+  );
+  const lineHeightScale = clamp(
+    Number(defaults.lineHeight) || 1.24,
+    1,
+    1.6
+  );
   const requestedX = canvas.width * cue.x;
   const requestedY = canvas.height * cue.y;
   const maxWidth = canvas.width * (defaults.maxWidth || 0.86);
@@ -884,17 +921,43 @@ function drawCaption(context, canvas, project, cue) {
 
   let lines = [];
   const maximumCaptionHeight = canvas.height * 0.9;
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  if (maximumLines === 1) {
     context.font = `${fontWeight} ${fontSize}px "${fontFamily}", "Noto Sans KR", sans-serif`;
-    lines = wrapCaption(context, cue.text, maxWidth);
-    const measuredHeight = lines.length * fontSize * 1.28 + fontSize * 0.3;
-    if (measuredHeight <= maximumCaptionHeight || fontSize <= 1) {
-      break;
+    const displayText = singleLineCaptionText(cue.text);
+    fontSize = fitSingleLineCaptionFontSize({
+      baseFontSize: fontSize,
+      measuredWidth: context.measureText(displayText).width,
+      maxWidth
+    });
+    context.font = `${fontWeight} ${fontSize}px "${fontFamily}", "Noto Sans KR", sans-serif`;
+    lines = [displayText];
+  } else {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      context.font = `${fontWeight} ${fontSize}px "${fontFamily}", "Noto Sans KR", sans-serif`;
+      lines = wrapCaption(context, cue.text, maxWidth);
+      const measuredHeight = lines.length * fontSize * lineHeightScale + fontSize * 0.3;
+      if (
+        (
+          lines.length <= maximumLines
+          && measuredHeight <= maximumCaptionHeight
+        )
+        || fontSize <= 1
+      ) {
+        break;
+      }
+      const lineBudgetScale = lines.length > maximumLines
+        ? maximumLines / lines.length
+        : 1;
+      const heightBudgetScale = measuredHeight > maximumCaptionHeight
+        ? maximumCaptionHeight / measuredHeight
+        : 1;
+      const scaled = Math.floor(
+        fontSize * Math.min(lineBudgetScale, heightBudgetScale) * 0.96
+      );
+      fontSize = Math.max(1, Math.min(fontSize - 1, scaled));
     }
-    const scaled = Math.floor(fontSize * maximumCaptionHeight / measuredHeight * 0.96);
-    fontSize = Math.max(1, Math.min(fontSize - 1, scaled));
   }
-  const lineHeight = fontSize * 1.28;
+  const lineHeight = fontSize * lineHeightScale;
   const widest = Math.max(...lines.map((line) => context.measureText(line).width), fontSize);
   const boxWidth = Math.min(maxWidth, widest + fontSize * 0.72);
   const boxHeight = lines.length * lineHeight + fontSize * 0.3;
@@ -935,6 +998,19 @@ function drawCaption(context, canvas, project, cue) {
   context.lineWidth = outlineWidth;
   context.strokeStyle = defaults.outlineColor || "#111111";
   context.fillStyle = cue.color || defaults.color || "#ffffff";
+  context.shadowColor = String(
+    defaults.shadowColor || "rgba(0, 0, 0, 0.45)"
+  );
+  context.shadowOffsetX = fontSize * (
+    Number(defaults.shadowOffsetXEm) || 0
+  );
+  context.shadowOffsetY = fontSize * (
+    Number(defaults.shadowOffsetYEm) || 0
+  );
+  context.shadowBlur = fontSize * Math.max(
+    0,
+    Number(defaults.shadowBlurEm) || 0
+  );
   lines.forEach((line, index) => {
     const lineY = firstY + index * lineHeight;
     context.strokeText(line, textX, lineY, maxWidth);

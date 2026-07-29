@@ -1,3 +1,11 @@
+import {
+  CAPTION_STYLE_PRESETS,
+  DEFAULT_CAPTION_STYLE_PRESET_ID,
+  LEGACY_CAPTION_STYLE_PRESET_ID,
+  captionStyleDefaults,
+  normalizeCaptionStylePresetId
+} from "./caption-style.js";
+
 export const EDITOR_SCHEMA = "chzzk-kirinuki-editor/v3";
 export const EDITOR_PROJECTS_STORE_KEY = "chzzkKirinukiEditorProjectsV1";
 export const EDITOR_SEED_PREFIX = "chzzkKirinukiEditorSeed:";
@@ -5,6 +13,7 @@ export const EDITOR_DATABASE_NAME = "chzzk-kirinuki-studio";
 export const MIN_SUBTITLE_LANES = 2;
 export const MAX_SUBTITLE_LANES = 8;
 export const MAX_AI_WARNINGS = 4_000;
+export const MAX_AI_CAPTION_CHECKPOINTS = 500;
 export const SUPPORTED_IMAGE_ASSET_MIME_TYPES = Object.freeze([
   "image/png",
   "image/jpeg",
@@ -103,6 +112,60 @@ export function mergeAiWarnings(existing, incoming, clipId) {
   ]);
 }
 
+export function normalizeAiCaptionCheckpoints(value, clips = []) {
+  const clipIds = new Set(
+    (Array.isArray(clips) ? clips : [])
+      .map((clip) => String(clip?.id || ""))
+      .filter(Boolean)
+  );
+  const byKey = new Map();
+  for (const raw of (Array.isArray(value) ? value : []).slice(
+    -MAX_AI_CAPTION_CHECKPOINTS
+  )) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const clipId = String(raw.clipId || "").trim().slice(0, 256);
+    const sourceStartMs = Math.round(finiteNumber(raw.sourceStartMs, -1));
+    const sourceEndMs = Math.round(finiteNumber(raw.sourceEndMs, -1));
+    const model = String(raw.model || "").trim();
+    const qualityProfile = String(
+      raw.qualityProfile || "legacy-unharnessed-v0"
+    ).trim().slice(0, 128);
+    if (
+      !clipId
+      || !clipIds.has(clipId)
+      || sourceStartMs < 0
+      || sourceEndMs <= sourceStartMs
+      || !["solar-pro3", "solar-mini"].includes(model)
+    ) {
+      continue;
+    }
+    const requestId = String(raw.requestId || "").trim().slice(0, 128);
+    const completedAt = String(raw.completedAt || "").trim().slice(0, 64);
+    const checkpoint = {
+      clipId,
+      sourceStartMs,
+      sourceEndMs,
+      model,
+      qualityProfile,
+      ...(requestId ? { requestId } : {}),
+      ...(completedAt ? { completedAt } : {})
+    };
+    byKey.set(
+      [
+        clipId,
+        sourceStartMs,
+        sourceEndMs,
+        model,
+        qualityProfile
+      ].join("\u0000"),
+      checkpoint
+    );
+  }
+  return [...byKey.values()].slice(-MAX_AI_CAPTION_CHECKPOINTS);
+}
+
 export function normalizeHexColor(value, fallback = "#ffffff") {
   const candidate = String(value || "").trim().toLowerCase();
   if (/^#[0-9a-f]{6}$/u.test(candidate)) {
@@ -112,6 +175,25 @@ export function normalizeHexColor(value, fallback = "#ffffff") {
     return `#${[...candidate.slice(1)].map((character) => character.repeat(2)).join("")}`;
   }
   return fallback;
+}
+
+export function normalizeAiSpeakerColors(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const assignments = {};
+  for (const [rawSpeakerId, rawColor] of Object.entries(value).slice(0, 64)) {
+    const speakerId = String(rawSpeakerId || "")
+      .trim()
+      .toLowerCase()
+      .slice(0, 80);
+    const color = String(rawColor || "").trim().toLowerCase();
+    if (!speakerId || !/^#[0-9a-f]{6}$/u.test(color)) {
+      continue;
+    }
+    assignments[speakerId] = color;
+  }
+  return assignments;
 }
 
 function normalizeImageMimeType(value) {
@@ -360,19 +442,9 @@ export function createEditorProjectFromCapture(captureState = {}, {
     selectedCueId: null,
     selectedAudioRegionId: null,
     playheadMs: 0,
-    subtitleDefaults: {
-      x: 0.5,
-      y: 0.84,
-      maxWidth: 0.86,
-      fontScale: 0.0675,
-      fontFamily: "Pretendard",
-      fontWeight: 800,
-      color: "#ffffff",
-      outlineColor: "#111111",
-      outlineWidth: 0.006,
-      backgroundColor: "transparent",
-      align: "center"
-    },
+    subtitleDefaults: captionStyleDefaults(
+      DEFAULT_CAPTION_STYLE_PRESET_ID
+    ),
     ai: {
       provider: "caption-agent",
       model: "solar-pro3",
@@ -381,7 +453,9 @@ export function createEditorProjectFromCapture(captureState = {}, {
       progress: 0,
       lastRunAt: null,
       error: null,
-      warnings: []
+      warnings: [],
+      captionCheckpoints: [],
+      speakerColors: {}
     },
     history: {
       undo: [],
@@ -460,19 +534,107 @@ export function normalizeEditorProject(raw) {
       );
       return normalized ? [normalized] : [];
     });
+  const rawSubtitleDefaults = raw.subtitleDefaults || {};
+  const cleanDefaults = captionStyleDefaults(
+    DEFAULT_CAPTION_STYLE_PRESET_ID
+  );
+  const hasKnownStylePreset = Object.hasOwn(
+    CAPTION_STYLE_PRESETS,
+    String(rawSubtitleDefaults.stylePresetId || "")
+  );
+  const appearsToUseMeasuredCleanStyle = (
+    (!rawSubtitleDefaults.fontFamily || rawSubtitleDefaults.fontFamily === "Pretendard")
+    && (!Number.isFinite(Number(rawSubtitleDefaults.fontScale))
+      || Number(rawSubtitleDefaults.fontScale) === cleanDefaults.fontScale)
+    && (!rawSubtitleDefaults.outlineColor
+      || normalizeHexColor(rawSubtitleDefaults.outlineColor) === cleanDefaults.outlineColor)
+    && (!Number.isFinite(Number(rawSubtitleDefaults.outlineWidth))
+      || Number(rawSubtitleDefaults.outlineWidth) === cleanDefaults.outlineWidth)
+    && (!rawSubtitleDefaults.backgroundColor
+      || rawSubtitleDefaults.backgroundColor === "transparent")
+  );
+  const stylePresetId = hasKnownStylePreset
+    ? normalizeCaptionStylePresetId(rawSubtitleDefaults.stylePresetId)
+    : appearsToUseMeasuredCleanStyle
+      ? DEFAULT_CAPTION_STYLE_PRESET_ID
+      : LEGACY_CAPTION_STYLE_PRESET_ID;
+  const selectedStyleDefaults = captionStyleDefaults(stylePresetId);
   const subtitleDefaults = {
-    ...defaults.subtitleDefaults,
-    ...(raw.subtitleDefaults || {}),
-    fontFamily: "Pretendard",
+    ...selectedStyleDefaults,
+    ...rawSubtitleDefaults,
+    stylePresetId,
+    fontId: selectedStyleDefaults.fontId,
+    fontFamily: selectedStyleDefaults.fontFamily,
     fontWeight: 800,
+    fontScale: clamp(
+      finiteNumber(rawSubtitleDefaults.fontScale, selectedStyleDefaults.fontScale),
+      0.025,
+      0.12
+    ),
+    lineHeight: clamp(
+      finiteNumber(rawSubtitleDefaults.lineHeight, selectedStyleDefaults.lineHeight),
+      1,
+      1.6
+    ),
+    maxLines: clamp(
+      Math.round(finiteNumber(
+        rawSubtitleDefaults.maxLines,
+        selectedStyleDefaults.maxLines
+      )),
+      1,
+      2
+    ),
+    maxWidth: clamp(
+      finiteNumber(rawSubtitleDefaults.maxWidth, selectedStyleDefaults.maxWidth),
+      0.4,
+      0.95
+    ),
     color: subtitleColor,
     outlineColor: normalizeHexColor(
-      raw.subtitleDefaults?.outlineColor,
-      defaults.subtitleDefaults.outlineColor
+      rawSubtitleDefaults.outlineColor,
+      selectedStyleDefaults.outlineColor
+    ),
+    outlineWidth: clamp(
+      finiteNumber(
+        rawSubtitleDefaults.outlineWidth,
+        selectedStyleDefaults.outlineWidth
+      ),
+      0,
+      0.02
     ),
     backgroundColor: migratingLegacyProject
       ? "transparent"
-      : String(raw.subtitleDefaults?.backgroundColor || defaults.subtitleDefaults.backgroundColor)
+      : String(
+        rawSubtitleDefaults.backgroundColor
+        || selectedStyleDefaults.backgroundColor
+      ),
+    shadowColor: String(
+      rawSubtitleDefaults.shadowColor || selectedStyleDefaults.shadowColor
+    ),
+    shadowOffsetXEm: clamp(
+      finiteNumber(
+        rawSubtitleDefaults.shadowOffsetXEm,
+        selectedStyleDefaults.shadowOffsetXEm
+      ),
+      -1,
+      1
+    ),
+    shadowOffsetYEm: clamp(
+      finiteNumber(
+        rawSubtitleDefaults.shadowOffsetYEm,
+        selectedStyleDefaults.shadowOffsetYEm
+      ),
+      -1,
+      1
+    ),
+    shadowBlurEm: clamp(
+      finiteNumber(
+        rawSubtitleDefaults.shadowBlurEm,
+        selectedStyleDefaults.shadowBlurEm
+      ),
+      0,
+      1
+    )
   };
   const rawAi = raw.ai || {};
   const localWhisperMetadata = (
@@ -491,7 +653,12 @@ export function normalizeEditorProject(raw) {
         error: null
       }
       : {}),
-    warnings: normalizeAiWarnings(rawAi.warnings)
+    warnings: normalizeAiWarnings(rawAi.warnings),
+    speakerColors: normalizeAiSpeakerColors(rawAi.speakerColors),
+    captionCheckpoints: normalizeAiCaptionCheckpoints(
+      rawAi.captionCheckpoints,
+      clips
+    )
   };
 
   return {
@@ -519,6 +686,21 @@ export function normalizeEditorProject(raw) {
     selectedAudioRegionId: audioRegions.some((region) => region.id === raw.selectedAudioRegionId)
       ? raw.selectedAudioRegionId
       : null
+  };
+}
+
+export function applyCaptionStylePreset(project, presetId) {
+  if (!project || typeof project !== "object") {
+    return project;
+  }
+  const normalizedPresetId = normalizeCaptionStylePresetId(presetId);
+  return {
+    ...project,
+    subtitleDefaults: {
+      ...(project.subtitleDefaults || {}),
+      ...captionStyleDefaults(normalizedPresetId)
+    },
+    updatedAt: nowIso()
   };
 }
 
@@ -1322,6 +1504,28 @@ export function deleteSubtitleCue(project, cueId) {
   };
 }
 
+const PRIMARY_AI_SPEAKER_IDS = new Set([
+  "",
+  "host",
+  "main",
+  "primary",
+  "speaker",
+  "speaker-0",
+  "speaker_0",
+  "streamer",
+  "unknown",
+  "화자0",
+  "화자-0",
+  "화자_0"
+]);
+
+function aiCaptionStackPriority(cue) {
+  const speakerId = String(cue?.remoteMeta?.speakerId || "")
+    .trim()
+    .toLowerCase();
+  return PRIMARY_AI_SPEAKER_IDS.has(speakerId) ? 0 : 1;
+}
+
 export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
   const clip = project.clips.find((candidate) => candidate.id === clipId);
   if (!clip) {
@@ -1341,7 +1545,9 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
     }))
     .sort((a, b) => (
       a.startOffsetMs - b.startOffsetMs ||
-      a.endOffsetMs - b.endOffsetMs
+      a.endOffsetMs - b.endOffsetMs ||
+      aiCaptionStackPriority(a) - aiCaptionStackPriority(b) ||
+      a.id.localeCompare(b.id)
     ));
   const overlaps = (first, second) => (
     Math.max(first.startOffsetMs, second.startOffsetMs) <
@@ -1391,7 +1597,34 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
       speakerLanes.set(speakerId, lane);
     }
   }
-  const subtitles = [...preserved, ...aiCues].sort((a, b) => {
+  const stackableCues = [...protectedInClip, ...aiCues];
+  const stackedAiCues = aiCues.map((cue) => {
+    const simultaneous = stackableCues
+      .filter((candidate) => overlaps(candidate, cue))
+      .sort((left, right) => (
+        (left.origin === "human" ? -1 : 0)
+        - (right.origin === "human" ? -1 : 0)
+        || aiCaptionStackPriority(left) - aiCaptionStackPriority(right)
+        || left.lane - right.lane
+        || left.startOffsetMs - right.startOffsetMs
+        || left.id.localeCompare(right.id)
+      ));
+    if (simultaneous.length <= 1) {
+      return cue;
+    }
+    const rank = simultaneous.findIndex((candidate) => candidate.id === cue.id);
+    const placement = cue.remoteMeta?.placement || "bottom";
+    const y = placement === "top"
+      ? 0.18 + rank * 0.12
+      : placement === "center"
+        ? 0.5 + (rank - (simultaneous.length - 1) / 2) * 0.12
+        : 0.84 - rank * 0.12;
+    return {
+      ...cue,
+      y: clamp(y, 0.08, 0.92)
+    };
+  });
+  const subtitles = [...preserved, ...stackedAiCues].sort((a, b) => {
     const clipA = project.clips.find((candidate) => candidate.id === a.clipId);
     const clipB = project.clips.find((candidate) => candidate.id === b.clipId);
     return (clipA?.timelineStartMs || 0) + a.startOffsetMs - ((clipB?.timelineStartMs || 0) + b.startOffsetMs);
@@ -1402,7 +1635,7 @@ export function replaceAiSubtitleDraft(project, clipId, drafts = []) {
     subtitles,
     selectedCueId: subtitles.some((cue) => cue.id === project.selectedCueId)
       ? project.selectedCueId
-      : aiCues[0]?.id || protectedInClip[0]?.id || null,
+      : stackedAiCues[0]?.id || protectedInClip[0]?.id || null,
     updatedAt: nowIso()
   };
 }

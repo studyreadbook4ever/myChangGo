@@ -338,6 +338,7 @@ async function main() {
         "generate-captions",
         "caption-agent-warning",
         "cue-review-note",
+        "caption-style-preset",
         "export-video"
       ];
       return {
@@ -346,6 +347,10 @@ async function main() {
         endpoint: document.getElementById("caption-agent-endpoint")?.value,
         model: document.getElementById("caption-model")?.value,
         fontSize: document.getElementById("font-size")?.value,
+        stylePreset: document.getElementById("caption-style-preset")?.value,
+        stylePresetOptions: [
+          ...document.getElementById("caption-style-preset")?.options || []
+        ].map((option) => option.value),
         tokenType: document.getElementById("caption-agent-token")?.type,
         sttKeyType: document.getElementById("caption-stt-api-key")?.type,
         upstageKeyType: document.getElementById("caption-upstage-api-key")?.type,
@@ -365,6 +370,15 @@ async function main() {
   assert(editor.endpoint === "http://127.0.0.1:4319/v1/captions", `기본 자막 에이전트 주소가 올바르지 않습니다: ${editor.endpoint}`);
   assert(editor.model === "solar-pro3", `기본 Solar 모델이 올바르지 않습니다: ${editor.model}`);
   assert(editor.fontSize === "6.75", `기본 자막 크기가 30% 확대값이 아닙니다: ${editor.fontSize}`);
+  assert(
+    editor.stylePreset === "kr-vtuber-clean-v1",
+    `기본 자막 스타일이 완성본 측정 프리셋이 아닙니다: ${editor.stylePreset}`
+  );
+  assert(
+    editor.stylePresetOptions.join(",") ===
+      "kr-vtuber-clean-v1,kr-vtuber-paperlogy-v1,pretendard-legacy-v1",
+    `자막 스타일 선택지가 다릅니다: ${editor.stylePresetOptions.join(",")}`
+  );
   assert(editor.tokenType === "password", "자막 에이전트 세션 토큰 입력이 password가 아닙니다.");
   assert(editor.sttKeyType === "password", "STT API 키 입력이 password가 아닙니다.");
   assert(editor.upstageKeyType === "password", "Upstage API 키 입력이 password가 아닙니다.");
@@ -382,6 +396,10 @@ async function main() {
       const done = arguments[arguments.length - 1];
       const timeout = setTimeout(() => done({ error: "caption agent runtime timeout" }), 8_000);
       (async () => {
+        await Promise.all([
+          document.fonts.load('800 32px "Pretendard"', "한글 자막"),
+          document.fonts.load('800 32px "Paperlogy"', "한글 자막")
+        ]);
         const cacheNames = await caches.keys();
         const localAgentPermission = await chrome.permissions.contains({
           origins: ["http://127.0.0.1/*"]
@@ -390,6 +408,16 @@ async function main() {
         clearTimeout(timeout);
         done({
           cacheNames,
+          fonts: {
+            paperlogy: document.fonts.check(
+              '800 32px "Paperlogy"',
+              "한글 자막"
+            ),
+            pretendard: document.fonts.check(
+              '800 32px "Pretendard"',
+              "한글 자막"
+            )
+          },
           localAgentPermission,
           settings: stored["chzzk-kirinuki-caption-agent-settings-v1"] || null
         });
@@ -401,6 +429,8 @@ async function main() {
     args: []
   });
   assert(!runtime.error, `editor runtime asset 검사 실패: ${runtime.error}`);
+  assert(runtime.fonts?.pretendard === true, "Pretendard 웹폰트를 로드하지 못했습니다.");
+  assert(runtime.fonts?.paperlogy === true, "Paperlogy 웹폰트를 로드하지 못했습니다.");
   assert(runtime.localAgentPermission === true, "127.0.0.1 자막 에이전트 host permission이 없습니다.");
   assert(!runtime.cacheNames.includes("transformers-cache"), "이전 로컬 Whisper 모델 캐시가 남아 있습니다.");
 

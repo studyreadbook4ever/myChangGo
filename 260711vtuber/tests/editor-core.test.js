@@ -3,12 +3,14 @@ import test from "node:test";
 
 import {
   EDITOR_SCHEMA,
+  MAX_AI_CAPTION_CHECKPOINTS,
   MAX_AI_WARNINGS,
   MAX_SUBTITLE_LANES,
   MIN_SUBTITLE_LANES,
   SUPPORTED_IMAGE_ASSET_MIME_TYPES,
   addSubtitleLane,
   appendAiSubtitleDrafts,
+  applyCaptionStylePreset,
   applyMediaAlignmentOffset,
   audioRegionAtTimeline,
   audioRegionTimelineRange,
@@ -33,6 +35,7 @@ import {
   mergeCaptureIntoEditorProject,
   mergeAiWarnings,
   normalizeEditorProject,
+  normalizeAiCaptionCheckpoints,
   normalizeImageAssetSource,
   projectDurationMs,
   reorderClip,
@@ -83,6 +86,31 @@ test("방송 회차 ID는 같은 채널의 서로 다른 방송을 구분한다"
   });
   assert.equal(first, "broadcast:channel-a:2026-07-27 18:00:00");
   assert.notEqual(first, second);
+});
+
+test("AI 자막 체크포인트는 현재 컷·범위·지원 모델만 제한 개수로 복원한다", () => {
+  const clips = [{
+    id: "first",
+    sourceStartMs: 10_000,
+    sourceEndMs: 15_000
+  }];
+  const valid = {
+    clipId: "first",
+    sourceStartMs: 10_000,
+    sourceEndMs: 15_000,
+    model: "solar-pro3",
+    requestId: "request-1",
+    completedAt: "2026-07-29T00:00:00.000Z"
+  };
+  const normalized = normalizeAiCaptionCheckpoints([
+    { ...valid, clipId: "missing" },
+    { ...valid, model: "unknown-model" },
+    valid,
+    { ...valid, requestId: "request-latest" }
+  ], clips);
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0].requestId, "request-latest");
+  assert.equal(MAX_AI_CAPTION_CHECKPOINTS, 500);
 });
 
 test("생방송과 다시보기는 채널·방송 시작 시각이 같으면 같은 회차로 연결한다", () => {
@@ -188,7 +216,41 @@ test("새 프로젝트는 에셋·자막 2개 레인과 고정 음성 레인 데
   assert.equal(project.selectedImageAssetId, null);
   assert.equal(project.selectedAudioRegionId, null);
   assert.equal(project.subtitleDefaults.fontScale, 0.0675);
+  assert.equal(project.subtitleDefaults.stylePresetId, "kr-vtuber-clean-v1");
+  assert.equal(project.subtitleDefaults.maxLines, 1);
   assert.deepEqual(project.ai.warnings, []);
+  assert.deepEqual(project.ai.speakerColors, {});
+});
+
+test("저작권 고지를 포함한 Paperlogy 프리셋을 명시적으로 적용하고 정규화한다", () => {
+  const project = applyCaptionStylePreset(
+    createEditorProjectFromCapture(captureState),
+    "kr-vtuber-paperlogy-v1"
+  );
+  assert.equal(project.subtitleDefaults.stylePresetId, "kr-vtuber-paperlogy-v1");
+  assert.equal(project.subtitleDefaults.fontFamily, "Paperlogy");
+  assert.equal(project.subtitleDefaults.fontScale, 0.061);
+  assert.equal(project.subtitleDefaults.maxLines, 1);
+
+  const normalized = normalizeEditorProject(
+    JSON.parse(JSON.stringify(project))
+  );
+  assert.equal(normalized.subtitleDefaults.stylePresetId, "kr-vtuber-paperlogy-v1");
+  assert.equal(normalized.subtitleDefaults.fontFamily, "Paperlogy");
+
+  const repairedMismatch = normalizeEditorProject({
+    ...normalized,
+    subtitleDefaults: {
+      ...normalized.subtitleDefaults,
+      fontFamily: "Pretendard"
+    }
+  });
+  assert.equal(
+    repairedMismatch.subtitleDefaults.stylePresetId,
+    "kr-vtuber-paperlogy-v1"
+  );
+  assert.equal(repairedMismatch.subtitleDefaults.fontId, "paperlogy");
+  assert.equal(repairedMismatch.subtitleDefaults.fontFamily, "Paperlogy");
 });
 
 test("AI 처리 경고는 프로젝트 전체 상한에서 잘라 저장·병합한다", () => {
@@ -255,6 +317,8 @@ test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v3로 이관
     selectedCueId: "legacy-cue",
     subtitleDefaults: {
       ...current.subtitleDefaults,
+      stylePresetId: undefined,
+      fontId: undefined,
       fontScale: 0.052,
       color: "#F2C14E",
       backgroundColor: "rgba(0, 0, 0, 0.72)"
@@ -300,6 +364,10 @@ test("v1 프로젝트를 컷·자막 수정 상태를 잃지 않고 v3로 이관
   assert.equal(migrated.subtitleDefaults.fontFamily, "Pretendard");
   assert.equal(migrated.subtitleDefaults.fontWeight, 800);
   assert.equal(migrated.subtitleDefaults.backgroundColor, "transparent");
+  assert.equal(
+    migrated.subtitleDefaults.stylePresetId,
+    "pretendard-legacy-v1"
+  );
 });
 
 test("v2 프로젝트를 기존 자막·음성 선택 상태를 보존해 v3로 이관한다", () => {
@@ -819,6 +887,17 @@ test("동시에 말하는 원격 화자는 서로 다른 자막 레인에 모두
   let project = createEditorProjectFromCapture(captureState);
   project = replaceAiSubtitleDraft(project, "clip-first", [
     {
+      id: "simultaneous-guest",
+      startOffsetMs: 500,
+      endOffsetMs: 2_000,
+      text: "게스트 발화",
+      remoteMeta: {
+        speakerId: "guest",
+        reviewRequired: true,
+        placement: "bottom"
+      }
+    },
+    {
       id: "simultaneous-main",
       startOffsetMs: 500,
       endOffsetMs: 2_000,
@@ -827,17 +906,6 @@ test("동시에 말하는 원격 화자는 서로 다른 자막 레인에 모두
         speakerId: "main",
         reviewRequired: false,
         placement: "bottom"
-      }
-    },
-    {
-      id: "simultaneous-guest",
-      startOffsetMs: 700,
-      endOffsetMs: 1_800,
-      text: "게스트 발화",
-      remoteMeta: {
-        speakerId: "guest",
-        reviewRequired: true,
-        placement: "top"
       }
     },
     {
@@ -862,6 +930,18 @@ test("동시에 말하는 원격 화자는 서로 다른 자막 레인에 모두
     ]
   );
   assert.deepEqual(findSubtitleOverlaps(project), []);
+  assert.equal(
+    project.subtitles.find((cue) => cue.id === "simultaneous-main").y,
+    0.84
+  );
+  assert.equal(
+    project.subtitles.find((cue) => cue.id === "simultaneous-guest").y,
+    0.72
+  );
+  assert.equal(
+    project.subtitles.find((cue) => cue.id === "main-followup").y,
+    0.84
+  );
 });
 
 test("겹쳐 들어온 AI 타임스탬프도 서로 겹치지 않는 cue로 정규화한다", () => {

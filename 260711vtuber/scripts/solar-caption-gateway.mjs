@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -14,8 +14,13 @@ import {
   CaptionProtocolError
 } from "../src/caption-agent/protocol.js";
 import {
+  CAPTION_QUALITY_PROFILE_ID
+} from "../src/caption-agent/caption-quality-harness.js";
+import {
   CaptionGatewayError,
   DEFAULT_TRANSCRIPTION_MODE,
+  LOCAL_WHISPERCPP_TRANSCRIPTION_MODE,
+  MAX_SOLAR_CALLS_PER_CLIP,
   resolveCaptionPipelineConfig,
   resolveCaptionPipelineRequestConfig,
   runCaptionPipeline
@@ -23,7 +28,12 @@ import {
 
 export const CAPTION_AGENT_CAPABILITY_SCHEMA_ID =
   "chzzk-kirinuki-caption-agent/capability-v1";
+export const CAPTION_AGENT_SESSION_SCHEMA_ID =
+  "chzzk-kirinuki-caption-agent/session-v1";
+export const CAPTION_AGENT_HEALTH_SCHEMA_ID =
+  "chzzk-kirinuki-caption-agent/health-v1";
 export const DEFAULT_CAPTION_GATEWAY_PORT = 4319;
+export const DEFAULT_PAIRING_LIMIT_PER_MINUTE = 12;
 export const CAPTION_PROVIDER_REQUEST_HEADERS = Object.freeze({
   sttEndpoint: "x-kirinuki-stt-endpoint",
   sttModel: "x-kirinuki-stt-model",
@@ -40,6 +50,12 @@ function requiredServerValue(value, name) {
     });
   }
   return normalized;
+}
+
+function enabledEnvironmentFlag(value) {
+  return ["1", "true", "yes", "on"].includes(
+    String(value || "").trim().toLowerCase()
+  );
 }
 
 export function resolveCaptionGatewayConfig(env = process.env) {
@@ -73,11 +89,14 @@ export function resolveCaptionGatewayConfig(env = process.env) {
   }
   const requestedBodyBytes = Number(env.KIRINUKI_MAX_BODY_BYTES);
   const minimumBodyBytes = Math.ceil(pipeline.maxAudioBytes * 4 / 3) + 1_048_576;
+  const autoPair = enabledEnvironmentFlag(env.KIRINUKI_AUTO_PAIR);
+  const configuredAgentToken = String(env.KIRINUKI_AGENT_TOKEN || "").trim();
+  if (!autoPair && !configuredAgentToken) {
+    requiredServerValue(configuredAgentToken, "KIRINUKI_AGENT_TOKEN");
+  }
   return {
-    agentToken: requiredServerValue(
-      env.KIRINUKI_AGENT_TOKEN,
-      "KIRINUKI_AGENT_TOKEN"
-    ),
+    agentToken: configuredAgentToken,
+    autoPair,
     allowedOrigin,
     port: portValue,
     maxBodyBytes: Number.isFinite(requestedBodyBytes) && requestedBodyBytes > 0
@@ -120,6 +139,16 @@ function setCorsHeaders(response, origin, allowedOrigin) {
   );
   response.setHeader("access-control-max-age", "600");
   response.setHeader("vary", "Origin");
+}
+
+function pairingAllowed(pairingState, now = Date.now()) {
+  const windowMs = 60_000;
+  if (now - pairingState.windowStartedAt >= windowMs) {
+    pairingState.windowStartedAt = now;
+    pairingState.count = 0;
+  }
+  pairingState.count += 1;
+  return pairingState.count <= DEFAULT_PAIRING_LIMIT_PER_MINUTE;
 }
 
 function sendJson(response, statusCode, value) {
@@ -240,9 +269,19 @@ function providerOverrides(request) {
 }
 
 function providerReadiness(baseConfig, overrides) {
+  const effectiveEndpoint = overrides.sttEndpoint || baseConfig.sttEndpoint;
+  const localWhisperReady = (
+    baseConfig.transcriptionMode === LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+    && /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\//iu.test(
+      effectiveEndpoint
+    )
+  );
   const configured = {
-    sttEndpoint: Boolean(overrides.sttEndpoint || baseConfig.sttEndpoint),
-    sttApiKey: Boolean(overrides.sttApiKey || baseConfig.sttApiKey),
+    sttEndpoint: Boolean(effectiveEndpoint),
+    sttApiKey: (
+      localWhisperReady
+      || Boolean(overrides.sttApiKey || baseConfig.sttApiKey)
+    ),
     upstageApiKey: Boolean(
       overrides.upstageApiKey || baseConfig.upstageApiKey
     )
@@ -273,13 +312,26 @@ function capabilityResponse(config, overrides) {
     defaultModel: effectivePipeline.solarModel,
     availableModels: [...SUPPORTED_SOLAR_CAPTION_MODELS],
     transcription: {
-      mode: DEFAULT_TRANSCRIPTION_MODE,
+      mode: effectivePipeline.transcriptionMode || DEFAULT_TRANSCRIPTION_MODE,
       solarInput: "text-only",
       requiresTimedTranscript: true,
+      authentication: (
+        effectivePipeline.transcriptionMode
+        === LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+          ? "none-loopback"
+          : "bearer"
+      ),
       ready: configured.sttEndpoint && configured.sttApiKey
     },
     requestSchema: CAPTION_AGENT_REQUEST_SCHEMA_ID,
     responseSchema: CAPTION_AGENT_RESPONSE_SCHEMA_ID,
+    qualityHarness: {
+      profile: CAPTION_QUALITY_PROFILE_ID,
+      automaticBodyLines: 1,
+      placement: "bottom",
+      paidRepairCalls: 0
+    },
+    maxSolarCallsPerClip: MAX_SOLAR_CALLS_PER_CLIP,
     maxCueDurationMs: MAX_CAPTION_CUE_DURATION_MS,
     maxClipDurationMs: MAX_CLIP_DURATION_MS,
     maxAudioBytes: effectivePipeline.maxAudioBytes,
@@ -291,9 +343,23 @@ function capabilityResponse(config, overrides) {
 export function createSolarCaptionGatewayServer({
   env = process.env,
   fetchImpl = globalThis.fetch,
-  pipelineRunner = runCaptionPipeline
+  pipelineRunner = runCaptionPipeline,
+  randomBytesImpl = randomBytes,
+  now = Date.now
 } = {}) {
-  const config = resolveCaptionGatewayConfig(env);
+  const resolvedConfig = resolveCaptionGatewayConfig(env);
+  const generatedToken = resolvedConfig.agentToken
+    ? ""
+    : randomBytesImpl(32).toString("base64url");
+  const config = {
+    ...resolvedConfig,
+    agentToken: resolvedConfig.agentToken || generatedToken
+  };
+  const pairingState = {
+    windowStartedAt: now(),
+    count: 0
+  };
+  const solarResponseFormatCache = new Map();
   const server = createServer(async (request, response) => {
     const origin = String(request.headers.origin || "");
     if (origin && origin !== config.allowedOrigin) {
@@ -308,7 +374,10 @@ export function createSolarCaptionGatewayServer({
     setCorsHeaders(response, origin, config.allowedOrigin);
 
     const requestUrl = new URL(request.url || "/", "http://127.0.0.1");
-    if (requestUrl.pathname !== "/v1/captions") {
+    const isHealthRequest = requestUrl.pathname === "/v1/health";
+    const isPairingRequest = requestUrl.pathname === "/v1/session";
+    const isCaptionRequest = requestUrl.pathname === "/v1/captions";
+    if (!isHealthRequest && !isPairingRequest && !isCaptionRequest) {
       sendJson(response, 404, {
         error: { code: "NOT_FOUND", message: "요청 경로를 찾지 못했습니다." }
       });
@@ -318,6 +387,100 @@ export function createSolarCaptionGatewayServer({
       response.statusCode = 204;
       response.setHeader("cache-control", "no-store");
       response.end();
+      return;
+    }
+    if (isHealthRequest) {
+      if (
+        origin !== config.allowedOrigin
+        || String(request.headers["x-kirinuki-protocol"] || "")
+          !== CAPTION_AGENT_REQUEST_SCHEMA_ID
+      ) {
+        sendJson(response, 403, {
+          error: {
+            code: "HEALTH_PROBE_NOT_ALLOWED",
+            message: "정확한 Origin과 자막 프로토콜이 필요합니다."
+          }
+        });
+        return;
+      }
+      if (request.method !== "GET") {
+        response.setHeader("allow", "GET, OPTIONS");
+        sendJson(response, 405, {
+          error: {
+            code: "METHOD_NOT_ALLOWED",
+            message: "GET 요청만 지원합니다."
+          }
+        });
+        return;
+      }
+      sendJson(response, 200, {
+        schema: CAPTION_AGENT_HEALTH_SCHEMA_ID,
+        status: "ok",
+        managed: config.autoPair,
+        originBinding: "exact-extension",
+        transcriptionMode:
+          config.pipeline.transcriptionMode || DEFAULT_TRANSCRIPTION_MODE
+      });
+      return;
+    }
+    if (isPairingRequest) {
+      if (!config.autoPair) {
+        sendJson(response, 404, {
+          error: {
+            code: "PAIRING_DISABLED",
+            message: "자동 로컬 연결이 비활성화되어 있습니다."
+          }
+        });
+        return;
+      }
+      if (origin !== config.allowedOrigin) {
+        sendJson(response, 403, {
+          error: {
+            code: "ORIGIN_NOT_ALLOWED",
+            message: "정확한 확장 프로그램 Origin에서만 연결할 수 있습니다."
+          }
+        });
+        return;
+      }
+      if (request.method !== "POST") {
+        response.setHeader("allow", "POST, OPTIONS");
+        sendJson(response, 405, {
+          error: {
+            code: "METHOD_NOT_ALLOWED",
+            message: "POST 요청만 지원합니다."
+          }
+        });
+        return;
+      }
+      if (
+        String(request.headers["x-kirinuki-protocol"] || "")
+        !== CAPTION_AGENT_REQUEST_SCHEMA_ID
+      ) {
+        sendJson(response, 400, {
+          error: {
+            code: "PROTOCOL_REQUIRED",
+            message: "지원하는 자막 프로토콜 헤더가 필요합니다."
+          }
+        });
+        return;
+      }
+      if (!pairingAllowed(pairingState, now())) {
+        response.setHeader("retry-after", "60");
+        sendJson(response, 429, {
+          error: {
+            code: "PAIRING_RATE_LIMITED",
+            message: "자동 연결 요청이 너무 많습니다. 잠시 뒤 다시 시도해 주세요."
+          }
+        });
+        return;
+      }
+      sendJson(response, 200, {
+        schema: CAPTION_AGENT_SESSION_SCHEMA_ID,
+        status: "ok",
+        authentication: "bearer-process-memory",
+        expires: "companion-restart",
+        token: config.agentToken
+      });
       return;
     }
     if (request.method !== "GET" && request.method !== "POST") {
@@ -376,6 +539,7 @@ export function createSolarCaptionGatewayServer({
       const result = await pipelineRunner(body, {
         fetchImpl,
         ...pipelineConfig,
+        solarResponseFormatCache,
         signal: pipelineController.signal
       });
       if (!pipelineController.signal.aborted) {

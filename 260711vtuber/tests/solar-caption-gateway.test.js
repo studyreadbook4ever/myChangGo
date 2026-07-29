@@ -8,7 +8,9 @@ import {
   validateCaptionAgentRequest
 } from "../src/caption-agent/protocol.js";
 import {
+  DEFAULT_PIPELINE_TIMEOUT_MS,
   DEFAULT_SOLAR_MODEL,
+  LOCAL_WHISPERCPP_TRANSCRIPTION_MODE,
   MAX_SOLAR_PROMPT_BYTES,
   MAX_STT_SEGMENTS,
   MAX_STT_WORDS,
@@ -19,6 +21,7 @@ import {
   requestExternalStt,
   requestSolarCaptions,
   resolveCaptionPipelineConfig,
+  resolveCaptionPipelineRequestConfig,
   runCaptionPipeline
 } from "../src/caption-agent/solar-gateway-core.js";
 import {
@@ -27,6 +30,8 @@ import {
 } from "../src/editor/caption-agent.js";
 import {
   CAPTION_AGENT_CAPABILITY_SCHEMA_ID,
+  CAPTION_AGENT_HEALTH_SCHEMA_ID,
+  CAPTION_AGENT_SESSION_SCHEMA_ID,
   createSolarCaptionGatewayServer,
   resolveCaptionGatewayConfig
 } from "../scripts/solar-caption-gateway.mjs";
@@ -155,6 +160,43 @@ test("외부 STT의 segment·word 초 시각을 클립 기준 정수 밀리초�
   ]);
 });
 
+test("local-whispercpp 모드는 loopback STT에 가짜 API 키를 요구하지 않는다", async () => {
+  const config = resolveCaptionPipelineConfig({
+    ...TEST_ENV,
+    KIRINUKI_STT_MODE: LOCAL_WHISPERCPP_TRANSCRIPTION_MODE,
+    KIRINUKI_STT_ENDPOINT:
+      "http://127.0.0.1:4318/v1/audio/transcriptions",
+    KIRINUKI_STT_API_KEY: ""
+  });
+  const requestConfig = resolveCaptionPipelineRequestConfig(config, {});
+  assert.equal(
+    requestConfig.transcriptionMode,
+    LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+  );
+  assert.equal(requestConfig.sttApiKey, "");
+
+  let receivedAuthorization = "not-called";
+  await requestExternalStt(normalizedCaptionRequest(), {
+    ...requestConfig,
+    fetchImpl: async (_url, init) => {
+      receivedAuthorization = init.headers.authorization;
+      return jsonResponse({
+        text: "로컬 전사",
+        segments: [{ start: 0.1, end: 0.8, text: "로컬 전사" }]
+      });
+    },
+    wavBytes: Buffer.from(testWavBase64(), "base64")
+  });
+  assert.equal(receivedAuthorization, undefined);
+
+  assert.throws(
+    () => resolveCaptionPipelineRequestConfig(config, {
+      sttEndpoint: "https://stt.example/v1/audio/transcriptions"
+    }),
+    (error) => error?.code === "STT_PROVIDER_PAIR_REQUIRED"
+  );
+});
+
 test("외부 STT 배열 개수와 Solar 전사 프롬프트 크기를 처리 전에 제한한다", () => {
   assert.throws(
     () => normalizeSttTranscript({
@@ -200,7 +242,7 @@ test("외부 STT 배열 개수와 Solar 전사 프롬프트 크기를 처리 전
   );
 });
 
-test("파이프라인은 base64 WAV를 외부 STT에만 보내고 Solar json_schema 실패 시 json_object로 폴백한다", async () => {
+test("파이프라인은 base64 WAV를 STT에만 보내고 Solar에는 중복 없는 timed unit을 한 번 보낸다", async () => {
   const config = resolveCaptionPipelineConfig(TEST_ENV);
   const calls = [];
   const rawAudio = captionRequest().audio.data;
@@ -245,14 +287,13 @@ test("파이프라인은 base64 WAV를 외부 STT에만 보내고 Solar json_sch
       solarInput.visualPlacement.samples,
       captionRequest().visual.samples
     );
+    assert.deepEqual(solarInput.timedUnits, [
+      { startMs: 100, endMs: 1_000, text: "안녕", speakerId: "unknown" },
+      { startMs: 4_200, endMs: 5_200, text: "반가워", speakerId: "unknown" }
+    ]);
+    assert.equal(Object.hasOwn(solarInput, "transcript"), false);
     assert.equal(body.messages[1].content.includes("base64"), false);
-    if (calls.length === 2) {
-      assert.equal(body.response_format.type, "json_schema");
-      return jsonResponse({
-        error: { message: "response_format json_schema is unsupported" }
-      }, 400);
-    }
-    assert.equal(body.response_format.type, "json_object");
+    assert.equal(body.response_format.type, "json_schema");
     return jsonResponse({
       choices: [{
         message: {
@@ -275,7 +316,7 @@ test("파이프라인은 base64 WAV를 외부 STT에만 보내고 Solar json_sch
     fetchImpl,
     ...config
   });
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 2);
   assert.equal(result.schema, CAPTION_AGENT_RESPONSE_SCHEMA_ID);
   assert.equal(result.sttModel, "remote-korean-stt");
   assert.equal(result.captionModel, "solar-pro3");
@@ -285,7 +326,7 @@ test("파이프라인은 base64 WAV를 외부 STT에만 보내고 Solar json_sch
   assert(result.warnings.some((warning) => warning.code === "SPLIT_LONG_CUE"));
 });
 
-test("Solar는 json_schema와 json_object가 모두 미지원이면 response_format 없는 JSON 요청으로 폴백한다", async () => {
+test("Solar JSON 형식이 미지원이어도 승인 없는 유료 폴백 호출은 하지 않는다", async () => {
   const request = normalizedCaptionRequest({
     clip: {
       id: "gateway-clip-1",
@@ -303,35 +344,75 @@ test("Solar는 json_schema와 json_object가 모두 미지원이면 response_for
     assert.equal(String(url), UPSTAGE_CHAT_COMPLETIONS_URL);
     const body = JSON.parse(init.body);
     bodies.push(body);
-    if (bodies.length === 1) {
-      return jsonResponse({
-        error: { message: "invalid response_format: json_schema" }
-      }, 422);
+    return jsonResponse({
+      error: { message: "invalid response_format: json_schema" }
+    }, 422);
+  };
+
+  await assert.rejects(
+    () => requestSolarCaptions(request, transcript, {
+      fetchImpl,
+      upstageApiKey: "test-upstage-key",
+      solarModel: "solar-pro3"
+    }),
+    (error) => error?.code === "SOLAR_RESPONSE_FORMAT_UNSUPPORTED"
+  );
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].response_format.type, "json_schema");
+});
+
+test("확인된 Solar 응답 형식은 프로세스 메모리에 캐시하고 매 컷 한 번만 호출한다", async () => {
+  const request = normalizedCaptionRequest({
+    clip: {
+      id: "gateway-clip-cache",
+      title: "",
+      durationMs: 4_000
     }
-    if (bodies.length === 2) {
-      return jsonResponse({
-        error: { message: "json_object response format is not supported" }
-      }, 400);
-    }
+  });
+  const transcript = {
+    text: "캐시 테스트",
+    segments: [{ startMs: 100, endMs: 900, text: "캐시 테스트" }],
+    words: []
+  };
+  const responseFormatCache = new Map();
+  const attemptedFormats = [];
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    attemptedFormats.push(body.response_format?.type || "plain");
     return jsonResponse({
       choices: [{
         message: {
-          content: "```json\n{\"cues\":[{\"startMs\":100,\"endMs\":900,\"text\":\"뭐야?.\",\"speakerId\":\"main\",\"reviewRequired\":false,\"placement\":\"bottom\"}]}\n```"
+          content: JSON.stringify({
+            cues: [{
+              startMs: 100,
+              endMs: 900,
+              text: "캐시 테스트",
+              speakerId: "main",
+              reviewRequired: false,
+              placement: "bottom"
+            }]
+          })
         }
       }]
     });
   };
 
-  const result = await requestSolarCaptions(request, transcript, {
+  await requestSolarCaptions(request, transcript, {
     fetchImpl,
     upstageApiKey: "test-upstage-key",
-    solarModel: "solar-pro3"
+    responseFormatCache
   });
-  assert.equal(bodies.length, 3);
-  assert.equal(bodies[0].response_format.type, "json_schema");
-  assert.equal(bodies[1].response_format.type, "json_object");
-  assert.equal(Object.hasOwn(bodies[2], "response_format"), false);
-  assert.equal(result.cues[0].text, "뭐야?");
+  await requestSolarCaptions(request, transcript, {
+    fetchImpl,
+    upstageApiKey: "test-upstage-key",
+    responseFormatCache
+  });
+
+  assert.deepEqual(attemptedFormats, [
+    "json_schema",
+    "json_schema"
+  ]);
+  assert.equal(responseFormatCache.get("solar-pro3"), "json_schema");
 });
 
 test("Solar Mini 선택은 실제 Upstage 모델까지 관통하고 Pro 3 전용 reasoning 필드를 보내지 않는다", async () => {
@@ -411,7 +492,7 @@ test("새 자막 모델 계약은 Solar Pro 3와 Solar Mini만 허용한다", ()
   );
 });
 
-test("Solar가 발화를 비우거나 잘못된 JSON을 주면 다음 안전한 응답 형식으로 재시도한다", async () => {
+test("Solar가 발화를 비우면 자동 유료 재시도 없이 안전하게 실패한다", async () => {
   const request = normalizedCaptionRequest({
     clip: {
       id: "gateway-clip-1",
@@ -425,36 +506,17 @@ test("Solar가 발화를 비우거나 잘못된 JSON을 주면 다음 안전한 
     words: []
   };
   let callCount = 0;
-  const result = await requestSolarCaptions(request, transcript, {
+  await assert.rejects(() => requestSolarCaptions(request, transcript, {
     fetchImpl: async () => {
       callCount += 1;
-      if (callCount === 1) {
-        return jsonResponse({
-          choices: [{ message: { content: "{\"cues\":[]}" } }]
-        });
-      }
       return jsonResponse({
-        choices: [{
-          message: {
-            content: JSON.stringify({
-              cues: [{
-                startMs: 100,
-                endMs: 1_100,
-                text: "안 들렸어?",
-                speakerId: "main",
-                reviewRequired: false,
-                placement: "bottom"
-              }]
-            })
-          }
-        }]
+        choices: [{ message: { content: "{\"cues\":[]}" } }]
       });
     },
     upstageApiKey: "test-upstage-key",
     solarModel: "solar-pro3"
-  });
-  assert.equal(callCount, 2);
-  assert.equal(result.cues[0].text, "안 들렸어?");
+  }), (error) => error?.code === "EMPTY_SOLAR_CAPTIONS");
+  assert.equal(callCount, 1);
 });
 
 test("Solar가 길이 제한 등으로 중단한 부분 JSON은 완료 자막으로 받지 않는다", async () => {
@@ -604,6 +666,96 @@ function localHttpJson({
   });
 }
 
+test("managed 게이트웨이는 exact Extension Origin에만 메모리 세션을 자동 발급한다", async (t) => {
+  const env = {
+    ...TEST_ENV,
+    KIRINUKI_AGENT_TOKEN: "",
+    KIRINUKI_AUTO_PAIR: "1"
+  };
+  const { server, config } = createSolarCaptionGatewayServer({
+    env,
+    randomBytesImpl: () => Buffer.alloc(32, 7)
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const { port } = server.address();
+
+  for (let index = 0; index < 16; index += 1) {
+    const health = await localHttpJson({
+      port,
+      method: "GET",
+      path: "/v1/health",
+      headers: {
+        origin: ALLOWED_ORIGIN,
+        "x-kirinuki-protocol": CAPTION_AGENT_REQUEST_SCHEMA_ID
+      }
+    });
+    assert.equal(health.status, 200);
+    assert.deepEqual(health.body, {
+      schema: CAPTION_AGENT_HEALTH_SCHEMA_ID,
+      status: "ok",
+      managed: true,
+      originBinding: "exact-extension",
+      transcriptionMode: "external-timed-stt"
+    });
+  }
+
+  const missingOrigin = await localHttpJson({
+    port,
+    method: "POST",
+    path: "/v1/session",
+    headers: {
+      "x-kirinuki-protocol": CAPTION_AGENT_REQUEST_SCHEMA_ID
+    }
+  });
+  assert.equal(missingOrigin.status, 403);
+
+  const wrongProtocol = await localHttpJson({
+    port,
+    method: "POST",
+    path: "/v1/session",
+    headers: {
+      origin: ALLOWED_ORIGIN,
+      "x-kirinuki-protocol": "unknown"
+    }
+  });
+  assert.equal(wrongProtocol.status, 400);
+
+  const paired = await localHttpJson({
+    port,
+    method: "POST",
+    path: "/v1/session",
+    headers: {
+      origin: ALLOWED_ORIGIN,
+      "x-kirinuki-protocol": CAPTION_AGENT_REQUEST_SCHEMA_ID
+    }
+  });
+  assert.equal(paired.status, 200);
+  assert.deepEqual(paired.body, {
+    schema: CAPTION_AGENT_SESSION_SCHEMA_ID,
+    status: "ok",
+    authentication: "bearer-process-memory",
+    expires: "companion-restart",
+    token: config.agentToken
+  });
+  assert.equal(config.agentToken, Buffer.alloc(32, 7).toString("base64url"));
+  assert.equal(paired.headers["cache-control"], "no-store");
+
+  const capability = await localHttpJson({
+    port,
+    method: "GET",
+    headers: {
+      origin: ALLOWED_ORIGIN,
+      authorization: `Bearer ${paired.body.token}`
+    }
+  });
+  assert.equal(capability.status, 200);
+  assert.equal(JSON.stringify(capability.body).includes(paired.body.token), false);
+});
+
 test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET 연결 확인을 외부 호출 없이 제공한다", async (t) => {
   const pipelineCalls = [];
   const { server } = createSolarCaptionGatewayServer({
@@ -700,14 +852,22 @@ test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET �
       mode: "external-timed-stt",
       solarInput: "text-only",
       requiresTimedTranscript: true,
+      authentication: "bearer",
       ready: true
     },
     requestSchema: CAPTION_AGENT_REQUEST_SCHEMA_ID,
     responseSchema: CAPTION_AGENT_RESPONSE_SCHEMA_ID,
+    qualityHarness: {
+      profile: "kr-vtuber-clean-v1",
+      automaticBodyLines: 1,
+      placement: "bottom",
+      paidRepairCalls: 0
+    },
+    maxSolarCallsPerClip: 1,
     maxCueDurationMs: 4_000,
     maxClipDurationMs: 30 * 60 * 1_000,
     maxAudioBytes: 1_048_576,
-    pipelineTimeoutMs: 15 * 60 * 1_000,
+    pipelineTimeoutMs: DEFAULT_PIPELINE_TIMEOUT_MS,
     configured: {
       sttEndpoint: true,
       sttApiKey: true,
@@ -1040,6 +1200,32 @@ test("사용자가 자막 요청을 취소하면 외부 STT 요청 신호도 즉
   });
   controller.abort(new DOMException("테스트 취소", "AbortError"));
   await assert.rejects(pending, (error) => error?.name === "AbortError");
+  assert.equal(receivedSignal?.aborted, true);
+});
+
+test("STT 자체 deadline은 안전한 STT_TIMEOUT으로 번역하고 fetch를 중단한다", async () => {
+  let receivedSignal = null;
+  await assert.rejects(
+    requestExternalStt(normalizedCaptionRequest(), {
+      fetchImpl: async (_url, init) => {
+        receivedSignal = init.signal;
+        return new Promise((_resolve, reject) => {
+          const rejectAborted = () => reject(init.signal.reason);
+          if (init.signal.aborted) {
+            rejectAborted();
+            return;
+          }
+          init.signal.addEventListener("abort", rejectAborted, { once: true });
+        });
+      },
+      sttEndpoint: TEST_ENV.KIRINUKI_STT_ENDPOINT,
+      sttApiKey: TEST_ENV.KIRINUKI_STT_API_KEY,
+      sttModel: TEST_ENV.KIRINUKI_STT_MODEL,
+      maxAudioBytes: 1_048_576,
+      timeoutMs: 20
+    }),
+    (error) => error?.code === "STT_TIMEOUT" && error.httpStatus === 504
+  );
   assert.equal(receivedSignal?.aborted, true);
 });
 

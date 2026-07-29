@@ -210,10 +210,18 @@
                 <svg viewBox="0 0 24 24"><path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8Z"/></svg>
               </div>
               <div>
-                <strong>Solar 자막 에이전트</strong>
-                <span>타임스탬프 STT → 선택한 Solar 교정</span>
+                <strong>Solar + 키리누키 품질 하네스</strong>
+                <span>타임스탬프 STT → Solar 의미 교정 → 로컬 품질 검사</span>
               </div>
             </div>
+            <label class="select-field">
+              <span>자막 스타일</span>
+              <select id="caption-style-preset">
+                <option value="kr-vtuber-clean-v1" selected>완성본 기준 · Pretendard 클린</option>
+                <option value="kr-vtuber-paperlogy-v1">OFL 대안 · Paperlogy 클린</option>
+                <option value="pretendard-legacy-v1">기존 프로젝트 사용자 설정</option>
+              </select>
+            </label>
             <label class="select-field">
               <span>Solar 모델</span>
               <select id="caption-model">
@@ -228,12 +236,15 @@
                 <button id="clear-caption-provider-keys" class="small-action caption-key-clear" type="button">지우기</button>
               </div>
             </div>
+            <p id="caption-local-status" class="caption-local-status" data-state="idle" role="status">
+              로컬 자막 엔진을 자동으로 찾습니다
+            </p>
             <details id="caption-advanced-settings" class="caption-agent-policy caption-provider-settings">
-              <summary>세부설정 <em>STT · 로컬 companion</em></summary>
+              <summary>고급 설정 <em>기본 사용자는 변경 불필요</em></summary>
               <div class="caption-provider-fields">
                 <p class="caption-agent-advanced-intro">
-                  Solar Mini와 Pro 3는 텍스트 모델입니다. 음성을 자막으로 만들려면 시간 정보가
-                  있는 STT와 이 기기의 companion 연결이 필요합니다.
+                  로컬 companion은 이 기기의 Whisper STT를 자동 연결합니다. 아래 주소·토큰·
+                  외부 STT 값은 원격 또는 개발 환경에서만 직접 바꾸세요.
                 </p>
                 <div class="caption-agent-row">
                   <label class="select-field">
@@ -261,9 +272,10 @@
                 <strong class="caption-agent-rules-title">초벌 자막 원칙</strong>
                 <ul>
                   <li>알아듣기 어려워도 말로 인식된 구간을 빼지 않고 검수 대상으로 남깁니다.</li>
-                  <li>자막 하나는 최대 4초이며 자연스러운 호흡·화자 전환에서 나눕니다.</li>
+                  <li>완성본 기준 한 줄·하단 고정이며, 20자 폭을 넘으면 다음 시간 자막으로 나눕니다.</li>
+                  <li>자막 하나는 최대 4초, 가능하면 0.65초 이상이며 초당 읽기량도 검사합니다.</li>
                   <li>문장 끝 마침표는 빼고 물음표·느낌표는 필요한 경우 유지합니다.</li>
-                  <li>읽기 편한 화면 위치를 제안하되 최종 판단은 사람이 검수합니다.</li>
+                  <li>화자별 색은 로컬에서 일관되게 배정하며 기존 수동 자막은 보존합니다.</li>
                 </ul>
                 <p class="caption-agent-privacy">
                   원본 영상 전체는 보내지 않습니다. 활성 컷의 16kHz 음성은 설정한 STT에,

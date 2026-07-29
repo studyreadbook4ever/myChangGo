@@ -1,13 +1,19 @@
+import {
+  CAPTION_QUALITY_PROFILE_ID
+} from "../caption-agent/caption-quality-harness.js";
+
 export const CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v1";
 export const CAPTION_AGENT_REQUEST_SCHEMA = "chzzk-kirinuki-caption-request/v1";
 export const CAPTION_AGENT_RESPONSE_SCHEMA = "chzzk-kirinuki-caption-response/v1";
+export const CAPTION_AGENT_SESSION_SCHEMA =
+  "chzzk-kirinuki-caption-agent/session-v1";
 export const MAX_REMOTE_CUE_DURATION_MS = 4_000;
 export const MAX_REMOTE_CUES = 4_000;
 export const MAX_REMOTE_WARNINGS = 4_000;
-export const MAX_CAPTION_AGENT_CLIPS_PER_RUN = 500;
+export const MAX_CAPTION_AGENT_CLIPS_PER_RUN = 16;
 export const MAX_CAPTION_AGENT_CUES_PER_RUN = 10_000;
 export const MAX_CAPTION_AGENT_POLL_ATTEMPTS = 240;
-export const CAPTION_AGENT_REQUEST_TIMEOUT_MS = 20 * 60 * 1_000;
+export const CAPTION_AGENT_REQUEST_TIMEOUT_MS = 65 * 60 * 1_000;
 export const CAPTION_AGENT_PROBE_TIMEOUT_MS = 10_000;
 export const MAX_CAPTION_AGENT_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const MAX_CAPTION_AGENT_CLIP_DURATION_MS = 30 * 60 * 1_000;
@@ -59,7 +65,7 @@ function isLoopbackHostname(hostname) {
     hostname === "localhost";
 }
 
-function isLoopbackAgentEndpoint(value) {
+export function isLoopbackCaptionAgentEndpoint(value) {
   const url = new URL(normalizeCaptionAgentEndpoint(value));
   return (
     url.protocol === "http:"
@@ -143,7 +149,7 @@ export function captionProviderHeaders(endpoint, raw = {}) {
   if (!supplied) {
     return {};
   }
-  if (!isLoopbackAgentEndpoint(endpoint)) {
+  if (!isLoopbackCaptionAgentEndpoint(endpoint)) {
     throw new Error(
       "STT·Upstage API 키와 제공자 설정은 로컬 companion 주소로만 전달할 수 있습니다."
     );
@@ -156,6 +162,17 @@ export function captionProviderHeaders(endpoint, raw = {}) {
         value
       ])
   );
+}
+
+export function captionAgentSessionEndpoint(endpoint) {
+  const url = new URL(normalizeCaptionAgentEndpoint(endpoint));
+  if (!isLoopbackCaptionAgentEndpoint(url.toString())) {
+    throw new Error("자동 연결은 이 기기의 로컬 companion에서만 사용할 수 있습니다.");
+  }
+  url.pathname = "/v1/session";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function captionAgentRequestHeaders(endpoint, token, providerConfig) {
@@ -184,8 +201,10 @@ export function normalizeCaptionAgentEndpoint(value) {
   if (url.username || url.password) {
     throw new Error("자막 에이전트 주소에 아이디나 비밀번호를 넣지 마세요.");
   }
-  if (url.hash) {
-    throw new Error("자막 에이전트 주소에는 # 조각을 사용할 수 없습니다.");
+  if (url.search || url.hash) {
+    throw new Error(
+      "자막 에이전트 주소에는 쿼리 문자열이나 # 조각을 사용할 수 없습니다."
+    );
   }
   const secureRemote = url.protocol === "https:";
   const localHttp = url.protocol === "http:" && isLoopbackHostname(url.hostname);
@@ -255,6 +274,170 @@ export async function ensureCaptionAgentPermission(
     return true;
   }
   return permissionsApi.request({ origins: [origin] });
+}
+
+export function captionAgentRunEstimate(clips = []) {
+  if (!Array.isArray(clips)) {
+    throw new TypeError("자막 실행 예상량을 계산할 컷 배열이 필요합니다.");
+  }
+  const enabled = clips.filter((clip) => clip?.enabled !== false);
+  const totalDurationMs = enabled.reduce((total, clip) => {
+    const startMs = finiteNumber(clip?.sourceStartMs ?? clip?.startMs);
+    const endMs = finiteNumber(clip?.sourceEndMs ?? clip?.endMs);
+    return total + Math.max(0, Math.round(endMs - startMs));
+  }, 0);
+  return {
+    clipCount: enabled.length,
+    totalDurationMs,
+    plannedSolarRequests: enabled.length,
+    maximumSolarRequests: enabled.length
+  };
+}
+
+function captionCheckpointKey({
+  clipId,
+  sourceStartMs,
+  sourceEndMs,
+  model,
+  qualityProfile
+}) {
+  return [
+    String(clipId || ""),
+    Math.round(finiteNumber(sourceStartMs, -1)),
+    Math.round(finiteNumber(sourceEndMs, -1)),
+    String(model || ""),
+    String(qualityProfile || "legacy-unharnessed-v0")
+  ].join("\u0000");
+}
+
+export function createCaptionAgentCheckpoint(
+  clip,
+  model,
+  {
+    requestId = "",
+    completedAt = new Date().toISOString()
+  } = {}
+) {
+  if (!ALLOWED_SOLAR_MODELS.has(model)) {
+    throw new Error("자막 재개 체크포인트의 Solar 모델이 올바르지 않습니다.");
+  }
+  const normalizedModel = model;
+  const checkpoint = {
+    clipId: String(clip?.id || ""),
+    sourceStartMs: Math.round(finiteNumber(clip?.sourceStartMs, -1)),
+    sourceEndMs: Math.round(finiteNumber(clip?.sourceEndMs, -1)),
+    model: normalizedModel,
+    qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+    requestId: String(requestId || "").trim().slice(0, 128),
+    completedAt: String(completedAt || "").trim().slice(0, 64)
+  };
+  if (
+    !checkpoint.clipId
+    || checkpoint.sourceStartMs < 0
+    || checkpoint.sourceEndMs <= checkpoint.sourceStartMs
+  ) {
+    throw new Error("자막 재개 체크포인트용 컷 범위가 올바르지 않습니다.");
+  }
+  return checkpoint;
+}
+
+export function upsertCaptionAgentCheckpoint(
+  checkpoints,
+  checkpoint,
+  { maximum = MAX_CAPTION_AGENT_CLIPS_PER_RUN } = {}
+) {
+  const source = Array.isArray(checkpoints) ? checkpoints : [];
+  const targetKey = captionCheckpointKey(checkpoint);
+  return [
+    ...source.filter(
+      (candidate) => captionCheckpointKey(candidate) !== targetKey
+    ),
+    checkpoint
+  ].slice(-Math.max(1, Math.round(finiteNumber(maximum, 1))));
+}
+
+export function discardCaptionAgentCheckpointsForClips(
+  checkpoints,
+  clips
+) {
+  const clipIds = new Set(
+    (Array.isArray(clips) ? clips : [])
+      .map((clip) => String(clip?.id || ""))
+      .filter(Boolean)
+  );
+  if (clipIds.size === 0) {
+    return Array.isArray(checkpoints) ? [...checkpoints] : [];
+  }
+  return (Array.isArray(checkpoints) ? checkpoints : []).filter(
+    (checkpoint) => !clipIds.has(String(checkpoint?.clipId || ""))
+  );
+}
+
+export function sameCaptionMediaIdentity(left, right) {
+  if (!left || typeof left !== "object" || !right || typeof right !== "object") {
+    return false;
+  }
+  for (const field of ["size", "lastModified", "durationMs"]) {
+    if (
+      !Number.isFinite(Number(left[field]))
+      || !Number.isFinite(Number(right[field]))
+    ) {
+      return false;
+    }
+  }
+  const fields = [
+    "name",
+    "size",
+    "lastModified",
+    "durationMs",
+    "mediaOriginMs",
+    "width",
+    "height",
+    "codec",
+    "audioCodec"
+  ];
+  return fields.every(
+    (field) => String(left[field] ?? "") === String(right[field] ?? "")
+  );
+}
+
+export function captionAgentResumePlan(
+  clips,
+  checkpoints,
+  model,
+  { resume = false } = {}
+) {
+  const enabled = (Array.isArray(clips) ? clips : []).filter(
+    (clip) => clip?.enabled !== false
+  );
+  if (!resume) {
+    return {
+      clips: enabled,
+      skippedClipIds: []
+    };
+  }
+  const completedKeys = new Set(
+    (Array.isArray(checkpoints) ? checkpoints : [])
+      .map((checkpoint) => captionCheckpointKey(checkpoint))
+  );
+  const skippedClipIds = [];
+  const pending = enabled.filter((clip) => {
+    const completed = completedKeys.has(captionCheckpointKey({
+      clipId: clip.id,
+      sourceStartMs: clip.sourceStartMs,
+      sourceEndMs: clip.sourceEndMs,
+      model,
+      qualityProfile: CAPTION_QUALITY_PROFILE_ID
+    }));
+    if (completed) {
+      skippedClipIds.push(String(clip.id));
+    }
+    return !completed;
+  });
+  return {
+    clips: pending,
+    skippedClipIds
+  };
 }
 
 export function captionAgentAudioFootprint(durationMs) {
@@ -570,10 +753,16 @@ async function parseResponse(response) {
     }
   }
   if (!response.ok) {
-    const detail = payload?.error?.message || payload?.message || text;
-    throw new Error(
-      `자막 에이전트 요청 실패 (${response.status})${detail ? `: ${String(detail).slice(0, 240)}` : ""}`
+    const remoteCode = String(payload?.error?.code || "");
+    const code = /^[A-Z][A-Z0-9_]{0,63}$/u.test(remoteCode)
+      ? remoteCode
+      : "CAPTION_AGENT_REQUEST_FAILED";
+    const error = new Error(
+      `자막 에이전트 요청 실패 (${response.status}, ${code})`
     );
+    error.status = response.status;
+    error.code = code;
+    throw error;
   }
   return payload || {};
 }
@@ -792,6 +981,58 @@ function assertSafeStatusUrl(statusUrl, endpoint) {
   return status.toString();
 }
 
+export async function pairCaptionAgent({
+  endpoint,
+  signal,
+  fetchImpl = fetch,
+  timeoutMs = CAPTION_AGENT_PROBE_TIMEOUT_MS
+}) {
+  const sessionEndpoint = captionAgentSessionEndpoint(endpoint);
+  throwIfAborted(signal);
+  const deadline = createDeadlineSignal(signal, timeoutMs);
+  try {
+    const response = await fetchImpl(sessionEndpoint, {
+      method: "POST",
+      headers: {
+        "X-Kirinuki-Protocol": CAPTION_AGENT_REQUEST_SCHEMA
+      },
+      signal: deadline.signal,
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error"
+    });
+    const payload = await parseResponse(response);
+    if (!isPlainObject(payload)) {
+      throw new Error("로컬 companion 연결 응답이 JSON 객체가 아닙니다.");
+    }
+    assertExactResponseFields(payload, [
+      "schema",
+      "status",
+      "authentication",
+      "expires",
+      "token"
+    ], "로컬 companion 연결 응답");
+    if (
+      payload.schema !== CAPTION_AGENT_SESSION_SCHEMA
+      || payload.status !== "ok"
+      || payload.authentication !== "bearer-process-memory"
+      || payload.expires !== "companion-restart"
+    ) {
+      throw new Error("로컬 companion 연결 응답 버전이 맞지 않습니다.");
+    }
+    const token = normalizeProviderSecret(
+      payload.token,
+      "로컬 companion 세션 토큰"
+    );
+    if (!token) {
+      throw new Error("로컬 companion이 세션 토큰을 반환하지 않았습니다.");
+    }
+    return token;
+  } finally {
+    deadline.cleanup();
+  }
+}
+
 export async function requestCaptionAgent({
   endpoint,
   token,
@@ -919,5 +1160,72 @@ export async function probeCaptionAgent({
     return parseResponse(response);
   } finally {
     deadline.cleanup();
+  }
+}
+
+export async function ensureCaptionAgentSession({
+  endpoint,
+  token,
+  signal,
+  fetchImpl = fetch,
+  timeoutMs = CAPTION_AGENT_PROBE_TIMEOUT_MS
+}) {
+  if (!isLoopbackCaptionAgentEndpoint(endpoint)) {
+    return String(token || "").trim();
+  }
+  const currentToken = String(token || "").trim();
+  if (currentToken) {
+    try {
+      await probeCaptionAgent({
+        endpoint,
+        token: currentToken,
+        providerConfig: {},
+        signal,
+        fetchImpl,
+        timeoutMs
+      });
+      return currentToken;
+    } catch (error) {
+      if (Number(error?.status) !== 401) {
+        throw error;
+      }
+    }
+  }
+  return pairCaptionAgent({
+    endpoint,
+    signal,
+    fetchImpl,
+    timeoutMs
+  });
+}
+
+export async function requestCaptionAgentWithSessionRetry({
+  onSessionToken = () => {},
+  fetchImpl = fetch,
+  ...options
+}) {
+  try {
+    return await requestCaptionAgent({
+      ...options,
+      fetchImpl
+    });
+  } catch (error) {
+    if (
+      Number(error?.status) !== 401
+      || !isLoopbackCaptionAgentEndpoint(options.endpoint)
+    ) {
+      throw error;
+    }
+    const token = await pairCaptionAgent({
+      endpoint: options.endpoint,
+      signal: options.signal,
+      fetchImpl
+    });
+    onSessionToken(token);
+    return requestCaptionAgent({
+      ...options,
+      token,
+      fetchImpl
+    });
   }
 }

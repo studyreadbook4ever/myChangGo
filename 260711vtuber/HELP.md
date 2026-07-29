@@ -2,7 +2,7 @@
 
 기본 사용 경로는 **치지직 또는 YouTube 소스 페이지 → 사이드패널 → 브라우저 통합 편집기 → 로컬 파일 내보내기**입니다. 편집과 영상 렌더링은 Chrome에서 로컬로 실행하고, 사용자가 명시적으로 선택한 컷의 자막 초안만 설정한 companion 자막 에이전트를 통해 만듭니다.
 
-일반 사용에는 Python, FFmpeg, CUDA, NVIDIA GPU나 로컬 음성 모델이 필요하지 않습니다. 저장소의 reference gateway를 직접 실행할 때는 Node.js가 필요합니다. 이 문서 뒤쪽의 OpenReel·Codex 안내는 고급 후반작업을 위한 선택 사항입니다.
+일반 편집에는 Python, FFmpeg, CUDA나 NVIDIA GPU가 필요하지 않습니다. 로컬 자막 초벌은 Linux에서 제공하는 한 번 설치 CLI가 whisper.cpp와 적절한 다국어 모델을 준비하며, 사용자가 모델 주소·STT 키·세션 토큰을 직접 정할 필요가 없습니다. Node.js 20.9 이상은 Extension 빌드와 로컬 자막 stack 관리에 사용합니다.
 
 ## 빠른 시작
 
@@ -10,8 +10,8 @@
 
 - Chrome 또는 Chromium 120 이상
 - 본인이 소유하거나 사용 허가를 받은 로컬 원본 영상
-- 실행 중인 호환 자막 에이전트와 그 endpoint·세션 토큰
-- 외부 STT와 Upstage API에 연결할 수 있는 네트워크 및 각 API 키
+- `npm run caption-stack:setup`을 한 번 마친 Linux 로컬 자막 stack
+- Upstage Solar API 키와 네트워크
 
 소스에서 Extension을 빌드할 때만 Node.js 20.9 이상이 필요합니다. 설치와 빌드 방법은 [README](README.md)를 참고하세요.
 
@@ -21,7 +21,7 @@
 4. **통합 편집기에서 열기**를 누릅니다.
 5. **원본 연결**에서 로컬 원본 영상을 선택합니다.
 6. 필요하면 **페이지 시각 ↔ 로컬 원본 정렬** 오프셋을 맞춥니다.
-7. **Solar 자막 에이전트**에서 companion 주소·세션 토큰과 STT·Upstage 설정을 입력하고 **연결 확인**을 누른 뒤 **활성 컷 전체 Solar 자막 초안 만들기**를 실행합니다. 다중 자막 레인과 필요한 음성 설정 구간을 직접 검수합니다.
+7. `npm run caption-stack:start`를 실행하고, **Solar 자막 에이전트**에 Upstage 키만 현재 탭에 넣습니다. Mini 또는 Pro 3를 고르고 **활성 컷 전체 Solar 자막 초안 만들기**를 실행한 뒤 자막을 직접 검수합니다.
 8. **영상 내보내기**에서 저장 폴더를 고릅니다.
 
 정상적인 폴더 저장 경로에서는 다음 파일이 같은 폴더에 생성됩니다.
@@ -150,81 +150,65 @@ Chrome이 파일 핸들을 지원하면 선택한 핸들을 IndexedDB에 보관�
 ```text
 활성화된 모든 선택 컷 → 브라우저에서 컷별 16kHz WAV 추출
 → 대표 프레임 7장의 top·center·bottom 방해도를 로컬에서 숫자로 요약
-→ companion 자막 에이전트 → 외부 STT가 timed transcript 생성
-→ timed transcript + 프로젝트명·스트리머명·컷 메모 + 숫자형 위치 요약을 Upstage Solar Pro 3가 의미 단위 cue로 정리
+→ 127.0.0.1 companion → 이 기기의 whisper.cpp가 timed transcript 생성
+→ 중복을 제거한 canonical timed units
+→ timed units + 프로젝트명·스트리머명·컷 메모 + 숫자형 화면 요약을 선택한 Upstage Solar가 컷당 정확히 한 번 의미 단위 cue로 정리
+→ 추가 유료 호출 0회의 로컬 kr-vtuber-clean-v1 품질 하네스
 → 편집기로 검수용 초안 반환
 ```
 
-Solar Pro 3는 텍스트 모델이며 오디오나 영상을 직접 전사하지 못합니다. 따라서 먼저 음성을 타임코드가 있는 텍스트로 바꾸는 외부 STT가 반드시 필요합니다. 화면 위치 판단에는 영상 대신 로컬에서 계산한 숫자형 방해도만 사용합니다. 원본 전체, 대표 프레임 픽셀, 선택하지 않은 구간, 이미지 에셋과 최종 렌더는 이 흐름으로 보내지 않습니다.
+Solar Pro 3와 Mini는 텍스트 모델이며 오디오나 영상을 직접 전사하지 못합니다. 따라서 먼저 로컬 whisper.cpp가 음성을 타임코드가 있는 텍스트로 바꿉니다. 화면 분석에는 영상 대신 로컬에서 계산한 숫자형 방해도만 사용합니다. Upstage에는 원본 전체, WAV, 대표 프레임 픽셀, 선택하지 않은 구간, 이미지 에셋과 최종 렌더를 보내지 않습니다.
 
-대표 프레임을 디코딩하지 못하면 자막 생성 자체는 계속하고 위치 점수를 동일하게 둔 `bottom` 기본값을 사용합니다. 이 경우 편집기 상단에 위치 분석 실패 경고가 남으므로 사람 검수에서 위치를 확인하세요.
+자동 본문 자막의 최종 위치는 완성본 측정값에 맞춘 `bottom`으로 고정합니다. 대표 프레임을 디코딩하지 못해도 자막 생성은 계속하며 화면 분석 실패 경고를 남깁니다. 강조 자막이나 사람이 직접 옮긴 자막은 검수 단계에서 별도 레인과 위치를 사용할 수 있습니다.
 
 ### 연결과 모델
 
-- **에이전트 주소**: 기본값 `http://127.0.0.1:4319/v1/captions`
-- **세션 토큰**: companion의 `KIRINUKI_AGENT_TOKEN`과 같은 값
-- **STT API 주소·모델명·API 키**: 타임스탬프를 반환하는 별도 외부 STT의 설정
+- **로컬 자막 상태**: `로컬 STT 준비됨`이면 정상
 - **Upstage API 키**: Solar가 timed transcript를 자막 cue로 정리할 때 사용하는 키
-- **Solar 모델**: 기본값 `solar-pro3`
-- **연결 확인**: companion 접근 권한, origin·토큰과 STT·Upstage 설정 완성 여부를 실제 자막 생성 전에 확인
+- **Solar Mini**: 빠른 첫 초벌
+- **Solar Pro 3**: 문맥·표현 품질 우선
+- **고급 설정**: 원격 companion 또는 외부 STT를 직접 연결할 때만 사용
 
-에이전트 주소·Solar 모델과 STT API 주소·모델명은 이 기기의 `chrome.storage.local`에 저장될 수 있습니다. 세션 토큰, STT API 키와 Upstage API 키는 프로젝트·IndexedDB·`chrome.storage` 어디에도 저장하지 않고 현재 편집기 탭의 메모리에만 둡니다. **입력한 API 키 지우기**를 누르면 현재 탭에 입력한 두 provider 키가 즉시 비워지며, 탭을 닫아도 사라집니다.
+에이전트 주소·Solar 모델 같은 비밀이 아닌 설정만 이 기기의 `chrome.storage.local`에 저장될 수 있습니다. 자동 session token과 Upstage API 키는 프로젝트·IndexedDB·`chrome.storage` 어디에도 저장하지 않고 현재 편집기 탭의 메모리에만 둡니다. **지우기**를 누르거나 탭을 닫으면 사라집니다.
 
-편집기에서 직접 입력한 provider API 키는 정확한 세션 토큰으로 인증된 `127.0.0.1` 또는 `localhost` companion에만 전달합니다. 원격 HTTPS 자막 에이전트에는 provider 비밀 헤더를 보내지 않으므로, 원격 companion을 쓸 때는 해당 서버의 비밀 저장소나 아래 환경 변수 방식으로 provider 키를 설정하세요.
+managed companion은 시작할 때 session token을 메모리에서 만들고 정확한 Extension Origin에만 자동 발급합니다. 편집기에서 입력한 Upstage 키는 이 session으로 인증된 `127.0.0.1` companion에만 요청 헤더로 전달합니다.
 
-### Reference gateway 실행
+### 로컬 자막 stack 설치·실행
 
-Extension ID를 `chrome://extensions`에서 확인한 다음 저장소 최상위에서 최소한 다음 두 값을 설정해 실행합니다.
-
-```bash
-export KIRINUKI_ALLOWED_ORIGIN='chrome-extension://<확장프로그램-ID>'
-export KIRINUKI_AGENT_TOKEN='<충분히 긴 임의 토큰>'
-npm run caption-gateway
-```
-
-gateway가 실행되면 편집기의 **STT·Upstage API 키 직접 입력 · 현재 탭에서만**을 열어 STT API 주소·모델명·API 키와 Upstage API 키를 입력합니다. companion은 자체 환경 변수에 provider 설정이 없어도 시작되며, 현재 요청의 메모리 입력과 환경 변수 설정을 합쳐 파이프라인을 실행합니다.
-
-포트와 처리 제한시간은 선택 사항입니다.
+최초 한 번:
 
 ```bash
-export KIRINUKI_AGENT_PORT='4319'
-# 선택: 전체 파이프라인 제한시간(ms), 최대 20분
-export KIRINUKI_PIPELINE_TIMEOUT_MS='900000'
-npm run caption-gateway
+npm run caption-stack:doctor
+npm run caption-stack:setup
 ```
 
-API 키를 편집기에 매번 입력하지 않으려면 provider 설정을 companion 환경에 두는 기존 방식도 사용할 수 있습니다.
+저사양 CPU:
 
 ```bash
-export KIRINUKI_ALLOWED_ORIGIN='chrome-extension://<확장프로그램-ID>'
-export KIRINUKI_AGENT_TOKEN='<충분히 긴 임의 토큰>'
-export KIRINUKI_STT_ENDPOINT='https://<STT-제공자>/v1/audio/transcriptions'
-export KIRINUKI_STT_API_KEY='<STT-API-키>'
-export KIRINUKI_STT_MODEL='<STT-모델-이름>'
-export UPSTAGE_API_KEY='<Upstage-API-키>'
-export KIRINUKI_SOLAR_MODEL='solar-pro3'
-export KIRINUKI_AGENT_PORT='4319'
-# 선택: 전체 파이프라인 제한시간(ms), 최대 20분
-export KIRINUKI_PIPELINE_TIMEOUT_MS='900000'
-npm run caption-gateway
+npm run caption-stack:setup -- --profile light --backend cpu
 ```
 
-gateway는 `127.0.0.1`에만 바인딩됩니다. `KIRINUKI_ALLOWED_ORIGIN`은 와일드카드가 아니라 현재 Extension의 정확한 origin 하나여야 하며, 편집기에 입력한 세션 토큰이 `KIRINUKI_AGENT_TOKEN`과 일치해야 합니다.
+평소 시작·상태·종료:
 
-Upstage가 공개한 API에는 STT가 없습니다. 이 프로젝트에서 Upstage Solar는 오디오 전사가 아니라 외부 STT의 timed transcript를 읽기 좋은 자막 cue로 정리하는 텍스트 단계만 담당합니다. 따라서 다음 요청·응답 형식과 호환되는 별도 STT가 반드시 필요합니다.
-
-reference gateway는 STT endpoint에 Bearer API 키와 함께 다음 multipart 필드를 보냅니다. 편집기에서 입력한 endpoint는 비밀이 아닌 설정으로 저장되므로 사용자 정보·API 키·쿼리 문자열을 URL에 넣을 수 없고, 키는 반드시 별도 API 키 필드에 입력해야 합니다.
-
-```text
-file: clip.wav
-model: 사용자가 지정한 STT 모델
-language: ko
-response_format: verbose_json
-timestamp_granularities[]: segment
-timestamp_granularities[]: word
+```bash
+npm run caption-stack:start
+npm run caption-stack:status
+npm run caption-stack:stop
 ```
 
-응답은 JSON 객체여야 하며 시간 정보가 있는 `segments`, `chunks` 또는 `words` 배열을 반환해야 합니다. 각 항목은 초 단위 `start`·`end`, `[start, end]` 형태의 `timestamp`, 또는 밀리초 단위 `startMs`·`endMs` 중 하나와 `text` 또는 `word`를 제공해야 합니다. provider마다 endpoint·모델 이름·호환 필드·데이터 보존·요금이 다르므로 선택한 서비스 문서를 확인하세요.
+systemd-user가 없으면 foreground로 실행합니다.
+
+```bash
+npm run caption-stack:start -- --foreground
+```
+
+설치는 whisper.cpp source archive, 다국어 모델, VAD를 고정 revision에서 받아 스트리밍 크기 상한·최종 크기·SHA-256을 검증하고 사용자 데이터 폴더에 제3자 고지문과 함께 둡니다. CLI와 systemd unit은 API 키를 받거나 저장하지 않습니다. Extension 폴더를 옮기면 exact Origin이 바뀌므로 setup을 다시 실행하세요. stack이 실행 중이면 검증이 모두 끝난 뒤 새 설정으로 자동 재시작됩니다.
+
+한 번에 활성 컷은 최대 16개입니다. 실행 전 컷 수·총 길이와 **활성 컷 수와 같은 최대 Solar 요청 수**를 확인할 수 있습니다. Solar 호출은 컷당 정확히 한 번뿐이고, 형식 오류·빈 결과를 다른 유료 요청으로 자동 복구하지 않습니다. 정규화·분할·시간 보정·평가는 모두 로컬 하네스가 추가 비용 없이 수행합니다.
+
+컷별 결과와 재개 체크포인트를 즉시 저장합니다. 중간 실패·취소·탭 종료 뒤 같은 모델·범위·`kr-vtuber-clean-v1` 하네스 지문으로 버튼을 다시 누르면 완료 컷을 건너뜁니다. 하네스 지문이 없거나 달라진 구버전 체크포인트, 새 전체 실행 또는 identity가 다른 원본 연결의 체크포인트는 재사용하지 않습니다.
+
+외부 timed STT는 고급 설정에서 계속 사용할 수 있지만 로컬 실패 시 자동 유료 폴백하지 않습니다. 자세한 프로필·보안·복구·오류 표는 [AGENTS.md](AGENTS.md)를 참고하세요.
 
 Upstage의 계약과 모델 동작은 다음 공식 문서를 기준으로 확인할 수 있습니다.
 
@@ -236,10 +220,16 @@ Upstage의 계약과 모델 동작은 다음 공식 문서를 기준으로 확�
 ### 자막 초안 규칙
 
 - STT가 인식한 발화를 임의로 요약하거나 빼지 않습니다.
-- cue 하나는 최대 4초입니다.
-- 문장 끝 마침표는 넣지 않고 물음표처럼 의미 있는 문장부호는 유지합니다.
+- 자동 본문은 배경 없는 한 줄·하단 고정입니다.
+- 한글·한자·이모지는 1, 공백은 0.35, 라틴 문자는 0.55처럼 계산하는 한국어 폭 단위로 한 줄 20을 상한으로 사용합니다.
+- cue 하나는 650ms 이상을 목표로 하고 최대 4초이며, 읽기 속도는 초당 16폭 단위 이하를 목표로 합니다.
+- 문장 끝 `.`은 넣지 않고 `?`, `!`, `…`, `~`처럼 의미 있는 문장부호는 유지합니다.
+- 기본 화자는 흰색, 다른 화자는 speaker ID마다 안정적으로 재현되는 고유 색을 사용합니다.
+- 사람이 만든 자막, 사람이 고친 AI 자막과 강조용 추가 레인은 새 AI 초안으로 덮어쓰지 않습니다.
 - 방송인·게임 고유명사, 빠른 발화, 겹친 목소리, 노래와 잡음은 원음을 들으며 반드시 사람이 확인합니다.
-- 외부 STT가 무음으로 판단했거나 인식하지 못한 발화는 자동으로 복원할 수 없습니다.
+- 로컬 STT가 무음으로 판단했거나 인식하지 못한 발화는 자동으로 복원할 수 없습니다.
+
+공백·종결 마침표 정리, 4초·한 줄 기준 분할, 표시 시간 확장, 하단 위치 안정화나 같은 화자 겹침의 안전한 보정은 **자동 정리 경고**입니다. STT 대비 발화 누락·추가 가능성, 해결되지 않은 읽기 속도·너비·짧은 표시 시간·겹침은 **품질 검수 필요 경고**입니다. 후자는 해당 컷의 원음을 듣고 직접 고치세요.
 
 ### 자막 직접 검수
 
@@ -258,7 +248,9 @@ Upstage의 계약과 모델 동작은 다음 공식 문서를 기준으로 확�
 
 빈 자막 레인을 우클릭하면 그 위치에 자막을 추가할 수 있습니다. 자막 블록을 우클릭하면 같은 시각의 빈 레인에 자막을 더하거나 해당 자막을 삭제할 수 있습니다. 상단의 **현재 위치에 자막**과 선택 패널의 삭제 버튼도 계속 사용할 수 있습니다.
 
-새 프로젝트의 기본 자막은 이전 5.2% 기준보다 약 30% 큰 화면 높이 6.75%의 배경 없는 흰색 `Pretendard ExtraBold`와 검정 외곽선을 사용합니다. 기존 저장 프로젝트에서 이미 정한 크기는 유지됩니다. 각 cue의 색은 **선택 자막 색상**에서 독립적으로 바꿀 수 있습니다. 저장소에는 수정하지 않은 Pretendard 1.3.9 공식 WOFF2와 SIL Open Font License 1.1 원문이 함께 들어 있습니다.
+새 프로젝트의 기본 **한국 버튜버 키리누키 · 클린** 스타일은 사용자의 사람 검수 완성본 2개에서 뽑은 190개 표본 프레임을 기준으로 측정했습니다. 화면 높이 6.75%의 `Pretendard ExtraBold` 800, 배경 없는 흰색 본문, 검정 외곽선, `y=0.84` 하단 배치를 사용합니다. 스타일 선택에서 OFL 대안인 **한국 버튜버 키리누키 · Paperlogy**를 고르면 `Paperlogy ExtraBold` 800과 화면 높이 6.1%를 사용합니다. 기존 저장 프로젝트에서 이미 정한 스타일은 유지되며, 각 cue의 색은 **선택 자막 색상**에서 독립적으로 바꿀 수 있습니다.
+
+두 글꼴은 SIL Open Font License 1.1 원문과 함께 들어 있습니다. Pretendard는 공식 `v1.3.9`의 글꼴 SHA-256 `dd7c1e156f508eb962acc7a33a7a1896d1e0b71e11156fad96e731689ceb6dc3`, 라이선스 SHA-256 `d31ddd9f2bed32fd7e302a205cf2380ba0de6529152d239ef99cfb6f261bfc04`를 고정합니다. Paperlogy는 공식 commit `8ef35f53b318c7ca914c52b1b382b9a8bad07a61`의 글꼴 SHA-256 `5047db061c39ec5ed5c9d0b71c7aaad4b9547ed15ce48d1cd74090169f132bc0`, upstream 라이선스 SHA-256 `603b2e7ef9effb9037b0b67f0530cacdc05e71a4e569032d7e4d98c2e6763135`를 고정합니다. 정확한 source URL과 bundled license 해시는 [Third-party notices](legal/THIRD_PARTY_NOTICES.md)를 참고하세요.
 
 사람이 직접 만든 자막과 사람이 수정한 AI 자막은 AI 초안을 다시 실행해도 보존됩니다. 새 AI 초안이 보호된 자막과 겹치면 그 부분의 새 초안은 추가하지 않습니다.
 
@@ -349,10 +341,10 @@ JSON과 SRT에도 같은 접미사가 붙습니다. 이름 후보는 최대 ` (9
 | 최근 로컬 임시저장 | 같은 IndexedDB의 `local-drafts` | 프로젝트별 최근 5개, 5분 자동·수동·복원 직전 |
 | 붙여넣은 이미지 에셋 | 같은 IndexedDB의 `image-assets` | Blob 원본과 투명도 보존 |
 | 로컬 원본 파일 핸들 | 같은 IndexedDB의 `media-handles` | 지원 브라우저에서만 저장 |
-| 에이전트 주소·Solar 모델·STT 주소·모델명 | `chrome.storage.local` | 비밀이 아닌 설정만 다음 편집 세션에도 사용 |
-| 자막 세션 토큰 | 편집기 탭 메모리 | 프로젝트·IndexedDB·Chrome 저장소에 넣지 않으며 탭을 닫으면 사라짐 |
+| 에이전트 주소·Solar 모델·고급 STT 주소·모델명 | `chrome.storage.local` | 비밀이 아닌 설정만 다음 편집 세션에도 사용 |
+| 자동 자막 session token | 편집기 탭·companion 프로세스 메모리 | exact Origin에만 발급하며 재시작·탭 닫기로 사라짐 |
 | 편집기에 입력한 Upstage·STT API 키 | 편집기 탭 메모리 | 저장하지 않으며 **입력한 API 키 지우기** 또는 탭 닫기로 제거 |
-| 환경 변수 방식의 Upstage·STT API 키 | companion 프로세스 환경 | Extension 데이터에 넣지 않으며 companion 측에서 별도 관리 |
+| 로컬 Whisper 모델·binary | XDG 사용자 데이터 폴더 | 고정 revision·SHA 검증, Extension과 Git에는 포함하지 않음 |
 | 원본·내보낸 결과 | 사용자가 고른 로컬 디스크 | Extension 초기화로 삭제하지 않음 |
 
 열려 있던 편집기를 다시 열면 같은 방송 회차의 저장 프로젝트를 불러오고, 사이드패널의 최신 사용자 선택을 병합합니다. 기존 편집 순서와 사람이 조정한 범위·자막을 가능한 한 보존합니다. 새 선택이 현재 원본 길이 밖이면 프로젝트는 유지하고 경고합니다.
@@ -372,9 +364,9 @@ JSON과 SRT에도 같은 접미사가 붙습니다. 이름 후보는 최대 ` (9
 
 ### 자막 에이전트 연결 정보와 자격증명
 
-에이전트 주소나 모델을 바꾸려면 편집기의 **Solar 자막 에이전트**에서 새 값을 입력하고 **연결 확인**을 누르세요. 세션 토큰과 편집기에 직접 입력한 provider API 키는 저장되지 않으므로 편집기 탭을 새로 열 때 다시 입력해야 합니다.
+Solar 모델을 바꾸려면 편집기의 **Solar 자막 에이전트**에서 Mini 또는 Pro 3를 고릅니다. 자동 session은 다시 연결되지만 편집기에 입력한 Upstage 키는 저장되지 않으므로 새 탭에서 다시 입력해야 합니다.
 
-Extension 데이터 전체를 지우거나 Extension을 제거하면 프로젝트·파일 핸들과 저장된 endpoint·모델 설정이 사라질 수 있으므로 필요한 결과 파일을 먼저 백업하세요. 환경 변수 방식의 companion API 키와 세션 토큰은 Extension 데이터 초기화 대상이 아니며, 해당 프로세스의 환경과 비밀 저장소에서 별도로 교체하거나 폐기해야 합니다.
+Extension 데이터 전체를 지우거나 Extension을 제거하면 프로젝트·파일 핸들과 저장된 endpoint·모델 설정이 사라질 수 있으므로 필요한 결과 파일을 먼저 백업하세요. XDG 사용자 데이터 폴더의 로컬 Whisper 설치는 Extension 초기화 대상이 아니며 `caption-stack:doctor`로 상태를 확인합니다.
 
 ### Extension 권한
 
@@ -383,10 +375,10 @@ Extension 데이터 전체를 지우거나 Extension을 제거하면 프로젝�
 - `storage`, `unlimitedStorage`: 구간, 프로젝트, 자막, 에셋, 임시저장과 endpoint·모델 설정을 로컬에 보존합니다.
 - 치지직 host 권한: LIVE/VOD 메타데이터와 플레이어 시각을 읽습니다.
 - YouTube host 권한: 지원되는 VOD 주소, video ID, 제목과 플레이어 시각을 읽고 광고·진행 중인 라이브 상태를 판별합니다.
-- loopback host 권한: 기본 reference gateway인 `127.0.0.1` 또는 `localhost`에 연결합니다.
+- loopback host 권한: managed local companion인 `127.0.0.1` 또는 `localhost`에 연결합니다.
 - 선택적 HTTPS host 권한: 사용자가 다른 자막 에이전트 endpoint를 설정하고 연결할 때 Chrome이 그 origin에 대한 권한을 요청합니다. 일반 `http` endpoint는 loopback만 허용합니다.
 
-Extension은 현재 탭에서 입력한 외부 STT·Upstage API 키를 보관하지 않으며, 인증된 loopback companion으로만 전달합니다. 원격 자막 에이전트에는 provider 키를 직접 보내지 말고 서버 측 비밀 저장소를 사용하세요. companion 연결에는 provider 키와 별도의 충분히 긴 세션 토큰을 사용합니다.
+Extension은 현재 탭에서 입력한 Upstage·고급 외부 STT 키를 보관하지 않으며, 인증된 loopback companion으로만 전달합니다. managed companion의 session은 exact Extension Origin에 자동 발급되고 프로세스 메모리에만 남습니다.
 
 ## 알려진 제한
 
@@ -397,14 +389,14 @@ Extension은 현재 탭에서 입력한 외부 STT·Upstage API 키를 보관하
 - 출력은 최대 1920×1080, 최대 60fps입니다. VFR 입력은 컷 경계를 보존하는 CFR 출력으로 바뀝니다.
 - 출력 오디오는 지원되는 경우 스테레오 48kHz로 인코딩됩니다.
 - 이미지 에셋은 PNG·JPEG·WebP·GIF 정지 프레임을 지원합니다. SVG, 원격 URL 자동 수집, 애니메이션 재생과 에셋 파일을 포함한 이동식 프로젝트 패키지는 아직 제공하지 않습니다. 내보내기는 현재 표시 구간의 이미지만 순차 디코드하며, 동시에 표시되는 이미지의 실제 RGBA 메모리가 256MiB를 넘으면 크기나 겹침 수를 줄이라는 오류를 냅니다.
-- 긴 자막은 줄을 버리지 않고 화면 안에 들어오도록 글자 크기를 줄여 렌더합니다. 다른 레인의 동시 cue는 허용하지만 같은 레인 안의 겹침은 허용하지 않습니다.
+- `kr-vtuber-clean-v1` 자동 본문은 한 줄 폭 hard limit 전에 시간 cue로 나눕니다. 사람이 입력한 긴 자막은 텍스트를 버리지 않고 화면 안에 들어오도록 글자 크기를 줄여 렌더합니다. 다른 레인의 동시 cue는 허용하지만 같은 레인 안의 겹침은 허용하지 않습니다.
 - 자막 에이전트는 한 컷당 최대 30분까지만 처리합니다. 긴 단일 선택은 오디오 추출·전송과 외부 처리 시간이 길어지므로 키리누키 단위의 짧은 선택을 권장합니다.
 - 폴더 저장 폴백에서는 완성 영상 전체가 메모리에 머물 수 있습니다.
 - 현재 편집기는 컷 순서·경계, 이미지 오버레이, 다중 자막 레인과 기본 음성 자동화에 집중합니다. 전환, 다중 영상·오디오 트랙, 음원 분리, 고급 색보정과 플러그인 믹싱은 제공하지 않습니다.
 - `.kirinuki.json` 직접 가져오기와 OpenReel 프로젝트 자동 변환은 아직 제공하지 않습니다.
-- Upstage의 공개 API는 STT를 제공하지 않고 Solar Pro 3도 오디오를 직접 전사하지 않으므로, 호환되는 별도 외부 STT가 항상 필요합니다. 인식 정확도, 화자 정보와 타임코드 정밀도는 STT 제공자 결과에 좌우됩니다.
-- 한 번의 자막 실행은 활성 컷 최대 500개, 새 AI cue 최대 10,000개까지 처리합니다. 그보다 큰 프로젝트는 활성 컷을 나눠 실행해 브라우저 메모리와 외부 API 비용을 통제하세요.
-- 자막 생성에는 네트워크가 필요하고 STT·Upstage 사용량에 따른 비용·rate limit이 적용될 수 있습니다. 선택 컷 오디오와 timed transcript가 각 제공자에게 전송되므로 데이터 보존·학습·지역 정책을 확인하세요.
+- Upstage의 공개 API는 STT를 제공하지 않고 Solar도 오디오를 직접 전사하지 못합니다. 기본 Linux 경로의 로컬 whisper.cpp 정확도와 타임코드가 후속 자막 품질에 영향을 줍니다.
+- 한 번의 자막 실행은 활성 컷 최대 16개, 새 AI cue 최대 10,000개까지 처리합니다. 더 큰 프로젝트는 16개 이하 작업 단위로 나눕니다.
+- 자막 생성에는 Upstage 네트워크와 비용·rate limit이 적용됩니다. 기본 경로에서 선택 컷 오디오는 로컬에 남고 timed transcript만 Upstage로 가므로 Upstage 데이터 정책을 확인하세요.
 - 자동 게시·업로드·수익화 기능은 없습니다.
 
 ## 문제 해결
@@ -450,14 +442,18 @@ Extension은 현재 탭에서 입력한 외부 STT·Upstage API 키를 보관하
 
 ### 자막 에이전트 연결 또는 Solar 자막이 실패함
 
-- companion 프로세스가 실행 중인지 확인합니다.
-- 편집기 endpoint가 기본값 `http://127.0.0.1:4319/v1/captions` 또는 실제 배포 주소와 일치하는지 확인합니다.
-- 편집기의 세션 토큰과 companion의 `KIRINUKI_AGENT_TOKEN`이 같은지 확인합니다.
-- **연결 확인**을 눌러 endpoint 접근 권한, origin 허용과 인증 오류를 먼저 확인합니다.
-- 직접 입력 방식을 쓴다면 STT API 주소·모델·키와 Upstage 키가 현재 편집기 탭에 모두 입력되어 있는지 확인합니다. 키를 비운 뒤에는 다시 입력해야 합니다.
-- 환경 변수 방식을 쓴다면 companion의 `KIRINUKI_STT_ENDPOINT`, `KIRINUKI_STT_MODEL`, `KIRINUKI_STT_API_KEY`, `UPSTAGE_API_KEY`와 외부 네트워크 연결을 확인합니다.
+- `npm run caption-stack:status`에서 STT와 gateway가 모두 `ready`인지 확인합니다.
+- `occupied/foreign`이면 4318/4319를 쓰는 구 수동 STT·gateway 또는 다른 프로세스를 정상 종료한 뒤 다시 시작합니다.
+- 꺼져 있으면 `npm run caption-stack:start`를 실행합니다.
+- Extension 경로 변경이 표시되면 `npm run caption-stack:setup`을 다시 실행합니다.
+- 편집기 endpoint가 기본값 `http://127.0.0.1:4319/v1/captions`인지 확인합니다.
+- **연결 확인**으로 exact Origin과 자동 session 오류를 먼저 확인합니다.
+- gateway가 재시작되어 세션이 만료된 경우 편집기가 무과금 probe 뒤 한 번 자동 재연결합니다.
+- 현재 탭의 Upstage 키·계정 상태·rate limit을 확인합니다.
+- 중간 실패·취소였다면 같은 Solar 모델과 컷 범위를 유지하고 버튼을 다시 눌러 완료 체크포인트 뒤부터 재개합니다.
+- `SOLAR_RESPONSE_FORMAT_UNSUPPORTED` 또는 빈 응답 오류는 비용 보호를 위해 같은 컷을 다른 형식으로 자동 유료 재호출하지 않았다는 뜻입니다. 설정과 모델 상태를 확인한 뒤 사용자가 다시 실행할지 결정하세요.
+- 외부 STT 고급 방식을 쓴 경우에만 STT 주소·모델·키와 multipart timed JSON 호환성을 확인합니다.
 - 원격 HTTPS companion에 provider 키를 직접 입력한 경우 loopback 전용 보안 제한으로 거절됩니다. 원격 서버 환경에 키를 설정하세요.
-- STT 서비스가 `file`, `model`, `language`, `response_format`, `timestamp_granularities[]` multipart 요청과 timed JSON 응답을 지원하는지 확인합니다.
 - AI 작업 중에는 원본 교체·컷 변경·내보내기가 잠기므로 작업을 완료하거나 취소한 뒤 다시 시도합니다.
 
 ### 자막이 없거나 오인식이 많음
@@ -548,8 +544,8 @@ Codex 흐름에서도 사용자 확정 컷은 `authority: USER`입니다. 정책
 - [ ] 올바른 치지직 방송 회차 또는 YouTube video ID의 로컬 원본을 연결함
 - [ ] 첫 컷으로 소스 페이지·로컬 원본 오프셋을 확인함
 - [ ] 컷 순서와 양끝을 사람이 검수함
-- [ ] 자막 에이전트 주소·세션 토큰과 STT·Upstage 설정을 확인하고 선택 컷만 전송함
-- [ ] 편집기에 직접 입력한 provider API 키를 작업 뒤 지우거나 탭을 닫음
+- [ ] 로컬 자막 stack의 STT·gateway가 ready이고 Upstage 키는 현재 탭에만 입력함
+- [ ] 편집기에 입력한 Upstage API 키를 작업 뒤 지우거나 탭을 닫음
 - [ ] 자막 초안의 텍스트·시각·위치를 원음과 대조해 사람이 검수함
 - [ ] 영상과 `.kirinuki.json`, 필요한 경우 `.ko.srt`가 같은 이름으로 저장됨
 - [ ] 공개 전 방송인·음원·제3자 정책을 다시 확인함

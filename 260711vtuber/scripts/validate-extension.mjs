@@ -13,6 +13,7 @@ import {
   resolveCreatorPolicies
 } from "../extension/lib/core.js";
 import { EXTENSION_PACKAGE_FILES } from "./extension-package-files.mjs";
+import { PAPERLOGY_FONT } from "./paperlogy-font.mjs";
 import { PRETENDARD_FONT } from "./pretendard-font.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -54,6 +55,7 @@ const referencedFiles = [
   "editor.html",
   "editor/editor.css",
   "editor/editor.js",
+  PAPERLOGY_FONT.extensionFontPath,
   PRETENDARD_FONT.extensionFontPath,
   "lib/core.js",
   "lib/editor-core.js",
@@ -65,6 +67,7 @@ const referencedFiles = [
   "knowledge/creator-policies/charon-universe-w.md",
   "THIRD_PARTY_NOTICES.md",
   "licenses/MEDIABUNNY-MPL-2.0.txt",
+  PAPERLOGY_FONT.extensionLicensePath,
   PRETENDARD_FONT.extensionLicensePath,
   ...EXTENSION_PACKAGE_FILES
 ].filter(Boolean);
@@ -95,23 +98,25 @@ for (const relativePath of [
   }
 }
 
-for (const [relativePath, expectedSha256] of [
-  [PRETENDARD_FONT.extensionFontPath, PRETENDARD_FONT.fontSha256],
-  [PRETENDARD_FONT.extensionLicensePath, PRETENDARD_FONT.licenseSha256]
+for (const [label, relativePath, expectedSha256] of [
+  ["Pretendard", PRETENDARD_FONT.extensionFontPath, PRETENDARD_FONT.fontSha256],
+  ["Pretendard", PRETENDARD_FONT.extensionLicensePath, PRETENDARD_FONT.licenseSha256],
+  ["Paperlogy", PAPERLOGY_FONT.extensionFontPath, PAPERLOGY_FONT.fontSha256],
+  ["Paperlogy", PAPERLOGY_FONT.extensionLicensePath, PAPERLOGY_FONT.licenseSha256]
 ]) {
   let file;
   try {
     file = await readFile(path.join(extensionRoot, relativePath));
   } catch (error) {
     if (error?.code !== "ENOENT") {
-      errors.push(`Pretendard 배포 파일 읽기 실패: ${relativePath} (${error.message})`);
+      errors.push(`${label} 배포 파일 읽기 실패: ${relativePath} (${error.message})`);
     }
     continue;
   }
   const actualSha256 = createHash("sha256").update(file).digest("hex");
   assert(
     actualSha256 === expectedSha256,
-    `Pretendard 배포 파일 무결성 검증 실패: ${relativePath} (${actualSha256})`
+    `${label} 배포 파일 무결성 검증 실패: ${relativePath} (${actualSha256})`
   );
 }
 
@@ -238,6 +243,7 @@ for (const id of [
   "caption-stt-api-key",
   "caption-upstage-api-key",
   "clear-caption-provider-keys",
+  "caption-style-preset",
   "caption-model",
   "caption-advanced-settings",
   "test-caption-agent",
@@ -270,9 +276,20 @@ assert(editorScript.includes("encodePcm16WavBase64"), "선택 구간 PCM을 표�
 assert(editorScript.includes("ensureCaptionAgentPermission"), "사용자 선택 원격 에이전트 권한 요청 경로가 없습니다.");
 assert(editorScript.includes("captionProviderHeaders"), "로컬 companion 제공자 API 키 전달 경로가 없습니다.");
 assert(
-  editorScript.includes("isLoopbackAgentEndpoint")
-    && editorScript.includes("if (!isLoopbackAgentEndpoint(endpoint))"),
+  editorScript.includes("MAX_CAPTION_AGENT_CLIPS_PER_RUN = 16")
+    && editorScript.includes("captionAgentResumePlan")
+    && editorScript.includes("captionCheckpoints"),
+  "16컷 유료 요청 가드 또는 실패 지점 재개 체크포인트가 없습니다."
+);
+assert(
+  editorScript.includes("isLoopbackCaptionAgentEndpoint")
+    && editorScript.includes("if (!isLoopbackCaptionAgentEndpoint(endpoint))"),
   "API 키의 원격 에이전트 유출 차단이 없습니다."
+);
+assert(
+  editorScript.includes("pairCaptionAgent")
+    && editorScript.includes("bearer-process-memory"),
+  "로컬 companion 메모리 세션 자동 연결 경로가 없습니다."
 );
 assert(editorScript.includes("showDirectoryPicker"), "영상·JSON·SRT 동일 폴더 저장 경로가 없습니다.");
 assert(editorScript.includes("chooseUniqueExportBaseName"), "내보내기 파일명 충돌 방지가 없습니다.");
