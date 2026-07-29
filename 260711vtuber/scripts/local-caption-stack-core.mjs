@@ -26,6 +26,14 @@ const WHISPER_MODEL_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1";
 const WHISPER_VAD_REVISION = "9ffd54a1e1ee413ddf265af9913beaf518d1639b";
 
 export const PINNED_MODELS = Object.freeze({
+  draft: Object.freeze({
+    id: "tiny-q5_1",
+    name: "ggml-tiny-q5_1.bin",
+    url:
+      `https://huggingface.co/ggerganov/whisper.cpp/resolve/${WHISPER_MODEL_REVISION}/ggml-tiny-q5_1.bin`,
+    sha256: "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
+    size: 32_152_673
+  }),
   light: Object.freeze({
     id: "base-q5_1",
     name: "ggml-base-q5_1.bin",
@@ -61,7 +69,7 @@ export const PINNED_VAD_MODEL = Object.freeze({
   size: 885_098
 });
 
-const PROFILE_NAMES = Object.freeze(["auto", "light", "quality"]);
+const PROFILE_NAMES = Object.freeze(["draft", "auto", "light", "quality"]);
 const BACKEND_NAMES = Object.freeze(["auto", "cpu", "cuda"]);
 const SIX_GIB = 6 * 1024 ** 3;
 
@@ -113,7 +121,7 @@ export function parseLocalCaptionStackArgs(argv = []) {
   const values = [...argv].map((value) => String(value));
   const command = values.shift() || "help";
   const options = {
-    profile: "auto",
+    profile: "draft",
     backend: "auto",
     foreground: false,
     dryRun: false,
@@ -238,7 +246,7 @@ export function detectBackend(hardware = {}, preference = "auto") {
 }
 
 export function resolveSemanticProfile(
-  requestedProfile = "auto",
+  requestedProfile = "draft",
   hardware = {},
   backendPreference = "auto"
 ) {
@@ -254,6 +262,7 @@ export function resolveSemanticProfile(
     : requestedProfile;
   const backend = detectBackend(hardware, backendPreference);
   const threadTargets = {
+    draft: bounded(Math.floor(cpuCount / 2), 2, 4),
     light: bounded(Math.floor(cpuCount / 2), 2, 4),
     auto: bounded(Math.floor(cpuCount * 0.75), 2, 8),
     quality: bounded(cpuCount - 1, 4, 12)
@@ -344,6 +353,18 @@ export function createInstallConfig(paths, semanticProfile, {
   });
 }
 
+export function installedProfileSummary(config) {
+  if (!config) {
+    return null;
+  }
+  return Object.freeze({
+    requested: String(config.profile || ""),
+    effective: String(config.effectiveProfile || ""),
+    model: String(config.model?.id || ""),
+    backend: String(config.backend || "")
+  });
+}
+
 export function buildWhisperServerArgs(config, { requestPath } = {}) {
   if (config.host !== LOOPBACK_HOST) {
     throw new Error("로컬 STT 서버는 127.0.0.1에만 바인딩할 수 있습니다.");
@@ -418,7 +439,7 @@ export function renderSystemdUserUnit({
   ].join(" ");
   return [
     "[Unit]",
-    "Description=Kirinuki local Whisper + Solar caption stack",
+    "Description=Kirinuki local Whisper caption stack",
     "After=network-online.target",
     "Wants=network-online.target",
     "",

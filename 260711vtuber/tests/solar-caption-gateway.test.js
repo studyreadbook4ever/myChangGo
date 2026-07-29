@@ -5,6 +5,8 @@ import test from "node:test";
 import {
   CAPTION_AGENT_REQUEST_SCHEMA_ID,
   CAPTION_AGENT_RESPONSE_SCHEMA_ID,
+  LOCAL_WHISPER_CAPTION_MODEL,
+  SUPPORTED_CAPTION_MODELS,
   validateCaptionAgentRequest
 } from "../src/caption-agent/protocol.js";
 import {
@@ -23,6 +25,7 @@ import {
   MAX_STT_WORDS,
   SOLAR_PRO3_HIGH_REASONING_MIN_TOKENS,
   UPSTAGE_CHAT_COMPLETIONS_URL,
+  normalizeCaptionModel,
   normalizeSolarCaptionModel,
   normalizeSttTranscript,
   requestExternalStt,
@@ -126,6 +129,13 @@ function normalizedCaptionRequest(overrides = {}) {
   return validateCaptionAgentRequest(captionRequest(overrides));
 }
 
+function localCaptionRequest(overrides = {}) {
+  return captionRequest({
+    model: LOCAL_WHISPER_CAPTION_MODEL,
+    ...overrides
+  });
+}
+
 function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
@@ -202,6 +212,121 @@ test("local-whispercpp 모드는 loopback STT에 가짜 API 키를 요구하지 
     }),
     (error) => error?.code === "STT_PROVIDER_PAIR_REQUIRED"
   );
+});
+
+test("기본 로컬 초벌은 Upstage 키 없이 loopback STT 한 번만 호출하고 원래 발화 경계를 보존한다", async () => {
+  const loopbackEndpoint =
+    "http://127.0.0.1:4318/v1/audio/transcriptions";
+  const config = resolveCaptionPipelineConfig({
+    ...TEST_ENV,
+    KIRINUKI_STT_MODE: LOCAL_WHISPERCPP_TRANSCRIPTION_MODE,
+    KIRINUKI_STT_ENDPOINT: loopbackEndpoint,
+    KIRINUKI_STT_API_KEY: "",
+    KIRINUKI_STT_MODEL: "tiny-q5_1",
+    UPSTAGE_API_KEY: ""
+  });
+  let sttCalls = 0;
+  let upstageCalls = 0;
+  const result = await runCaptionPipeline(localCaptionRequest(), {
+    ...config,
+    fetchImpl: async (url, init) => {
+      if (String(url) === UPSTAGE_CHAT_COMPLETIONS_URL) {
+        upstageCalls += 1;
+        throw new Error("로컬 기본 초벌에서 Upstage를 호출하면 안 됩니다.");
+      }
+      sttCalls += 1;
+      assert.equal(String(url), loopbackEndpoint);
+      assert.equal(init.headers.authorization, undefined);
+      return jsonResponse({
+        text: "안녕하세요 여러분 오늘도 정말 너무너무 반가워요 친구들.",
+        segments: [{
+          start: 0.4,
+          end: 6.4,
+          text: "안녕하세요 여러분 오늘도 정말 너무너무 반가워요 친구들.",
+          speaker: "unknown"
+        }],
+        words: [
+          { start: 0.4, end: 1.0, word: "안녕하세요" },
+          { start: 1.2, end: 1.7, word: "여러분" },
+          { start: 2.0, end: 2.5, word: "오늘도" },
+          { start: 2.8, end: 3.2, word: "정말" },
+          { start: 3.5, end: 4.1, word: "너무너무" },
+          { start: 4.5, end: 5.2, word: "반가워요" },
+          { start: 5.6, end: 6.4, word: "친구들." }
+        ]
+      });
+    }
+  });
+
+  assert.equal(sttCalls, 1);
+  assert.equal(upstageCalls, 0);
+  assert.equal(result.provider, "local-whispercpp");
+  assert.equal(result.captionModel, "whisper-tiny");
+  assert.equal(result.sttModel, "tiny-q5_1");
+  assert.equal(result.resolvedModel, "tiny-q5_1");
+  assert(result.cues.length >= 2);
+  assert.equal(result.cues[0].startMs, 400);
+  assert.equal(result.cues.at(-1).endMs, 6_400);
+  assert(result.cues.every((cue) => (
+    cue.startMs >= 400
+    && cue.endMs <= 6_400
+    && cue.endMs - cue.startMs <= 4_000
+    && cue.speakerId === "main"
+    && !/[.\u3002\uff0e]$/u.test(cue.text)
+  )));
+  const wordBoundaries = new Set([
+    1_100,
+    1_850,
+    2_650,
+    3_350,
+    4_300,
+    5_400
+  ]);
+  assert(
+    result.cues.slice(0, -1).some(
+      (cue) => wordBoundaries.has(cue.endMs)
+    )
+  );
+  assert(result.warnings.some(
+    ({ code }) => code === "HARNESS_ALIGNED_SPLIT_TO_WORD_BOUNDARY"
+  ));
+});
+
+test("로컬 Whisper의 짧은 동일 화자 겹침은 경계를 이동하거나 rejected를 review로 낮추지 않고 격리한다", async () => {
+  let sttCalls = 0;
+  const pending = runCaptionPipeline(localCaptionRequest(), {
+    sttModel: "tiny-q5_1",
+    transcribeAudio: async () => {
+      sttCalls += 1;
+      return {
+        text: "가 나",
+        segments: [{
+          startMs: 0,
+          endMs: 100,
+          text: "가",
+          speaker: "main"
+        }, {
+          startMs: 50,
+          endMs: 150,
+          text: "나",
+          speaker: "main"
+        }],
+        words: []
+      };
+    },
+    fetchImpl: async () => {
+      throw new Error("로컬 겹침 격리 과정은 Upstage를 호출하면 안 됩니다.");
+    }
+  });
+
+  await assert.rejects(
+    pending,
+    (error) => (
+      error?.code === "CAPTION_QUALITY_GATE_FAILED"
+      && error?.httpStatus === 422
+    )
+  );
+  assert.equal(sttCalls, 1);
 });
 
 test("외부 STT 배열 개수와 Solar 전사 프롬프트 크기를 처리 전에 제한한다", () => {
@@ -329,9 +454,14 @@ test("파이프라인은 base64 WAV를 STT에만 보내고 Solar에는 중복 �
     ...config
   });
   assert.equal(calls.length, 2);
+  assert.equal(
+    calls.filter(({ url }) => url === UPSTAGE_CHAT_COMPLETIONS_URL).length,
+    1
+  );
   assert.equal(result.schema, CAPTION_AGENT_RESPONSE_SCHEMA_ID);
   assert.equal(result.sttModel, "remote-korean-stt");
   assert.equal(result.captionModel, "solar-pro3");
+  assert.equal(result.provider, "upstage");
   assert.equal(result.cues.length, 2);
   assert(result.cues.every((cue) => cue.endMs - cue.startMs <= 4_000));
   assert.equal(result.cues.map((cue) => cue.text).join(" "), "안녕 반가워");
@@ -660,7 +790,22 @@ test("Solar Mini 선택은 실제 Upstage 모델까지 관통하고 Pro 3 전용
   assert.equal(result.resolvedModel, "solar-mini-250422");
 });
 
-test("새 자막 모델 계약은 Solar Pro 3와 Solar Mini만 허용한다", () => {
+test("새 자막 모델 계약은 로컬 Whisper를 기본값으로 두고 Solar를 명시 선택으로 허용한다", () => {
+  assert.equal(normalizeCaptionModel(), LOCAL_WHISPER_CAPTION_MODEL);
+  assert.equal(
+    normalizeCaptionModel(LOCAL_WHISPER_CAPTION_MODEL),
+    LOCAL_WHISPER_CAPTION_MODEL
+  );
+  assert.equal(normalizeCaptionModel("solar-pro3"), "solar-pro3");
+  assert.equal(normalizeCaptionModel("solar-mini"), "solar-mini");
+  assert.deepEqual(
+    SUPPORTED_CAPTION_MODELS,
+    ["whisper-tiny", "solar-pro3", "solar-mini"]
+  );
+  assert.throws(
+    () => normalizeCaptionModel("made-up-caption-model"),
+    (error) => error?.code === "UNSUPPORTED_CAPTION_MODEL"
+  );
   assert.equal(normalizeSolarCaptionModel("solar-pro3"), "solar-pro3");
   assert.equal(normalizeSolarCaptionModel("solar-mini"), "solar-mini");
   assert.throws(
@@ -940,6 +1085,49 @@ test("managed 게이트웨이는 exact Extension Origin에만 메모리 세션�
   assert.equal(JSON.stringify(capability.body).includes(paired.body.token), false);
 });
 
+test("로컬 Whisper capability는 Upstage 키가 없어도 실행 준비 완료로 보고한다", async (t) => {
+  const { server } = createSolarCaptionGatewayServer({
+    env: {
+      ...TEST_ENV,
+      KIRINUKI_STT_MODE: LOCAL_WHISPERCPP_TRANSCRIPTION_MODE,
+      KIRINUKI_STT_ENDPOINT:
+        "http://127.0.0.1:4318/v1/audio/transcriptions",
+      KIRINUKI_STT_API_KEY: "",
+      KIRINUKI_STT_MODEL: "tiny-q5_1",
+      UPSTAGE_API_KEY: ""
+    },
+    fetchImpl: async () => {
+      throw new Error("capability 조회는 STT나 Upstage를 호출하면 안 됩니다.");
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const { port } = server.address();
+
+  const capability = await localHttpJson({
+    port,
+    method: "GET",
+    headers: {
+      origin: ALLOWED_ORIGIN,
+      authorization: `Bearer ${AGENT_TOKEN}`
+    }
+  });
+  assert.equal(capability.status, 200);
+  assert.equal(capability.body.provider, "local-whispercpp");
+  assert.equal(capability.body.defaultModel, "whisper-tiny");
+  assert.equal(capability.body.transcription.authentication, "none-loopback");
+  assert.deepEqual(capability.body.configured, {
+    sttEndpoint: true,
+    sttApiKey: true,
+    upstageApiKey: false,
+    ready: true,
+    solarReady: false
+  });
+});
+
 test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET 연결 확인을 외부 호출 없이 제공한다", async (t) => {
   const pipelineCalls = [];
   const { server } = createSolarCaptionGatewayServer({
@@ -1024,17 +1212,17 @@ test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET �
   assert.deepEqual(capability.body, {
     schema: CAPTION_AGENT_CAPABILITY_SCHEMA_ID,
     status: "ok",
-    provider: "upstage",
+    provider: "timed-stt",
     models: {
       stt: "remote-korean-stt",
-      captions: "solar-pro3"
+      captions: "whisper-tiny"
     },
-    model: "solar-pro3",
-    defaultModel: "solar-pro3",
-    availableModels: ["solar-pro3", "solar-mini"],
+    model: "whisper-tiny",
+    defaultModel: "whisper-tiny",
+    availableModels: ["whisper-tiny", "solar-pro3", "solar-mini"],
     transcription: {
       mode: "external-timed-stt",
-      solarInput: "text-only",
+      solarInput: "optional-text-only",
       requiresTimedTranscript: true,
       authentication: "bearer",
       ready: true
@@ -1056,7 +1244,8 @@ test("HTTP 게이트웨이는 exact CORS·Bearer를 적용하고 인증된 GET �
       sttEndpoint: true,
       sttApiKey: true,
       upstageApiKey: true,
-      ready: true
+      ready: true,
+      solarReady: true
     }
   });
   assert.equal(pipelineCalls.length, 0);
@@ -1142,7 +1331,8 @@ test("브라우저에서 입력한 STT·Upstage 키는 요청 단위로 환경 �
     sttEndpoint: false,
     sttApiKey: false,
     upstageApiKey: false,
-    ready: false
+    ready: false,
+    solarReady: false
   });
 
   const upstageOnlyHeaders = {
@@ -1158,7 +1348,8 @@ test("브라우저에서 입력한 STT·Upstage 키는 요청 단위로 환경 �
     sttEndpoint: false,
     sttApiKey: false,
     upstageApiKey: true,
-    ready: false
+    ready: false,
+    solarReady: false
   });
   assert.equal(upstageOnly.body.transcription.ready, false);
 
@@ -1200,6 +1391,7 @@ test("브라우저에서 입력한 STT·Upstage 키는 요청 단위로 환경 �
   });
   assert.equal(ready.status, 200);
   assert.equal(ready.body.configured.ready, true);
+  assert.equal(ready.body.configured.solarReady, true);
 
   const completed = await localHttpJson({
     port,
@@ -1284,7 +1476,7 @@ test("Extension 클라이언트는 loopback 게이트웨이의 인증 응답과 
           text: "동시 게스트 발화",
           speakerId: "guest",
           reviewRequired: true,
-          placement: "top"
+          placement: "bottom"
         }
       ],
       warnings: [],
@@ -1350,7 +1542,7 @@ test("Extension 클라이언트는 loopback 게이트웨이의 인증 응답과 
   assert(cues[1].startOffsetMs < cues[0].endOffsetMs);
 });
 
-test("게이트웨이 설정은 wildcard Origin과 빠진 외부 provider 설정을 거절한다", () => {
+test("게이트웨이 설정은 Upstage 키를 선택값으로 두되 빠진 외부 STT와 위험한 주소는 거절한다", () => {
   assert.throws(
     () => resolveCaptionGatewayConfig({
       ...TEST_ENV,
@@ -1358,10 +1550,24 @@ test("게이트웨이 설정은 wildcard Origin과 빠진 외부 provider 설정
     }),
     (error) => error.code === "INVALID_CONFIGURATION"
   );
+  assert.equal(
+    resolveCaptionPipelineConfig({
+      ...TEST_ENV,
+      UPSTAGE_API_KEY: ""
+    }).upstageApiKey,
+    ""
+  );
   assert.throws(
     () => resolveCaptionPipelineConfig({
       ...TEST_ENV,
-      UPSTAGE_API_KEY: ""
+      KIRINUKI_STT_ENDPOINT: ""
+    }),
+    (error) => error.code === "MISSING_CONFIGURATION"
+  );
+  assert.throws(
+    () => resolveCaptionPipelineConfig({
+      ...TEST_ENV,
+      KIRINUKI_STT_API_KEY: ""
     }),
     (error) => error.code === "MISSING_CONFIGURATION"
   );

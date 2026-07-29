@@ -8,9 +8,10 @@ import { pathToFileURL } from "node:url";
 import {
   CAPTION_AGENT_REQUEST_SCHEMA_ID,
   CAPTION_AGENT_RESPONSE_SCHEMA_ID,
+  LOCAL_WHISPER_CAPTION_MODEL,
   MAX_CAPTION_CUE_DURATION_MS,
   MAX_CLIP_DURATION_MS,
-  SUPPORTED_SOLAR_CAPTION_MODELS,
+  SUPPORTED_CAPTION_MODELS,
   CaptionProtocolError
 } from "../src/caption-agent/protocol.js";
 import {
@@ -288,7 +289,12 @@ function providerReadiness(baseConfig, overrides) {
   };
   return {
     ...configured,
-    ready: Object.values(configured).every(Boolean)
+    ready: configured.sttEndpoint && configured.sttApiKey,
+    solarReady: (
+      configured.sttEndpoint
+      && configured.sttApiKey
+      && configured.upstageApiKey
+    )
   };
 }
 
@@ -303,17 +309,20 @@ function capabilityResponse(config, overrides) {
   return {
     schema: CAPTION_AGENT_CAPABILITY_SCHEMA_ID,
     status: "ok",
-    provider: "upstage",
+    provider: effectivePipeline.transcriptionMode
+      === LOCAL_WHISPERCPP_TRANSCRIPTION_MODE
+      ? "local-whispercpp"
+      : "timed-stt",
     models: {
       stt: effectivePipeline.sttModel,
-      captions: effectivePipeline.solarModel
+      captions: LOCAL_WHISPER_CAPTION_MODEL
     },
-    model: effectivePipeline.solarModel,
-    defaultModel: effectivePipeline.solarModel,
-    availableModels: [...SUPPORTED_SOLAR_CAPTION_MODELS],
+    model: LOCAL_WHISPER_CAPTION_MODEL,
+    defaultModel: LOCAL_WHISPER_CAPTION_MODEL,
+    availableModels: [...SUPPORTED_CAPTION_MODELS],
     transcription: {
       mode: effectivePipeline.transcriptionMode || DEFAULT_TRANSCRIPTION_MODE,
-      solarInput: "text-only",
+      solarInput: "optional-text-only",
       requiresTimedTranscript: true,
       authentication: (
         effectivePipeline.transcriptionMode
@@ -580,7 +589,7 @@ if (isMainModule()) {
   startSolarCaptionGateway()
     .then(({ server, config }) => {
       console.log(
-        `Solar caption gateway ready at http://127.0.0.1:${config.port}`
+        `Kirinuki caption gateway ready at http://127.0.0.1:${config.port}`
       );
       const close = () => {
         server.close(() => process.exit(0));
@@ -590,7 +599,7 @@ if (isMainModule()) {
     })
     .catch((error) => {
       const safe = safeError(error);
-      console.error(`Solar caption gateway failed: ${safe.code}`);
+      console.error(`Kirinuki caption gateway failed: ${safe.code}`);
       process.exitCode = 1;
     });
 }

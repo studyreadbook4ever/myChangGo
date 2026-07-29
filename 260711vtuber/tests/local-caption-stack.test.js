@@ -16,6 +16,7 @@ import {
   buildWhisperServerArgs,
   createInstallConfig,
   extensionOriginForPath,
+  installedProfileSummary,
   parseLocalCaptionStackArgs,
   renderSystemdUserUnit,
   resolveSemanticProfile,
@@ -28,6 +29,7 @@ import {
 } from "../scripts/local-caption-stack-core.mjs";
 import {
   managedChildEnvironment,
+  helpText,
   withoutCaptionSecrets
 } from "../scripts/local-caption-stack.mjs";
 
@@ -117,7 +119,23 @@ test("SHA 검증기는 일치한 artifact만 통과시킨다", () => {
   );
 });
 
-test("auto·light·quality profile은 저사양 하향과 정확도 모델을 의미적으로 고른다", () => {
+test("기본 draft profile은 고정 Whisper Tiny 초벌 모델을 고른다", () => {
+  const profile = resolveSemanticProfile(undefined, hardware(), "auto");
+  assert.equal(profile.requestedProfile, "draft");
+  assert.equal(profile.effectiveProfile, "draft");
+  assert.equal(profile.model.id, "tiny-q5_1");
+  assert.equal(profile.model.name, "ggml-tiny-q5_1.bin");
+  assert.equal(
+    profile.model.sha256,
+    "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7"
+  );
+  assert.equal(profile.model.size, 32_152_673);
+  assert.equal(profile.semantics.language, "ko");
+  assert.equal(profile.semantics.timestamps, "segment+word");
+  assert.equal(profile.semantics.vad, true);
+});
+
+test("명시한 auto·light·quality profile은 기존 모델 선택을 유지한다", () => {
   const normal = resolveSemanticProfile("auto", hardware(), "auto");
   assert.equal(normal.effectiveProfile, "auto");
   assert.equal(normal.model.id, "small-q5_1");
@@ -137,6 +155,20 @@ test("auto·light·quality profile은 저사양 하향과 정확도 모델을 �
   assert.equal(quality.semantics.language, "ko");
   assert.equal(quality.semantics.timestamps, "segment+word");
   assert.equal(quality.semantics.vad, true);
+});
+
+test("doctor용 설치 요약은 CLI 기본 후보가 아니라 실제 설치 프로필과 모델을 보고한다", () => {
+  const installed = createInstallConfig(
+    fixturePaths(),
+    resolveSemanticProfile("light", hardware(), "cpu")
+  );
+  assert.deepEqual(installedProfileSummary(installed), {
+    requested: "light",
+    effective: "light",
+    model: "base-q5_1",
+    backend: "cpu"
+  });
+  assert.equal(installedProfileSummary(null), null);
 });
 
 test("CPU가 안전한 기본이고 NVIDIA와 nvcc가 모두 있을 때만 CUDA를 선택한다", () => {
@@ -281,6 +313,19 @@ test("systemd start·stop 명령에는 API 키 값이나 환경 import가 없다
 
 test("CLI는 5개 공개 명령과 profile만 받고 비밀 옵션을 거부한다", () => {
   assert.deepEqual(
+    parseLocalCaptionStackArgs(["setup"]),
+    {
+      command: "setup",
+      options: {
+        profile: "draft",
+        backend: "auto",
+        foreground: false,
+        dryRun: false,
+        json: false
+      }
+    }
+  );
+  assert.deepEqual(
     parseLocalCaptionStackArgs([
       "start",
       "--foreground",
@@ -307,6 +352,14 @@ test("CLI는 5개 공개 명령과 profile만 받고 비밀 옵션을 거부한�
     () => parseLocalCaptionStackArgs(["setup", "--profile", "huge"]),
     /profile은/u
   );
+});
+
+test("CLI 도움말은 draft Tiny 기본값과 기존 명시 프로필을 함께 안내한다", () => {
+  const help = helpText();
+  assert.match(help, /draft\s+기본값.+Whisper Tiny tiny-q5_1/u);
+  assert.match(help, /auto\s+균형형 small-q5_1/u);
+  assert.match(help, /light\s+저사양 CPU용 base-q5_1/u);
+  assert.match(help, /quality\s+정확도 우선 medium-q5_0/u);
 });
 
 test("package scripts는 doctor/setup/start/status/stop을 Node CLI로 노출한다", async () => {

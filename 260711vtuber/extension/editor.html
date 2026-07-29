@@ -210,8 +210,8 @@
                 <svg viewBox="0 0 24 24"><path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8Z"/></svg>
               </div>
               <div>
-                <strong>Solar + 키리누키 품질 하네스</strong>
-                <span>타임스탬프 STT → Solar 의미 교정 → 로컬 품질 검사</span>
+                <strong>로컬 자막 초벌 + 키리누키 품질 하네스</strong>
+                <span>Whisper Tiny 기본 · 실제 STT 타임스탬프 우선 · Upstage 호출 0회</span>
               </div>
             </div>
             <label class="select-field">
@@ -223,17 +223,17 @@
               </select>
             </label>
             <label class="select-field">
-              <span>Solar 모델</span>
+              <span>자막 초벌 방식</span>
               <select id="caption-model">
-                <option value="solar-pro3" selected>정밀 초벌 · Solar Pro 3</option>
-                <option value="solar-mini">빠른 초벌 · Solar Mini</option>
+                <option value="whisper-tiny" selected>기본 · 로컬 Whisper (Tiny 기본)</option>
+                <option value="solar-mini">고급 · Whisper + Solar Mini 교정</option>
+                <option value="solar-pro3">고급 · Whisper + Solar Pro 3 교정</option>
               </select>
             </label>
-            <div class="select-field">
-              <label class="select-field-label" for="caption-upstage-api-key">Solar API 키 <em>현재 탭에서만</em></label>
+            <div class="select-field" hidden>
+              <label class="select-field-label" for="caption-upstage-api-key">Solar 고급 옵션 API 키 <em>현재 탭에서만</em></label>
               <div class="caption-key-row">
                 <input id="caption-upstage-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Upstage API 키">
-                <button id="clear-caption-provider-keys" class="small-action caption-key-clear" type="button">지우기</button>
               </div>
             </div>
             <p id="caption-local-status" class="caption-local-status" data-state="idle" role="status">
@@ -244,7 +244,7 @@
               <div class="caption-provider-fields">
                 <p class="caption-agent-advanced-intro">
                   로컬 companion은 이 기기의 Whisper STT를 자동 연결합니다. 아래 주소·토큰·
-                  외부 STT 값은 원격 또는 개발 환경에서만 직접 바꾸세요.
+                  외부 STT 값은 Solar 고급 옵션의 원격 또는 개발 환경에서만 직접 바꾸세요.
                 </p>
                 <div class="caption-agent-row">
                   <label class="select-field">
@@ -269,6 +269,7 @@
                   <span>STT API 키</span>
                   <input id="caption-stt-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="로컬 companion으로만 전달">
                 </label>
+                <button id="clear-caption-provider-keys" class="small-action caption-key-clear" type="button">현재 탭의 API 키 지우기</button>
                 <strong class="caption-agent-rules-title">초벌 자막 원칙</strong>
                 <ul>
                   <li>알아듣기 어려워도 말로 인식된 구간을 빼지 않고 검수 대상으로 남깁니다.</li>
@@ -278,19 +279,22 @@
                   <li>화자별 색은 로컬에서 일관되게 배정하며 기존 수동 자막은 보존합니다.</li>
                 </ul>
                 <p class="caption-agent-privacy">
-                  원본 영상 전체는 보내지 않습니다. 활성 컷의 16kHz 음성은 설정한 STT에,
-                  타임스탬프 전사문·이름·메모·숫자형 위치 요약과 상한이 고정된 용어·화자
-                  별칭·사람 검수 문체 예문은 Upstage에 전달됩니다. 대표 프레임은 이 기기에서만
-                  분석하며 픽셀을 보내지 않습니다. 세션 토큰과 두 API 키는
-                  프로젝트·임시저장·Chrome 저장소에 기록하지 않고 현재 편집기 탭의
-                  메모리에만 둡니다.
+                  기본 Whisper Tiny는 활성 컷 음성을 이 기기의 loopback STT에서만 처리하고
+                  Upstage에 아무것도 보내지 않습니다. Solar 고급 옵션을 직접 고른 경우에만
+                  타임스탬프 전사문·이름·메모와 상한이 고정된 편집 문맥을 Upstage에 보내며,
+                  WAV·영상·프레임 픽셀·이미지 에셋은 보내지 않습니다. 세션 토큰과 API 키는
+                  프로젝트·임시저장·Chrome 저장소에 기록하지 않고 현재 탭 메모리에만 둡니다.
                 </p>
               </div>
             </details>
             <button id="generate-captions" class="button ai-button" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M8 7v10M4 10v4M16 6v12M20 9v6"/></svg>
-              활성 컷 전체 Solar 자막 초안 만들기
+              활성 컷 전체 자막 초안 만들기
             </button>
+            <button id="reset-ai-caption-positions" class="small-action ai-reset-button" type="button">
+              AI 자막 전체를 기본 위치로 정렬
+            </button>
+            <p class="ai-reset-help">AI 자막의 글·시간·색상은 두고 화면 위치만 아래 중앙으로 맞춥니다.</p>
             <div id="ai-progress" class="ai-progress" hidden>
               <div class="progress-track"><span></span></div>
               <div class="progress-label">
@@ -334,6 +338,12 @@
                 </label>
               </div>
               <p class="field-help">아래 타임라인 양끝 손잡이로도 조정할 수 있어요.</p>
+              <div class="timing-match-control">
+                <button id="match-cue-to-asset" class="secondary-action timing-match-button" type="button" disabled>
+                  선택 에셋 구간에 정확히 맞춤
+                </button>
+                <p id="cue-timing-match-help" class="field-help">같은 컷의 에셋을 선택하면 양끝 시각을 한 번에 맞출 수 있어요.</p>
+              </div>
 
               <div class="field-group">
                 <span class="field-label">화면 위치</span>
@@ -365,7 +375,10 @@
                   </label>
                   <label class="color-control">
                     <span>선택 자막 색상</span>
-                    <input id="font-color" type="color" value="#ffffff">
+                    <span class="color-picker-register-row">
+                      <input id="font-color" type="color" value="#ffffff" aria-label="선택 자막 색상 고르기">
+                      <span id="caption-color-register" class="caption-color-register" role="group" aria-label="기본 흰색과 최근 자막 색상"></span>
+                    </span>
                   </label>
                 </div>
                 <button id="reset-font-color" class="inline-reset" type="button">기본 흰색으로</button>
@@ -420,6 +433,12 @@
                 </label>
               </div>
               <p class="field-help">에셋 트랙 양끝 손잡이로도 표시 시간을 조정할 수 있어요.</p>
+              <div class="timing-match-control">
+                <button id="match-asset-to-cue" class="secondary-action timing-match-button" type="button" disabled>
+                  선택 자막 구간에 정확히 맞춤
+                </button>
+                <p id="asset-timing-match-help" class="field-help">같은 컷의 자막을 선택하면 양끝 시각을 한 번에 맞출 수 있어요.</p>
+              </div>
 
               <div class="position-values asset-position-values">
                 <label class="field">
@@ -525,6 +544,9 @@
               <button id="add-audio-region" class="tool-button" type="button">+ 현재 위치 음성 설정</button>
               <button id="add-cue" class="tool-button" type="button">+ 현재 위치에 자막</button>
               <button id="fit-timeline" class="tool-button" type="button">전체 보기</button>
+              <button id="toggle-timeline-snap" class="tool-button snap-tool-button active" type="button" aria-pressed="true" title="타임라인 자석 켜짐 · 드래그 중 Alt로 잠시 해제">
+                자석
+              </button>
               <svg class="zoom-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M8 10h4"/></svg>
               <input id="timeline-zoom" type="range" min="20" max="240" value="70" aria-label="타임라인 확대">
             </div>
@@ -558,6 +580,7 @@
                 <div id="asset-track" class="timeline-track asset-track" aria-label="이미지 에셋 트랙"></div>
                 <div id="audio-track" class="timeline-track audio-track"></div>
                 <div id="caption-tracks" class="caption-tracks"></div>
+                <output id="timeline-snap-guide" class="timeline-snap-guide" aria-live="polite" hidden></output>
                 <div id="timeline-range-selection" class="timeline-range-selection" hidden>
                   <output id="timeline-range-summary" class="timeline-range-summary" aria-live="polite"></output>
                   <button id="range-start-handle" class="range-handle start" type="button" role="slider" aria-label="삭제 구간 시작 시각" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="00:00:00.000"></button>

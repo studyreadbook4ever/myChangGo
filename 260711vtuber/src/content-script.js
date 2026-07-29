@@ -574,15 +574,7 @@ if (!globalThis.__kirinukiSourceBridgeLoaded) {
     return {
       platform,
       url: requestedUrl,
-      canonicalUrl: canonicalSourceUrl(
-        platform === SOURCE_PLATFORM_CHZZK
-          ? (
-            document.querySelector("link[rel='canonical']")?.href
-            || requestedUrl
-          )
-          : requestedUrl,
-        identifiers
-      ),
+      canonicalUrl: canonicalSourceUrl(requestedUrl, identifiers),
       pageTitle,
       streamerName,
       broadcastTitle,

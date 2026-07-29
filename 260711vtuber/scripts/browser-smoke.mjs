@@ -353,6 +353,10 @@ async function main() {
         ].map((option) => option.value),
         tokenType: document.getElementById("caption-agent-token")?.type,
         sttKeyType: document.getElementById("caption-stt-api-key")?.type,
+        sttKeyHidden: document.getElementById("caption-stt-api-key")
+          ?.closest(".select-field")?.hidden,
+        sttKeyDisabled: document.getElementById("caption-stt-api-key")
+          ?.disabled,
         upstageKeyType: document.getElementById("caption-upstage-api-key")?.type,
         modelOptions: [...document.getElementById("caption-model")?.options || []]
           .map((option) => option.value),
@@ -361,6 +365,10 @@ async function main() {
           ?.contains(document.getElementById("caption-agent-endpoint")),
         upstageKeyInAdvanced: document.getElementById("caption-advanced-settings")
           ?.contains(document.getElementById("caption-upstage-api-key")),
+        upstageKeyHidden: document.getElementById("caption-upstage-api-key")
+          ?.closest(".select-field")?.hidden,
+        upstageKeyDisabled: document.getElementById("caption-upstage-api-key")
+          ?.disabled,
         missingIds: requiredIds.filter((id) => !document.getElementById(id))
       };
     `,
@@ -368,7 +376,7 @@ async function main() {
   });
   assert(editor.readyState === "complete", `editor readyState가 complete가 아닙니다: ${editor.readyState}`);
   assert(editor.endpoint === "http://127.0.0.1:4319/v1/captions", `기본 자막 에이전트 주소가 올바르지 않습니다: ${editor.endpoint}`);
-  assert(editor.model === "solar-pro3", `기본 Solar 모델이 올바르지 않습니다: ${editor.model}`);
+  assert(editor.model === "whisper-tiny", `기본 로컬 Whisper 모델이 올바르지 않습니다: ${editor.model}`);
   assert(editor.fontSize === "6.75", `기본 자막 크기가 30% 확대값이 아닙니다: ${editor.fontSize}`);
   assert(
     editor.stylePreset === "kr-vtuber-clean-v1",
@@ -383,13 +391,41 @@ async function main() {
   assert(editor.sttKeyType === "password", "STT API 키 입력이 password가 아닙니다.");
   assert(editor.upstageKeyType === "password", "Upstage API 키 입력이 password가 아닙니다.");
   assert(
-    editor.modelOptions.join(",") === "solar-pro3,solar-mini",
-    `Solar 모델 선택지가 간소화 계약과 다릅니다: ${editor.modelOptions.join(",")}`
+    editor.modelOptions.join(",") === "whisper-tiny,solar-mini,solar-pro3",
+    `로컬 기본·Solar 고급 선택지가 계약과 다릅니다: ${editor.modelOptions.join(",")}`
   );
   assert(editor.advancedOpen === false, "STT·companion 세부설정은 기본으로 접혀 있어야 합니다.");
   assert(editor.endpointInAdvanced === true, "companion 주소가 세부설정 밖에 노출되어 있습니다.");
-  assert(editor.upstageKeyInAdvanced === false, "Solar API 키는 기본 화면에 보여야 합니다.");
+  assert(editor.upstageKeyInAdvanced === false, "Solar API 키 위치 계약이 바뀌었습니다.");
+  assert(editor.upstageKeyHidden === true, "로컬 기본 모드에서 Solar API 키가 노출됩니다.");
+  assert(editor.upstageKeyDisabled === true, "로컬 기본 모드에서 Solar API 키 입력이 활성화되어 있습니다.");
+  assert(editor.sttKeyHidden === true, "로컬 기본 모드에서 외부 STT 키가 노출됩니다.");
+  assert(editor.sttKeyDisabled === true, "로컬 기본 모드에서 외부 STT 입력이 활성화되어 있습니다.");
   assert(editor.missingIds.length === 0, `editor 핵심 DOM 누락: ${editor.missingIds.join(", ")}`);
+
+  const solarModeUi = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/sync`, {
+    script: `
+      const model = document.getElementById("caption-model");
+      const key = document.getElementById("caption-upstage-api-key");
+      const sttKey = document.getElementById("caption-stt-api-key");
+      model.value = "solar-mini";
+      model.dispatchEvent(new Event("change", { bubbles: true }));
+      const solarState = {
+        hidden: key.closest(".select-field")?.hidden,
+        disabled: key.disabled,
+        sttHidden: sttKey.closest(".select-field")?.hidden,
+        sttDisabled: sttKey.disabled
+      };
+      model.value = "whisper-tiny";
+      model.dispatchEvent(new Event("change", { bubbles: true }));
+      return solarState;
+    `,
+    args: []
+  });
+  assert(solarModeUi.hidden === false, "Solar 고급 모드를 골라도 API 키 입력이 보이지 않습니다.");
+  assert(solarModeUi.disabled === false, "Solar 고급 모드의 API 키 입력이 비활성 상태입니다.");
+  assert(solarModeUi.sttHidden === false, "Solar 고급 모드의 외부 STT 입력이 보이지 않습니다.");
+  assert(solarModeUi.sttDisabled === false, "Solar 고급 모드의 외부 STT 입력이 비활성 상태입니다.");
 
   const runtime = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/async`, {
     script: `
@@ -404,7 +440,7 @@ async function main() {
         const localAgentPermission = await chrome.permissions.contains({
           origins: ["http://127.0.0.1/*"]
         });
-        const stored = await chrome.storage.local.get("chzzk-kirinuki-caption-agent-settings-v1");
+        const stored = await chrome.storage.local.get("chzzk-kirinuki-caption-agent-settings-v2");
         clearTimeout(timeout);
         done({
           cacheNames,
@@ -419,7 +455,7 @@ async function main() {
             )
           },
           localAgentPermission,
-          settings: stored["chzzk-kirinuki-caption-agent-settings-v1"] || null
+          settings: stored["chzzk-kirinuki-caption-agent-settings-v2"] || null
         });
       })().catch((error) => {
         clearTimeout(timeout);

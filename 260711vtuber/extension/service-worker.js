@@ -7,6 +7,7 @@ import {
 import {
   EDITOR_DATABASE_NAME,
   EDITOR_SEED_PREFIX,
+  sameSourceSession,
   sourceSessionIdentity
 } from "./lib/editor-core.js";
 import {
@@ -151,9 +152,15 @@ async function sourceTabExists(binding) {
       || sourceSessionIdentity(binding.sourceIdentity);
     const activeSessionId = sourceSessionIdentity(response.context);
     return Boolean(
-      expectedSessionId &&
-      activeSessionId &&
-      expectedSessionId === activeSessionId
+      (
+        binding.sourceIdentity
+        && sameSourceSession(binding.sourceIdentity, response.context)
+      )
+      || (
+        expectedSessionId
+        && activeSessionId
+        && expectedSessionId === activeSessionId
+      )
     );
   } catch {
     return false;

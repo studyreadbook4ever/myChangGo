@@ -25,6 +25,7 @@ const LEGACY_MODEL_CACHE_SENTINEL_TEXT = "remove-legacy-model-cache-on-reset";
 const PROJECT_ID = "e2e-editor-interaction";
 const EDITED_TEXT = "사람이 직접 고친 한글 자막";
 const KEY = Object.freeze({
+  ALT: "\uE00A",
   ARROW_RIGHT: "\uE014",
   DELETE: "\uE017",
   ESCAPE: "\uE00C",
@@ -331,6 +332,28 @@ async function clickAndAcceptSolarConfirmation(
   return confirmationText;
 }
 
+async function clickAndAcceptLocalConfirmation(selector) {
+  try {
+    await clickElement(selector);
+  } catch (error) {
+    if (!/unexpected alert open/i.test(String(error?.message || error))) {
+      throw error;
+    }
+  }
+  const confirmationText = await webdriver(
+    "GET",
+    `/session/${sessionId}/alert/text`
+  );
+  assert(
+    confirmationText.includes("Whisper Tiny 로컬 자막 초벌")
+      && confirmationText.includes("Upstage 요청 0회 · 유료 LLM 호출 없음")
+      && confirmationText.includes("STT가 만든 발화 시작·끝을 유지"),
+    `로컬 Whisper 무과금·싱크 계약 안내가 다릅니다: ${confirmationText}`
+  );
+  await webdriver("POST", `/session/${sessionId}/alert/accept`);
+  return confirmationText;
+}
+
 async function pressKey(value) {
   try {
     await webdriver("POST", `/session/${sessionId}/actions`, {
@@ -379,6 +402,14 @@ async function clearAndType(selector, text) {
   });
 }
 
+async function setInputValueAndChange(selector, value) {
+  await executeSync(`
+    const input = document.querySelector(arguments[0]);
+    input.value = arguments[1];
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  `, [selector, value]);
+}
+
 async function setFileInput(selector, filePath) {
   const element = await findElement(selector);
   await webdriver("POST", `/session/${sessionId}/element/${element[ELEMENT_KEY]}/value`, {
@@ -387,7 +418,7 @@ async function setFileInput(selector, filePath) {
   });
 }
 
-async function pointerDragOnce(selector, moves) {
+async function pointerDragOnce(selector, moves, { altKey = false } = {}) {
   const element = await findElement(selector);
   await executeSync(`
     arguments[0].scrollIntoView({ block: "center", inline: "center" });
@@ -416,7 +447,9 @@ async function pointerDragOnce(selector, moves) {
             y: event.clientY,
             pointerId: event.pointerId,
             trusted: event.isTrusted,
-            target: event.target?.className || event.target?.id || event.target?.tagName
+            target: event.target?.className || event.target?.id || event.target?.tagName,
+            snapGuideVisible: document.querySelector("#timeline-snap-guide")?.hidden === false,
+            snapGuideLabel: document.querySelector("#timeline-snap-guide")?.dataset.label || null
           });
         }
       }, true);
@@ -449,13 +482,28 @@ async function pointerDragOnce(selector, moves) {
     { type: "pointerUp", button: 0 }
   ];
   try {
-    await webdriver("POST", `/session/${sessionId}/actions`, {
-      actions: [{
+    const sources = [{
         type: "pointer",
         id: `pointer-${Date.now()}-${Math.random().toString(16).slice(2)}`,
         parameters: { pointerType: "mouse" },
         actions
-      }]
+    }];
+    if (altKey) {
+      sources.push({
+        type: "key",
+        id: `drag-alt-${Date.now()}`,
+        actions: [
+          { type: "keyDown", value: KEY.ALT },
+          ...Array.from(
+            { length: Math.max(0, actions.length - 2) },
+            () => ({ type: "pause", duration: 0 })
+          ),
+          { type: "keyUp", value: KEY.ALT }
+        ]
+      });
+    }
+    await webdriver("POST", `/session/${sessionId}/actions`, {
+      actions: sources
     });
   } finally {
     await webdriver("DELETE", `/session/${sessionId}/actions`).catch(() => {});
@@ -468,10 +516,10 @@ async function pointerDragOnce(selector, moves) {
   `);
 }
 
-async function pointerDrag(selector, moves) {
+async function pointerDrag(selector, moves, options) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      return await pointerDragOnce(selector, moves);
+      return await pointerDragOnce(selector, moves, options);
     } catch (error) {
       const staleElement = String(error?.message || "").includes("stale element reference");
       if (!staleElement || attempt === 2) {
@@ -1077,24 +1125,60 @@ async function main() {
 
   const aiProbeSetup = await executeSync(`
     const button = document.querySelector("#generate-captions");
+    document.querySelector("#caption-stt-endpoint").value =
+      "https://legacy-stt.e2e.invalid/v1/transcriptions";
+    document.querySelector("#caption-stt-model").value =
+      "legacy-external-model";
+    document.querySelector("#caption-stt-api-key").value =
+      "legacy-stt-key-that-local-must-ignore";
     globalThis.__kirinukiE2eOriginalFetch = globalThis.fetch;
     globalThis.__kirinukiE2eCaptionFetch = {
       probes: 0,
       requests: 0,
-      aborted: 0
+      aborted: 0,
+      lastModel: null,
+      lastUpstageKey: null,
+      lastSttEndpoint: null,
+      lastSttModel: null,
+      lastSttKey: null
     };
     globalThis.fetch = (input, init = {}) => {
       if (String(input).startsWith("http://127.0.0.1:4319/")) {
         if (String(init.method || "GET").toUpperCase() === "GET") {
           globalThis.__kirinukiE2eCaptionFetch.probes += 1;
           return Promise.resolve(new Response(JSON.stringify({
-            status: "ok"
+            schema: "chzzk-kirinuki-caption-agent/capability-v1",
+            status: "ok",
+            provider: "local-whispercpp",
+            models: {
+              stt: "ggml-tiny-q5_1.bin",
+              captions: "whisper-tiny"
+            },
+            availableModels: ["whisper-tiny", "solar-mini", "solar-pro3"],
+            transcription: {
+              mode: "local-whispercpp"
+            },
+            configured: {
+              ready: true,
+              solarReady: false
+            }
           }), {
             status: 200,
             headers: { "content-type": "application/json" }
           }));
         }
         globalThis.__kirinukiE2eCaptionFetch.requests += 1;
+        const body = JSON.parse(String(init.body || "{}"));
+        const headers = new Headers(init.headers);
+        globalThis.__kirinukiE2eCaptionFetch.lastModel = body.model || null;
+        globalThis.__kirinukiE2eCaptionFetch.lastUpstageKey =
+          headers.get("X-Kirinuki-Upstage-API-Key");
+        globalThis.__kirinukiE2eCaptionFetch.lastSttEndpoint =
+          headers.get("X-Kirinuki-STT-Endpoint");
+        globalThis.__kirinukiE2eCaptionFetch.lastSttModel =
+          headers.get("X-Kirinuki-STT-Model");
+        globalThis.__kirinukiE2eCaptionFetch.lastSttKey =
+          headers.get("X-Kirinuki-STT-API-Key");
         return new Promise((_resolve, reject) => {
           const abort = () => {
             globalThis.__kirinukiE2eCaptionFetch.aborted += 1;
@@ -1147,7 +1231,7 @@ async function main() {
   let aiDialogCanceled = null;
   let aiFetchProbe = null;
   try {
-    await clickAndAcceptSolarConfirmation("#generate-captions", 2);
+    await clickAndAcceptLocalConfirmation("#generate-captions");
 
     aiDialogOpened = await waitUntil(async () => {
       const state = await executeSync(`
@@ -1247,10 +1331,15 @@ async function main() {
     `).catch(() => null);
   }
   assert(
-    aiFetchProbe?.probes === 1 &&
+    aiFetchProbe?.probes === 2 &&
       aiFetchProbe?.requests === 1 &&
-      aiFetchProbe?.aborted === 1,
-    `외부 자막 요청 취소 계약이 지켜지지 않았습니다: ${JSON.stringify(aiFetchProbe)}`
+      aiFetchProbe?.aborted === 1 &&
+      aiFetchProbe?.lastModel === "whisper-tiny" &&
+      aiFetchProbe?.lastUpstageKey === null &&
+      aiFetchProbe?.lastSttEndpoint === null &&
+      aiFetchProbe?.lastSttModel === null &&
+      aiFetchProbe?.lastSttKey === null,
+    `기본 로컬 자막 요청·취소·Upstage 0회 계약이 지켜지지 않았습니다: ${JSON.stringify(aiFetchProbe)}`
   );
 
   const aiSuccessBefore = await readStoredProject();
@@ -1258,6 +1347,46 @@ async function main() {
     aiSuccessBefore?.subtitles?.length === 0 &&
       aiSuccessBefore?.ai?.status === "canceled",
     `AI 성공 경로 사전 프로젝트 상태가 올바르지 않습니다: ${JSON.stringify(aiSuccessBefore?.ai)}`
+  );
+  const solarModeReady = await executeAsync(`
+    const done = arguments[arguments.length - 1];
+    const settingsKey = "chzzk-kirinuki-caption-agent-settings-v2";
+    const captionModel = document.querySelector("#caption-model");
+    captionModel.value = "solar-pro3";
+    captionModel.dispatchEvent(new Event("change", { bubbles: true }));
+    const deadline = Date.now() + 5_000;
+    const check = () => {
+      chrome.storage.local.get(settingsKey, (stored) => {
+        const upstageField = document.querySelector("#caption-upstage-api-key")
+          ?.closest(".select-field");
+        if (
+          stored?.[settingsKey]?.model === "solar-pro3"
+          && upstageField?.hidden === false
+        ) {
+          setTimeout(() => done({
+            model: captionModel.value,
+            upstageKeyHidden: upstageField.hidden
+          }), 0);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          done({
+            error: chrome.runtime.lastError?.message || "Solar 설정 저장 timeout",
+            model: captionModel.value,
+            stored: stored?.[settingsKey] || null,
+            upstageKeyHidden: upstageField?.hidden
+          });
+          return;
+        }
+        setTimeout(check, 20);
+      });
+    };
+    check();
+  `);
+  assert(
+    solarModeReady?.model === "solar-pro3" &&
+      solarModeReady?.upstageKeyHidden === false,
+    `Solar 고급 모드 전환 저장 실패: ${JSON.stringify(solarModeReady)}`
   );
   const aiSuccessSetup = await executeSync(`
     const qualityProfile = arguments[0];
@@ -1295,6 +1424,7 @@ async function main() {
       requests: [],
       unexpected: []
     };
+    const captionModel = document.querySelector("#caption-model");
     document.querySelector("#caption-agent-token").value = "e2e-session-token";
     document.querySelector("#caption-stt-endpoint").value = "https://stt.e2e.invalid/v1/audio/transcriptions";
     document.querySelector("#caption-stt-model").value = "e2e-timestamp-stt";
@@ -1309,7 +1439,21 @@ async function main() {
       if (method === "GET") {
         trace.probes += 1;
         return new Response(JSON.stringify({
-          status: "ok"
+          schema: "chzzk-kirinuki-caption-agent/capability-v1",
+          status: "ok",
+          provider: "timed-stt",
+          models: {
+            stt: "e2e-timestamp-stt",
+            captions: "whisper-tiny"
+          },
+          availableModels: ["whisper-tiny", "solar-mini", "solar-pro3"],
+          transcription: {
+            mode: "external-timed-stt"
+          },
+          configured: {
+            ready: true,
+            solarReady: true
+          }
         }), {
           status: 200,
           headers: { "content-type": "application/json" }
@@ -1358,7 +1502,7 @@ async function main() {
         requestId: request.requestId,
         clipId: request.clip.id,
         language: "ko",
-        sttModel: "e2e-stt",
+        sttModel: "e2e-timestamp-stt",
         captionModel: request.model,
         model: request.model,
         resolvedModel: request.model,
@@ -1370,7 +1514,7 @@ async function main() {
           text: first ? "첫 컷 AI 초안입니다." : "두 번째 컷 AI 초안?",
           speakerId: first ? "streamer" : "guest",
           reviewRequired: first,
-          placement: first ? "top" : "bottom"
+          placement: "bottom"
         }],
         warnings: first
           ? [{ code: "DROPPED_INVALID_CUE", cueIndex: 1 }]
@@ -1404,14 +1548,19 @@ async function main() {
       wrapped: globalThis.fetch !== globalThis.__kirinukiE2eAiSuccessOriginalFetch,
       tokenValue: document.querySelector("#caption-agent-token")?.value || "",
       sttKeyValue: document.querySelector("#caption-stt-api-key")?.value || "",
-      upstageKeyValue: document.querySelector("#caption-upstage-api-key")?.value || ""
+      upstageKeyValue: document.querySelector("#caption-upstage-api-key")?.value || "",
+      modelValue: captionModel.value,
+      upstageKeyHidden: document.querySelector("#caption-upstage-api-key")
+        ?.closest(".select-field")?.hidden
     };
   `, [CAPTION_QUALITY_PROFILE_ID, CAPTION_HARNESS_FINGERPRINT]);
   assert(
     aiSuccessSetup.wrapped &&
       aiSuccessSetup.tokenValue === "e2e-session-token" &&
       aiSuccessSetup.sttKeyValue === "e2e-stt-memory-key" &&
-      aiSuccessSetup.upstageKeyValue === "e2e-upstage-memory-key",
+      aiSuccessSetup.upstageKeyValue === "e2e-upstage-memory-key" &&
+      aiSuccessSetup.modelValue === "solar-pro3" &&
+      aiSuccessSetup.upstageKeyHidden === false,
     `AI 성공 응답 mock 준비 실패: ${JSON.stringify(aiSuccessSetup)}`
   );
 
@@ -1493,6 +1642,7 @@ async function main() {
         request.bodyContainsProviderSecret === false &&
         request.policy?.includeAllRecognizableSpeech === true &&
         request.policy?.maxCueDurationMs === 4_000 &&
+        request.policy?.placement === "choose-readable-safe-area" &&
         request.visual?.analysis === "local-three-band-edge-density-v1" &&
         request.visual?.framesShared === false &&
         request.visual?.samples?.length === 7 &&
@@ -1516,9 +1666,16 @@ async function main() {
       aiSuccessProject.subtitles.some((cue) => (
         cue.text === "첫 컷 AI 초안입니다" &&
         cue.remoteMeta?.reviewRequired === true &&
-        cue.remoteMeta?.placement === "top"
+        cue.remoteMeta?.placement === "bottom" &&
+        cue.x === 0.5 &&
+        cue.y === 0.84
       )) &&
-      aiSuccessProject.subtitles.some((cue) => cue.text === "두 번째 컷 AI 초안?") &&
+      aiSuccessProject.subtitles.some((cue) => (
+        cue.text === "두 번째 컷 AI 초안?" &&
+        cue.remoteMeta?.placement === "bottom" &&
+        cue.x === 0.5 &&
+        cue.y === 0.84
+      )) &&
       aiSuccessProject.ai.warnings[0]?.clipId === expectedAiClipIds[0] &&
       aiSuccessProject.ai.warnings[0]?.code === "DROPPED_INVALID_CUE",
     `AI 자막/검수/경고 persistence 계약 위반: ${JSON.stringify({
@@ -1811,6 +1968,76 @@ async function main() {
   const coloredCueProject = await waitForStoredProject(
     (project) => project.subtitles.find((cue) => cue.id === cueId)?.color === "#ff66aa",
     "선택 자막별 색상 autosave"
+  );
+  const recentColorsInUseOrder = [
+    "#ff0000",
+    "#00ff00",
+    "#0000ff",
+    "#ffff00",
+    "#ff00ff",
+    "#00ffff"
+  ];
+  await executeSync(`
+    const input = document.querySelector("#font-color");
+    for (const color of arguments[0]) {
+      input.value = color;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  `, [recentColorsInUseOrder]);
+  const colorRegisterProject = await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === cueId)?.color === "#00ffff"
+      && project.recentSubtitleColors?.join(",")
+        === "#00ffff,#ff00ff,#ffff00,#0000ff,#00ff00"
+    ),
+    "고정 흰색과 최근 자막 색상 5개 autosave"
+  );
+  const colorRegisterUi = await waitUntil(async () => {
+    const state = await executeSync(`
+      const buttons = [...document.querySelectorAll(
+        "#caption-color-register .caption-color-swatch"
+      )];
+      return {
+        count: buttons.length,
+        colors: buttons.map((button) => button.dataset.color || null),
+        selected: buttons.find((button) => button.getAttribute("aria-pressed") === "true")
+          ?.dataset.color || null,
+        placeholderCount: buttons.filter((button) => button.disabled).length
+      };
+    `);
+    return (
+      state.count === 6
+      && state.colors.join(",")
+        === "#ffffff,#00ffff,#ff00ff,#ffff00,#0000ff,#00ff00"
+      && state.selected === "#00ffff"
+      && state.placeholderCount === 0
+    ) ? state : false;
+  }, "흰색 고정 + 최근 5색 레지스터 UI");
+  await clickElement(
+    '#caption-color-register .caption-color-swatch[data-color="#ffffff"]'
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === cueId)?.color === "#ffffff"
+      && project.recentSubtitleColors?.join(",")
+        === colorRegisterProject.recentSubtitleColors.join(",")
+    ),
+    "고정 흰색 레지스터 적용과 최근 5색 보존"
+  );
+  await executeSync(`
+    const input = document.querySelector("#font-color");
+    input.value = "#ff66aa";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  `);
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === cueId)?.color === "#ff66aa"
+      && project.recentSubtitleColors?.[0] === "#ff66aa"
+      && project.recentSubtitleColors.length === 5
+    ),
+    "색상 레지스터 검증 뒤 원래 자막 색상 복원"
   );
 
   await clickElement("#add-subtitle-lane");
@@ -2129,6 +2356,275 @@ async function main() {
       state.thumbnailLoaded
     ) ? state : false;
   }, "투명 이미지 에셋 타임라인·미리보기·속성 UI");
+
+  await clickElement("#add-cue");
+  const timingCueProject = await waitForStoredProject(
+    (project) => {
+      const asset = project.imageAssets?.find((candidate) => candidate.id === imageAssetId);
+      return (
+        project.subtitles.length === 2
+        && project.subtitles.some((cue) => (
+          cue.id !== cueId
+          && cue.clipId === asset?.clipId
+        ))
+      );
+    },
+    "에셋 타이밍 맞춤 검증용 같은 컷 자막 추가"
+  );
+  const timingCue = timingCueProject.subtitles.find((cue) => cue.id !== cueId);
+  const timingAsset = timingCueProject.imageAssets.find(
+    (asset) => asset.id === imageAssetId
+  );
+  const timingClip = timingCueProject.clips.find(
+    (clip) => clip.id === timingCue.clipId
+  );
+  const timingAssetDurationMs = timingAsset.endOffsetMs - timingAsset.startOffsetMs;
+  assert(
+    timingAssetDurationMs >= 600,
+    `타이밍 스냅 fixture 에셋이 너무 짧습니다: ${JSON.stringify(timingAsset)}`
+  );
+  const shortenedCueEndOffsetMs = timingAsset.endOffsetMs - 300;
+  await setInputValueAndChange(
+    "#cue-end",
+    formatEditorTime(timingClip.timelineStartMs + shortenedCueEndOffsetMs)
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === timingCue.id)?.endOffsetMs
+        === shortenedCueEndOffsetMs
+    ),
+    "정확 맞춤 전 자막 끝 시각 분리"
+  );
+  const cueMatchButton = await waitUntil(async () => {
+    const state = await executeSync(`
+      const button = document.querySelector("#match-cue-to-asset");
+      return {
+        disabled: button?.disabled,
+        help: document.querySelector("#cue-timing-match-help")?.textContent || ""
+      };
+    `);
+    return (
+      state.disabled === false
+      && state.help.includes("시작·끝")
+    ) ? state : false;
+  }, "같은 컷 선택 에셋에 자막 정확 맞춤 버튼");
+  await clickElement("#match-cue-to-asset");
+  await waitForStoredProject(
+    (project) => {
+      const cue = project.subtitles.find((candidate) => candidate.id === timingCue.id);
+      const asset = project.imageAssets.find((candidate) => candidate.id === imageAssetId);
+      return (
+        cue?.startOffsetMs === asset?.startOffsetMs
+        && cue?.endOffsetMs === asset?.endOffsetMs
+      );
+    },
+    "자막을 선택 에셋 전체 구간에 정확히 맞춤"
+  );
+
+  const timelinePixelsPerSecond = Number(
+    await executeSync(`return document.querySelector("#timeline-zoom")?.value || 70;`)
+  );
+  const outsideSnapGapMs = Math.round(12 / timelinePixelsPerSecond * 1000);
+  const cueEndBeforeSnapMs = timingAsset.endOffsetMs - outsideSnapGapMs;
+  await setInputValueAndChange(
+    "#cue-end",
+    formatEditorTime(timingClip.timelineStartMs + cueEndBeforeSnapMs)
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === timingCue.id)?.endOffsetMs
+        === cueEndBeforeSnapMs
+    ),
+    "자막 자석 스냅 전 12px 간격"
+  );
+  const cueSnapDrag = await pointerDrag(
+    `.cue-block[data-id="${timingCue.id}"] .trim-handle.right`,
+    [{ x: 2, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 0 }]
+  );
+  assert(
+    cueSnapDrag.moves >= 3
+    && cueSnapDrag.trace.some((entry) => (
+      entry.snapGuideVisible
+      && String(entry.snapGuideLabel || "").includes("에셋 끝")
+    )),
+    `자막→에셋 자석 가이드가 표시되지 않았습니다: ${JSON.stringify(cueSnapDrag)}`
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === timingCue.id)?.endOffsetMs
+        === project.imageAssets.find((asset) => asset.id === imageAssetId)?.endOffsetMs
+    ),
+    "자막 끝을 8px 자석으로 에셋 끝에 정확히 스냅"
+  );
+  const snapGuideAfterDrag = await executeSync(`
+    return {
+      hidden: document.querySelector("#timeline-snap-guide")?.hidden,
+      label: document.querySelector("#timeline-snap-guide")?.dataset.label || null
+    };
+  `);
+  assert(
+    snapGuideAfterDrag.hidden === true && snapGuideAfterDrag.label === null,
+    `드래그 종료 뒤 자석 가이드가 남았습니다: ${JSON.stringify(snapGuideAfterDrag)}`
+  );
+
+  await setInputValueAndChange(
+    "#cue-end",
+    formatEditorTime(timingClip.timelineStartMs + cueEndBeforeSnapMs)
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === timingCue.id)?.endOffsetMs
+        === cueEndBeforeSnapMs
+    ),
+    "Alt 자석 해제 전 자막 간격 복원"
+  );
+  const cueAltDrag = await pointerDrag(
+    `.cue-block[data-id="${timingCue.id}"] .trim-handle.right`,
+    [{ x: 2, y: 0 }, { x: 2, y: 0 }, { x: 2, y: 0 }],
+    { altKey: true }
+  );
+  const altUnsnappedProject = await waitForStoredProject(
+    (project) => {
+      const cue = project.subtitles.find((candidate) => candidate.id === timingCue.id);
+      const asset = project.imageAssets.find((candidate) => candidate.id === imageAssetId);
+      return (
+        cue
+        && asset
+        && cue.endOffsetMs !== asset.endOffsetMs
+        && cue.endOffsetMs > cueEndBeforeSnapMs
+      );
+    },
+    "Alt를 누른 자막 경계 drag는 자석 해제"
+  );
+  assert(
+    cueAltDrag.trace.every((entry) => !entry.snapGuideVisible)
+    && altUnsnappedProject.subtitles.find(
+      (cue) => cue.id === timingCue.id
+    ).endOffsetMs !== timingAsset.endOffsetMs,
+    `Alt 자석 해제가 지켜지지 않았습니다: ${JSON.stringify(cueAltDrag)}`
+  );
+  await clickElement("#match-cue-to-asset");
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === timingCue.id)?.endOffsetMs
+        === project.imageAssets.find((asset) => asset.id === imageAssetId)?.endOffsetMs
+    ),
+    "Alt 스냅 검증 뒤 자막·에셋 구간 복원"
+  );
+
+  await clickElement(`.asset-block[data-id="${imageAssetId}"] .asset-block-body`);
+  const shorterSharedEndOffsetMs = timingAsset.startOffsetMs
+    + Math.max(300, Math.floor(timingAssetDurationMs / 2));
+  await setInputValueAndChange(
+    "#asset-end",
+    formatEditorTime(timingClip.timelineStartMs + shorterSharedEndOffsetMs)
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.imageAssets.find((asset) => asset.id === imageAssetId)?.endOffsetMs
+        === shorterSharedEndOffsetMs
+    ),
+    "에셋→자막 정확 맞춤 전 에셋 끝 시각 분리"
+  );
+  await clickElement("#match-asset-to-cue");
+  await waitForStoredProject(
+    (project) => {
+      const cue = project.subtitles.find((candidate) => candidate.id === timingCue.id);
+      const asset = project.imageAssets.find((candidate) => candidate.id === imageAssetId);
+      return (
+        cue?.startOffsetMs === asset?.startOffsetMs
+        && cue?.endOffsetMs === asset?.endOffsetMs
+      );
+    },
+    "에셋을 선택 자막 전체 구간에 정확히 맞춤"
+  );
+
+  await clickElement(`.cue-block[data-id="${timingCue.id}"] .cue-block-body`);
+  await setInputValueAndChange(
+    "#cue-end",
+    formatEditorTime(timingClip.timelineStartMs + shorterSharedEndOffsetMs)
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.find((cue) => cue.id === timingCue.id)?.endOffsetMs
+        === shorterSharedEndOffsetMs
+    ),
+    "몸체 이동 공간을 위한 짧은 자막 구간"
+  );
+  await clickElement(`.asset-block[data-id="${imageAssetId}"] .asset-block-body`);
+  await clickElement("#match-asset-to-cue");
+  const movableMatchedAssetProject = await waitForStoredProject(
+    (project) => {
+      const cue = project.subtitles.find((candidate) => candidate.id === timingCue.id);
+      const asset = project.imageAssets.find((candidate) => candidate.id === imageAssetId);
+      return (
+        cue?.startOffsetMs === asset?.startOffsetMs
+        && cue?.endOffsetMs === asset?.endOffsetMs
+        && asset.endOffsetMs === shorterSharedEndOffsetMs
+      );
+    },
+    "에셋 몸체 이동 전 짧은 자막 구간에 맞춤"
+  );
+  const matchedAsset = movableMatchedAssetProject.imageAssets.find(
+    (asset) => asset.id === imageAssetId
+  );
+  await clickElement("#toggle-timeline-snap");
+  const assetBodyDrag = await pointerDrag(
+    `.asset-block[data-id="${imageAssetId}"] .asset-block-body`,
+    [{ x: 4, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 0 }]
+  );
+  assert(
+    assetBodyDrag.moves >= 3
+    && String(assetBodyDrag.trace[0]?.target || "").includes("asset-block-body"),
+    `에셋 몸체의 가로 이동 drag가 없습니다: ${JSON.stringify(assetBodyDrag)}`
+  );
+  const movedAssetProject = await waitForStoredProject(
+    (project) => {
+      const asset = project.imageAssets.find((candidate) => candidate.id === imageAssetId);
+      return (
+        asset?.startOffsetMs > matchedAsset.startOffsetMs
+        && asset.endOffsetMs - asset.startOffsetMs
+          === matchedAsset.endOffsetMs - matchedAsset.startOffsetMs
+      );
+    },
+    "자석 해제 상태의 에셋 몸체 이동과 길이 보존"
+  );
+  await clickElement("#toggle-timeline-snap");
+  await clickElement("#match-asset-to-cue");
+  await waitForStoredProject(
+    (project) => {
+      const cue = project.subtitles.find((candidate) => candidate.id === timingCue.id);
+      const asset = project.imageAssets.find((candidate) => candidate.id === imageAssetId);
+      return (
+        cue?.startOffsetMs === asset?.startOffsetMs
+        && cue?.endOffsetMs === asset?.endOffsetMs
+      );
+    },
+    "몸체 이동 검증 뒤 에셋·자막 구간 복원"
+  );
+  await setInputValueAndChange(
+    "#asset-end",
+    formatEditorTime(timingClip.timelineStartMs + timingAsset.endOffsetMs)
+  );
+  await waitForStoredProject(
+    (project) => (
+      project.imageAssets.find((asset) => asset.id === imageAssetId)?.endOffsetMs
+        === timingAsset.endOffsetMs
+    ),
+    "후속 에셋 겹침 검증을 위한 원래 에셋 구간 복원"
+  );
+  await clickElement(`.cue-block[data-id="${timingCue.id}"] .cue-block-body`);
+  await clickElement("#delete-cue");
+  await waitForStoredProject(
+    (project) => (
+      project.subtitles.length === 1
+      && project.subtitles[0].id === cueId
+      && project.imageAssets.find((asset) => asset.id === imageAssetId)?.startOffsetMs
+        === timingAsset.startOffsetMs
+    ),
+    "타이밍 맞춤 검증용 자막 정리"
+  );
+
   const assetBlobAudit = await executeAsync(`
     const [databaseName, projectId, assetId] = arguments;
     const done = arguments[arguments.length - 1];
@@ -2602,6 +3098,10 @@ async function main() {
   }, "멀티트랙 검증 후 원래 자막 선택 복원");
   const multitrackUiProbe = {
     color: coloredCueProject.subtitles.find((cue) => cue.id === cueId)?.color,
+    colorRegister: {
+      ui: colorRegisterUi,
+      recent: colorRegisterProject.recentSubtitleColors
+    },
     laneUi,
     captionContextMenu,
     simultaneousCueLane: simultaneousCue.lane,
@@ -2632,6 +3132,15 @@ async function main() {
       trim: {
         left: assetLeftDrag,
         right: assetRightDrag
+      },
+      timing: {
+        cueMatchButton,
+        snap: cueSnapDrag,
+        altBypass: cueAltDrag,
+        bodyDrag: assetBodyDrag,
+        moved: movedAssetProject.imageAssets.find(
+          (asset) => asset.id === imageAssetId
+        )
       }
     }
   };

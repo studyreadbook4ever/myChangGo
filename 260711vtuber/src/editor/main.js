@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SUBTITLE_COLOR,
   EDITOR_SEED_PREFIX,
   MAX_SUBTITLE_LANES,
   addSubtitleLane,
@@ -25,6 +26,8 @@ import {
   findSubtitleOverlaps,
   mapSourceToTimeline,
   mapTimelineToSource,
+  matchImageAssetToSubtitleCue,
+  matchSubtitleCueToImageAsset,
   mergeAiWarnings,
   mergeCaptureIntoEditorProject,
   normalizeEditorProject,
@@ -32,8 +35,13 @@ import {
   reorderClip,
   reorderClipGroup,
   replaceAiSubtitleDraft,
+  resetAiSubtitlePositions,
+  rememberSubtitleColor,
+  resolveTimelineSnap,
   rippleDeleteTimelineRange,
   serializeSrt,
+  timelineSnapCandidates,
+  timelineSnapThresholdMs,
   updateAudioRegion,
   updateClipTrim,
   updateImageAsset,
@@ -77,6 +85,7 @@ import {
   captionAgentAudioFootprint,
   captionAgentEditorialContextFingerprint,
   captionAgentResumePlan,
+  captionAgentRuntimeIdentity,
   captionAgentRunEstimate,
   createCaptionAgentCheckpoint,
   createCaptionAgentRequest,
@@ -85,6 +94,7 @@ import {
   ensureCaptionAgentPermission,
   ensureCaptionAgentSession,
   isLoopbackCaptionAgentEndpoint,
+  isSolarCaptionModel,
   loadCaptionAgentSettings,
   normalizeCaptionAgentCues,
   normalizeCaptionAgentEndpoint,
@@ -178,6 +188,7 @@ const elements = Object.fromEntries([
   "test-caption-agent",
   "caption-agent-warning",
   "generate-captions",
+  "reset-ai-caption-positions",
   "ai-progress",
   "ai-progress-label",
   "ai-progress-value",
@@ -197,7 +208,10 @@ const elements = Object.fromEntries([
   "cue-y-value",
   "font-size",
   "font-color",
+  "caption-color-register",
   "reset-font-color",
+  "match-cue-to-asset",
+  "cue-timing-match-help",
   "delete-cue",
   "cue-list",
   "asset-empty",
@@ -207,6 +221,8 @@ const elements = Object.fromEntries([
   "asset-meta",
   "asset-start",
   "asset-end",
+  "match-asset-to-cue",
+  "asset-timing-match-help",
   "asset-x",
   "asset-y",
   "asset-x-value",
@@ -243,6 +259,7 @@ const elements = Object.fromEntries([
   "subtitle-lane-count",
   "add-subtitle-lane",
   "fit-timeline",
+  "toggle-timeline-snap",
   "timeline-zoom",
   "timeline-scroll",
   "timeline-content",
@@ -251,6 +268,7 @@ const elements = Object.fromEntries([
   "asset-track",
   "audio-track",
   "caption-tracks",
+  "timeline-snap-guide",
   "timeline-range-selection",
   "timeline-range-summary",
   "range-start-handle",
@@ -296,6 +314,7 @@ let mediaHandle = null;
 let mediaUrl = null;
 let sourceBindingConnected = false;
 let pixelsPerSecond = 70;
+let timelineSnapEnabled = true;
 let saveDispatchPending = false;
 let pendingSaveSnapshot = null;
 let projectSaveSequence = 0;
@@ -331,6 +350,8 @@ let preparedPreview = null;
 let previewBoundaryTransitioning = false;
 let pendingAssetTimelineMs = null;
 let imageAssetRenderSequence = 0;
+let suppressedTimedBlockClick = null;
+let suppressedTimedBlockClickTimer = null;
 let localDraftAutosaveTimer = null;
 let localDraftOperationQueue = Promise.resolve();
 let localDraftOperationActive = false;
@@ -339,6 +360,7 @@ let lastAutomaticDraftAtMs = 0;
 let localDraftAutosaveAnchorAtMs = 0;
 let focusBeforeLocalDraftDialog = null;
 let captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
+let captionAgentRuntime = null;
 const imageAssetObjectUrls = new Map();
 const clipGroupSelection = new Set();
 
@@ -350,6 +372,8 @@ const ASSET_TRACK_BASE_HEIGHT_PX = 54;
 const ASSET_SUBROW_STRIDE_PX = 47;
 const ASSET_BLOCK_TOP_PX = 7;
 const MIN_TIMELINE_RANGE_MS = 100;
+const TIMELINE_SNAP_THRESHOLD_PX = 8;
+const TIMED_BLOCK_DRAG_ACTIVATION_PX = 4;
 const PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
 const PREVIEW_PRELOAD_TIMEOUT_MS = 12_000;
 const LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1_000;
@@ -515,6 +539,7 @@ function setLocalDraftOperationActive(active) {
   localDraftOperationActive = Boolean(active);
   elements.create_local_draft.disabled = localDraftOperationActive;
   elements.open_local_drafts.disabled = localDraftOperationActive;
+  elements.reset_ai_caption_positions.disabled = localDraftOperationActive;
   elements.close_local_draft_dialog.disabled = localDraftOperationActive;
   const selectedDraft = elements.local_draft_list.querySelector(
     'input[name="local-draft-choice"]:checked'
@@ -669,6 +694,60 @@ function createManualLocalDraft() {
   )).catch((error) => {
     showToast(`임시저장 실패: ${error.message}`, "error", 0);
   });
+}
+
+async function resetAllAiCaptionPositions() {
+  if (
+    projectMutationLockCount > 0
+    || pointerEditActive
+    || rangeHandleDragActive
+    || activeJobController
+  ) {
+    throw new Error("진행 중인 편집 작업이 끝난 뒤 다시 눌러 주세요.");
+  }
+  if (await countSameProjectEditorTabs() > 1) {
+    throw new Error(
+      "같은 프로젝트 편집기 탭이 둘 이상 열려 있습니다. 다른 탭을 닫고 다시 눌러 주세요."
+    );
+  }
+  const before = cloneProject(project);
+  const next = resetAiSubtitlePositions(project, {
+    includeHumanEdited: true
+  });
+  if (next === project) {
+    showToast("모든 AI 자막이 이미 기본 위치에 있습니다.", "info");
+    return 0;
+  }
+  const beforeById = new Map(
+    before.subtitles.map((cue) => [cue.id, cue])
+  );
+  const changedCount = next.subtitles.filter((cue) => {
+    const previous = beforeById.get(cue.id);
+    return (
+      previous
+      && (
+        previous.x !== cue.x
+        || previous.y !== cue.y
+        || previous.remoteMeta?.placement
+          !== cue.remoteMeta?.placement
+      )
+    );
+  }).length;
+
+  lockProjectMutations();
+  try {
+    await saveCurrentLocalDraft("manual");
+    applyProject(next);
+    await flushSave();
+    showToast(
+      `AI 자막 ${changedCount}개의 화면 위치를 아래 중앙 기본값으로 맞췄습니다.`,
+      "success",
+      6000
+    );
+    return changedCount;
+  } finally {
+    unlockProjectMutations();
+  }
 }
 
 function localDraftAutosaveBlocked() {
@@ -1089,13 +1168,6 @@ function renderHeader() {
   elements.undo.disabled = undoStack.length === 0;
   elements.redo.disabled = redoStack.length === 0;
   elements.export_video.disabled = !mediaFile || !project.clips.some((clip) => clip.enabled !== false);
-  if (
-    !activeJobController &&
-    document.activeElement !== elements.caption_model &&
-    [...elements.caption_model.options].some((option) => option.value === project.ai?.model)
-  ) {
-    elements.caption_model.value = project.ai.model;
-  }
   if (document.activeElement !== elements.caption_style_preset) {
     elements.caption_style_preset.value = (
       project.subtitleDefaults?.stylePresetId
@@ -1362,6 +1434,40 @@ function renderClipList() {
   renderClipGroupControls();
 }
 
+function renderCaptionColorRegister(selectedColor) {
+  const colors = [
+    DEFAULT_SUBTITLE_COLOR,
+    ...(project.recentSubtitleColors || [])
+  ].slice(0, 6);
+  const activeColor = String(selectedColor || DEFAULT_SUBTITLE_COLOR).toLowerCase();
+  elements.caption_color_register.replaceChildren();
+  for (let index = 0; index < 6; index += 1) {
+    const color = colors[index] || null;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `caption-color-swatch${color ? "" : " placeholder"}`;
+    if (!color) {
+      button.disabled = true;
+      button.setAttribute("aria-label", `비어 있는 최근 색상 슬롯 ${index}`);
+      elements.caption_color_register.append(button);
+      continue;
+    }
+    button.dataset.color = color;
+    button.style.setProperty("--swatch-color", color);
+    button.setAttribute("aria-pressed", String(color === activeColor));
+    button.setAttribute(
+      "aria-label",
+      index === 0
+        ? `기본 흰색 ${color}`
+        : `최근 자막 색상 ${index} ${color}`
+    );
+    button.title = index === 0
+      ? `기본 흰색 · ${color.toUpperCase()}`
+      : `최근 색상 ${index} · ${color.toUpperCase()}`;
+    elements.caption_color_register.append(button);
+  }
+}
+
 function renderCueInspector() {
   const cue = selectedCue();
   const showingList = inspectorMode === "list";
@@ -1399,7 +1505,16 @@ function renderCueInspector() {
   elements.cue_x_value.textContent = `${Math.round(cue.x * 100)}%`;
   elements.cue_y_value.textContent = `${Math.round(cue.y * 100)}%`;
   elements.font_size.value = String((project.subtitleDefaults.fontScale || 0.0675) * 100);
-  elements.font_color.value = cue.color || project.subtitleDefaults.color || "#ffffff";
+  elements.font_color.value = cue.color || project.subtitleDefaults.color || DEFAULT_SUBTITLE_COLOR;
+  renderCaptionColorRegister(elements.font_color.value);
+  const selectedAsset = selectedImageAsset();
+  const canMatchAsset = Boolean(selectedAsset && selectedAsset.clipId === cue.clipId);
+  elements.match_cue_to_asset.disabled = !canMatchAsset;
+  elements.cue_timing_match_help.textContent = !selectedAsset
+    ? "같은 컷의 에셋을 선택하면 양끝 시각을 한 번에 맞출 수 있어요."
+    : canMatchAsset
+      ? `${selectedAsset.name || "선택 에셋"}의 시작·끝 시각을 그대로 적용합니다.`
+      : "선택 에셋이 다른 컷에 있어 시각을 맞출 수 없습니다.";
   const position = cue.y < 0.34 ? "top" : cue.y > 0.67 ? "bottom" : "center";
   positionButtons.forEach((button) => button.classList.toggle("active", button.dataset.position === position));
 }
@@ -1430,6 +1545,14 @@ function renderImageAssetInspector() {
   if (document.activeElement !== elements.asset_end) {
     elements.asset_end.value = formatTime(range?.endMs || 0, { compact: true });
   }
+  const selectedSubtitle = selectedCue();
+  const canMatchCue = Boolean(selectedSubtitle && selectedSubtitle.clipId === asset.clipId);
+  elements.match_asset_to_cue.disabled = !canMatchCue;
+  elements.asset_timing_match_help.textContent = !selectedSubtitle
+    ? "같은 컷의 자막을 선택하면 양끝 시각을 한 번에 맞출 수 있어요."
+    : canMatchCue
+      ? `“${selectedSubtitle.text || "빈 자막"}”의 시작·끝 시각을 그대로 적용합니다.`
+      : "선택 자막이 다른 컷에 있어 시각을 맞출 수 없습니다.";
   const xPercent = Math.round(asset.x * 100);
   const yPercent = Math.round(asset.y * 100);
   const scalePercent = Math.round(asset.scale * 100);
@@ -1568,6 +1691,80 @@ function timelineWidth() {
 
 function timelineX(milliseconds) {
   return milliseconds / 1000 * pixelsPerSecond;
+}
+
+function hideTimelineSnapGuide() {
+  elements.timeline_snap_guide.hidden = true;
+  elements.timeline_snap_guide.textContent = "";
+  elements.timeline_snap_guide.removeAttribute("data-label");
+  elements.timeline_snap_guide.removeAttribute("aria-label");
+}
+
+function showTimelineSnapGuide(match) {
+  if (!match) {
+    hideTimelineSnapGuide();
+    return;
+  }
+  const label = `${match.label || "정렬점"} · ${formatTime(match.timeMs, { compact: true })}`;
+  elements.timeline_snap_guide.hidden = false;
+  elements.timeline_snap_guide.style.left = `${timelineX(match.timeMs)}px`;
+  elements.timeline_snap_guide.dataset.label = label;
+  elements.timeline_snap_guide.setAttribute("aria-label", label);
+  elements.timeline_snap_guide.textContent = label;
+}
+
+function findTimelineSnap(rawTimelineMs, {
+  clipId,
+  movingKind,
+  itemId,
+  altKey = false,
+  minimumTimelineMs = -Infinity,
+  maximumTimelineMs = Infinity
+} = {}) {
+  if (!timelineSnapEnabled || altKey) {
+    return null;
+  }
+  const preferredKind = movingKind === "subtitle" ? "asset" : "subtitle";
+  const candidates = timelineSnapCandidates(project, {
+    clipId,
+    excludeCueId: movingKind === "subtitle" ? itemId : null,
+    excludeImageAssetId: movingKind === "asset" ? itemId : null,
+    preferredKind
+  }).filter((candidate) => (
+    candidate.timeMs >= minimumTimelineMs
+    && candidate.timeMs <= maximumTimelineMs
+  ));
+  return resolveTimelineSnap(rawTimelineMs, candidates, {
+    thresholdMs: timelineSnapThresholdMs(pixelsPerSecond, {
+      thresholdPx: TIMELINE_SNAP_THRESHOLD_PX
+    })
+  });
+}
+
+function snappedTimelinePoint(rawTimelineMs, options) {
+  const match = findTimelineSnap(rawTimelineMs, options);
+  showTimelineSnapGuide(match);
+  return match?.timeMs ?? Math.round(rawTimelineMs);
+}
+
+function suppressNextTimedBlockClick(kind, itemId) {
+  clearTimeout(suppressedTimedBlockClickTimer);
+  suppressedTimedBlockClick = `${kind}:${itemId}`;
+  suppressedTimedBlockClickTimer = setTimeout(() => {
+    suppressedTimedBlockClick = null;
+    suppressedTimedBlockClickTimer = null;
+  }, 0);
+}
+
+function consumeSuppressedTimedBlockClick(kind, itemId) {
+  const key = `${kind}:${itemId}`;
+  if (suppressedTimedBlockClick !== key) {
+    return false;
+  }
+  clearTimeout(suppressedTimedBlockClickTimer);
+  suppressedTimedBlockClick = null;
+  suppressedTimedBlockClickTimer = null;
+  return true;
 }
 
 function clampTimelineMs(milliseconds) {
@@ -1947,6 +2144,7 @@ function beginPointerHistory() {
 
 function endPointerHistory({ clipStructureChanged = false } = {}) {
   pointerEditActive = false;
+  hideTimelineSnapGuide();
   if (liveTimelineGeometryFrame !== null) {
     cancelAnimationFrame(liveTimelineGeometryFrame);
     liveTimelineGeometryFrame = null;
@@ -2036,13 +2234,58 @@ function bindCueTrim(handle, cue, side, event) {
       return;
     }
     const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1000);
-    const startOffsetMs = side === "left"
+    const rawStartOffsetMs = side === "left"
       ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta))
       : originalStart;
-    const endOffsetMs = side === "right"
+    const rawEndOffsetMs = side === "right"
       ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta))
       : originalEnd;
-    const nextProject = updateSubtitleCue(originalProject, cue.id, { startOffsetMs, endOffsetMs });
+    const rawBoundaryTimelineMs = clip.timelineStartMs + (
+      side === "left" ? rawStartOffsetMs : rawEndOffsetMs
+    );
+    const snappedBoundaryTimelineMs = snappedTimelinePoint(
+      rawBoundaryTimelineMs,
+      {
+        clipId: clip.id,
+        movingKind: "subtitle",
+        itemId: cue.id,
+        altKey: moveEvent.altKey,
+        minimumTimelineMs: clip.timelineStartMs + (
+          side === "left" ? 0 : originalStart + 100
+        ),
+        maximumTimelineMs: clip.timelineStartMs + (
+          side === "left" ? originalEnd - 100 : duration
+        )
+      }
+    );
+    const startOffsetMs = side === "left"
+      ? snappedBoundaryTimelineMs - clip.timelineStartMs
+      : originalStart;
+    const endOffsetMs = side === "right"
+      ? snappedBoundaryTimelineMs - clip.timelineStartMs
+      : originalEnd;
+    let nextProject = updateSubtitleCue(originalProject, cue.id, {
+      startOffsetMs,
+      endOffsetMs
+    });
+    if (cueHasOverlap(nextProject, cue.id)) {
+      if (snappedBoundaryTimelineMs !== rawBoundaryTimelineMs) {
+        const fallbackProject = updateSubtitleCue(originalProject, cue.id, {
+          startOffsetMs: rawStartOffsetMs,
+          endOffsetMs: rawEndOffsetMs
+        });
+        if (!cueHasOverlap(fallbackProject, cue.id)) {
+          nextProject = fallbackProject;
+          hideTimelineSnapGuide();
+        } else {
+          overlapBlocked = true;
+          return;
+        }
+      } else {
+        overlapBlocked = true;
+        return;
+      }
+    }
     if (cueHasOverlap(nextProject, cue.id)) {
       overlapBlocked = true;
       return;
@@ -2055,6 +2298,7 @@ function bindCueTrim(handle, cue, side, event) {
       block.style.left = `${timelineX(range.startMs)}px`;
       block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
     }
+    renderCueInspector();
   };
   const finish = (finishEvent) => {
     if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
@@ -2102,11 +2346,35 @@ function bindImageAssetTrim(handle, asset, side, event) {
       return;
     }
     const delta = Math.round((moveEvent.clientX - startX) / pixelsPerSecond * 1000);
-    const startOffsetMs = side === "left"
+    const rawStartOffsetMs = side === "left"
       ? Math.max(0, Math.min(originalEnd - 100, originalStart + delta))
       : originalStart;
-    const endOffsetMs = side === "right"
+    const rawEndOffsetMs = side === "right"
       ? Math.min(duration, Math.max(originalStart + 100, originalEnd + delta))
+      : originalEnd;
+    const rawBoundaryTimelineMs = clip.timelineStartMs + (
+      side === "left" ? rawStartOffsetMs : rawEndOffsetMs
+    );
+    const snappedBoundaryTimelineMs = snappedTimelinePoint(
+      rawBoundaryTimelineMs,
+      {
+        clipId: clip.id,
+        movingKind: "asset",
+        itemId: asset.id,
+        altKey: moveEvent.altKey,
+        minimumTimelineMs: clip.timelineStartMs + (
+          side === "left" ? 0 : originalStart + 100
+        ),
+        maximumTimelineMs: clip.timelineStartMs + (
+          side === "left" ? originalEnd - 100 : duration
+        )
+      }
+    );
+    const startOffsetMs = side === "left"
+      ? snappedBoundaryTimelineMs - clip.timelineStartMs
+      : originalStart;
+    const endOffsetMs = side === "right"
+      ? snappedBoundaryTimelineMs - clip.timelineStartMs
       : originalEnd;
     project = updateImageAsset(originalProject, asset.id, { startOffsetMs, endOffsetMs });
     const nextAsset = selectedImageAsset();
@@ -2128,6 +2396,166 @@ function bindImageAssetTrim(handle, asset, side, event) {
       handle.releasePointerCapture(pointerId);
     }
     endPointerHistory();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish);
+  window.addEventListener("pointercancel", finish);
+}
+
+function bindTimedBlockMove(body, item, kind, event) {
+  if (event.button !== 0) {
+    return;
+  }
+  event.stopPropagation();
+  const pointerId = event.pointerId;
+  const startX = event.clientX;
+  const originalStart = item.startOffsetMs;
+  const originalEnd = item.endOffsetMs;
+  const itemDuration = originalEnd - originalStart;
+  const clip = project.clips.find((candidate) => candidate.id === item.clipId);
+  const clipDuration = clipDurationMs(clip);
+  const maximumStart = Math.max(0, clipDuration - itemDuration);
+  const block = body.closest(kind === "subtitle" ? ".cue-block" : ".asset-block");
+  let originalProject = null;
+  let dragging = false;
+  let overlapBlocked = false;
+  body.setPointerCapture(pointerId);
+
+  const move = (moveEvent) => {
+    if (moveEvent.pointerId !== pointerId) {
+      return;
+    }
+    const deltaX = moveEvent.clientX - startX;
+    if (!dragging && Math.abs(deltaX) < TIMED_BLOCK_DRAG_ACTIVATION_PX) {
+      return;
+    }
+    moveEvent.preventDefault();
+    if (!dragging) {
+      dragging = true;
+      beginPointerHistory();
+      originalProject = kind === "subtitle"
+        ? {
+          ...project,
+          selectedCueId: item.id,
+          selectedClipId: item.clipId
+        }
+        : {
+          ...project,
+          selectedImageAssetId: item.id,
+          selectedClipId: item.clipId
+        };
+      project = originalProject;
+      propertyInspectorMode = kind === "subtitle" ? "caption" : "asset";
+      if (kind === "subtitle") {
+        inspectorMode = "selected";
+      }
+      block?.classList.add("moving", "selected");
+    }
+
+    const rawDeltaMs = Math.round(deltaX / pixelsPerSecond * 1000);
+    const rawStartOffsetMs = Math.max(
+      0,
+      Math.min(maximumStart, originalStart + rawDeltaMs)
+    );
+    const rawEndOffsetMs = rawStartOffsetMs + itemDuration;
+    const rawStartTimelineMs = clip.timelineStartMs + rawStartOffsetMs;
+    const rawEndTimelineMs = clip.timelineStartMs + rawEndOffsetMs;
+    const baseSnapOptions = {
+      clipId: clip.id,
+      movingKind: kind,
+      itemId: item.id,
+      altKey: moveEvent.altKey
+    };
+    const startMatch = findTimelineSnap(rawStartTimelineMs, {
+      ...baseSnapOptions,
+      minimumTimelineMs: clip.timelineStartMs,
+      maximumTimelineMs: clip.timelineStartMs + maximumStart
+    });
+    const endMatch = findTimelineSnap(rawEndTimelineMs, {
+      ...baseSnapOptions,
+      minimumTimelineMs: clip.timelineStartMs + itemDuration,
+      maximumTimelineMs: clip.timelineStartMs + clipDuration
+    });
+    const match = [startMatch, endMatch]
+      .filter(Boolean)
+      .sort((first, second) => (
+        first.distanceMs - second.distanceMs
+        || first.priority - second.priority
+        || first.timeMs - second.timeMs
+      ))[0] || null;
+    const snappedDeltaMs = match?.deltaMs || 0;
+    let nextStartOffsetMs = Math.max(
+      0,
+      Math.min(maximumStart, rawStartOffsetMs + snappedDeltaMs)
+    );
+    let nextEndOffsetMs = nextStartOffsetMs + itemDuration;
+    let nextProject = kind === "subtitle"
+      ? updateSubtitleCue(originalProject, item.id, {
+        startOffsetMs: nextStartOffsetMs,
+        endOffsetMs: nextEndOffsetMs
+      })
+      : updateImageAsset(originalProject, item.id, {
+        startOffsetMs: nextStartOffsetMs,
+        endOffsetMs: nextEndOffsetMs
+      });
+
+    if (
+      kind === "subtitle"
+      && cueHasOverlap(nextProject, item.id)
+      && match
+    ) {
+      nextStartOffsetMs = rawStartOffsetMs;
+      nextEndOffsetMs = rawEndOffsetMs;
+      nextProject = updateSubtitleCue(originalProject, item.id, {
+        startOffsetMs: nextStartOffsetMs,
+        endOffsetMs: nextEndOffsetMs
+      });
+      showTimelineSnapGuide(null);
+    } else {
+      showTimelineSnapGuide(match);
+    }
+    if (kind === "subtitle" && cueHasOverlap(nextProject, item.id)) {
+      overlapBlocked = true;
+      return;
+    }
+    overlapBlocked = false;
+    project = nextProject;
+    const nextItem = kind === "subtitle"
+      ? project.subtitles.find((candidate) => candidate.id === item.id)
+      : project.imageAssets.find((candidate) => candidate.id === item.id);
+    const range = kind === "subtitle"
+      ? cueTimelineRange(project, nextItem)
+      : imageAssetTimelineRange(project, nextItem);
+    if (block && range) {
+      block.style.left = `${timelineX(range.startMs)}px`;
+      block.style.width = `${Math.max(8, timelineX(range.endMs - range.startMs))}px`;
+    }
+    if (kind === "subtitle") {
+      renderCueInspector();
+    } else {
+      renderImageAssetInspector();
+    }
+  };
+  const finish = (finishEvent) => {
+    if (finishEvent?.pointerId !== undefined && finishEvent.pointerId !== pointerId) {
+      return;
+    }
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    if (body.hasPointerCapture(pointerId)) {
+      body.releasePointerCapture(pointerId);
+    }
+    block?.classList.remove("moving");
+    if (!dragging) {
+      hideTimelineSnapGuide();
+      return;
+    }
+    suppressNextTimedBlockClick(kind, item.id);
+    endPointerHistory();
+    if (overlapBlocked) {
+      showToast("같은 자막 레인 안에서는 자막이 겹칠 수 없습니다.", "error");
+    }
   };
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", finish);
@@ -2341,7 +2769,15 @@ function renderTimeline({ keepScroll = false } = {}) {
     body.className = "asset-block-body";
     body.textContent = asset.name || `이미지 ${assetIndex + 1}`;
     body.title = `${asset.name || "이미지 에셋"} · 겹친 이미지는 에셋 트랙의 별도 줄에 표시됩니다.`;
-    body.addEventListener("click", () => selectImageAsset(asset.id, { seek: true }));
+    body.addEventListener("pointerdown", (event) => {
+      bindTimedBlockMove(body, asset, "asset", event);
+    });
+    body.addEventListener("click", () => {
+      if (consumeSuppressedTimedBlockClick("asset", asset.id)) {
+        return;
+      }
+      selectImageAsset(asset.id, { seek: true });
+    });
     const assetClip = project.clips.find((candidate) => candidate.id === asset.clipId);
     const nudgeAsset = (side, delta) => {
       const current = project.imageAssets.find((candidate) => candidate.id === asset.id);
@@ -2478,7 +2914,13 @@ function renderTimeline({ keepScroll = false } = {}) {
     body.type = "button";
     body.className = "cue-block-body";
     body.textContent = cue.text || "(빈 자막)";
+    body.addEventListener("pointerdown", (event) => {
+      bindTimedBlockMove(body, cue, "subtitle", event);
+    });
     body.addEventListener("click", () => {
+      if (consumeSuppressedTimedBlockClick("subtitle", cue.id)) {
+        return;
+      }
       selectCue(cue.id, { seek: true });
       elements.cue_text.focus({ preventScroll: true });
     });
@@ -3826,22 +4268,65 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
 }
 
 function readCaptionAgentConfig() {
+  const model = elements.caption_model.value;
+  const solarMode = isSolarCaptionModel(model);
   return {
     endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
     token: elements.caption_agent_token.value,
-    model: elements.caption_model.value,
-    providerConfig: {
-      sttEndpoint: elements.caption_stt_endpoint.value,
-      sttModel: elements.caption_stt_model.value,
-      sttApiKey: elements.caption_stt_api_key.value,
-      upstageApiKey: elements.caption_upstage_api_key.value
-    }
+    model,
+    providerConfig: solarMode
+      ? {
+        sttEndpoint: elements.caption_stt_endpoint.value,
+        sttModel: elements.caption_stt_model.value,
+        sttApiKey: elements.caption_stt_api_key.value,
+        upstageApiKey: elements.caption_upstage_api_key.value
+      }
+      : {
+        sttEndpoint: "",
+        sttModel: "",
+        sttApiKey: "",
+        upstageApiKey: ""
+      }
   };
 }
 
 function setCaptionLocalStatus(message, state = "idle") {
   elements.caption_local_status.textContent = message;
   elements.caption_local_status.dataset.state = state;
+}
+
+function renderCaptionModeControls() {
+  const solar = isSolarCaptionModel(elements.caption_model.value);
+  const actualStt = captionAgentRuntime?.sttModel || "Tiny 기본";
+  const upstageField = elements.caption_upstage_api_key.closest(".select-field");
+  if (upstageField) {
+    upstageField.hidden = !solar;
+  }
+  elements.caption_upstage_api_key.disabled = !solar;
+  elements.caption_upstage_api_key.setAttribute(
+    "aria-hidden",
+    String(!solar)
+  );
+  for (const input of [
+    elements.caption_stt_endpoint,
+    elements.caption_stt_model,
+    elements.caption_stt_api_key
+  ]) {
+    const field = input.closest(".select-field");
+    if (field) {
+      field.hidden = !solar;
+    }
+    input.disabled = !solar;
+    input.setAttribute("aria-hidden", String(!solar));
+  }
+  if (elements.caption_local_status.dataset.state === "ready") {
+    setCaptionLocalStatus(
+      solar
+        ? `STT ${actualStt} 준비됨 · 선택한 Solar 고급 초벌을 실행할 수 있습니다`
+        : `로컬 Whisper ${actualStt} 준비됨 · Upstage 호출 0회`,
+      "ready"
+    );
+  }
 }
 
 async function ensureLocalCaptionSession(config, signal) {
@@ -3860,15 +4345,37 @@ async function ensureLocalCaptionSession(config, signal) {
     signal
   });
   elements.caption_agent_token.value = token;
+  const capability = await probeCaptionAgent({
+    endpoint: config.endpoint,
+    token,
+    providerConfig: config.providerConfig,
+    signal
+  });
+  const runtime = captionAgentRuntimeIdentity(capability, {
+    model: config.model,
+    sttEndpoint: config.providerConfig.sttEndpoint
+  });
+  captionAgentRuntime = runtime;
+  const actualStt = runtime.sttModel;
   setCaptionLocalStatus(
-    "로컬 STT 준비됨 · Solar API 키만 현재 탭에 입력하세요",
+    isSolarCaptionModel(config.model)
+      ? `STT ${actualStt} 준비됨 · Solar 고급 옵션의 API 키를 확인하세요`
+      : `로컬 Whisper ${actualStt} 준비됨 · Upstage 호출 0회`,
     "ready"
   );
-  return { ...config, token };
+  return { ...config, token, capability, runtime };
 }
 
 async function prepareCaptionAgentConfig() {
   let config = readCaptionAgentConfig();
+  if (
+    !isSolarCaptionModel(config.model)
+    && !isLoopbackCaptionAgentEndpoint(config.endpoint)
+  ) {
+    throw new Error(
+      "Whisper Tiny 로컬 초벌 주소는 127.0.0.1 또는 localhost여야 합니다."
+    );
+  }
   const permissionGranted = await ensureCaptionAgentPermission(config.endpoint);
   if (!permissionGranted) {
     throw new Error("자막 에이전트 주소 접근 권한이 허용되지 않았습니다.");
@@ -3877,23 +4384,42 @@ async function prepareCaptionAgentConfig() {
     config,
     activeJobController?.signal
   );
+  const capability = config.capability || await probeCaptionAgent({
+    endpoint: config.endpoint,
+    token: config.token,
+    providerConfig: config.providerConfig,
+    signal: activeJobController?.signal
+  });
+  const runtime = config.runtime || captionAgentRuntimeIdentity(capability, {
+    model: config.model,
+    sttEndpoint: config.providerConfig.sttEndpoint
+  });
+  captionAgentRuntime = runtime;
+  const ready = isSolarCaptionModel(config.model)
+    ? capability.configured?.solarReady !== false
+    : capability.configured?.ready !== false;
+  if (!ready) {
+    throw new Error(
+      isSolarCaptionModel(config.model)
+        ? "Solar API 키 또는 STT 설정이 준비되지 않았습니다."
+        : "로컬 Whisper STT가 준비되지 않았습니다."
+    );
+  }
   captionAgentSettings = await saveCaptionAgentSettings({
     endpoint: config.endpoint,
     model: config.model,
-    sttEndpoint: config.providerConfig.sttEndpoint,
-    sttModel: config.providerConfig.sttModel
+    sttEndpoint: elements.caption_stt_endpoint.value,
+    sttModel: elements.caption_stt_model.value
   });
   elements.caption_agent_endpoint.value = captionAgentSettings.endpoint;
   elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
   elements.caption_stt_model.value = captionAgentSettings.sttModel;
   return {
     ...config,
-    ...captionAgentSettings,
-    providerConfig: {
-      ...config.providerConfig,
-      sttEndpoint: captionAgentSettings.sttEndpoint,
-      sttModel: captionAgentSettings.sttModel
-    }
+    endpoint: captionAgentSettings.endpoint,
+    model: captionAgentSettings.model,
+    capability,
+    runtime
   };
 }
 
@@ -3910,13 +4436,19 @@ function formatCaptionRunDuration(milliseconds) {
 }
 
 function confirmCaptionAgentRun(enabledClips, { skippedClipCount = 0 } = {}) {
-  const estimate = captionAgentRunEstimate(enabledClips);
-  const selectedModel = elements.caption_model.value === "solar-mini"
+  const model = elements.caption_model.value;
+  const solar = isSolarCaptionModel(model);
+  const estimate = captionAgentRunEstimate(enabledClips, {
+    model
+  });
+  const selectedModel = model === "solar-mini"
     ? "Solar Mini"
-    : "Solar Pro 3";
+    : model === "solar-pro3"
+      ? "Solar Pro 3"
+      : `로컬 Whisper ${captionAgentRuntime?.sttModel || "Tiny 기본"}`;
   let externalStt = false;
   try {
-    externalStt = Boolean(
+    externalStt = solar && Boolean(
       elements.caption_stt_endpoint.value.trim()
       && !isLoopbackCaptionAgentEndpoint(elements.caption_stt_endpoint.value)
     );
@@ -3926,6 +4458,23 @@ function confirmCaptionAgentRun(enabledClips, { skippedClipCount = 0 } = {}) {
   const sttNotice = externalStt
     ? "고급 설정의 외부 STT도 별도 과금될 수 있습니다"
     : "로컬 STT는 별도 API 과금이 없습니다";
+  if (!solar) {
+    return window.confirm([
+      skippedClipCount > 0
+        ? "중단된 Whisper Tiny 자막 초벌을 이어서 할까요?"
+        : "Whisper Tiny 로컬 자막 초벌을 시작할까요?",
+      "",
+      ...(skippedClipCount > 0
+        ? [`저장 완료된 컷 ${skippedClipCount}개는 건너뜁니다`]
+        : []),
+      `활성 컷 ${estimate.clipCount}개 · 총 ${formatCaptionRunDuration(estimate.totalDurationMs)}`,
+      `${selectedModel} · Upstage 요청 0회 · 유료 LLM 호출 없음`,
+      "STT가 만든 발화 시작·끝을 유지한 채 4초 이하로 나눕니다",
+      sttNotice,
+      "",
+      "취소하면 오디오 추출을 시작하지 않습니다."
+    ].join("\n"));
+  }
   return window.confirm([
     skippedClipCount > 0
       ? "중단된 Solar 자막 초벌을 이어서 할까요?"
@@ -3952,10 +4501,7 @@ async function testCaptionAgentConnection() {
   elements.test_caption_agent.disabled = true;
   try {
     const config = await prepareCaptionAgentConfig();
-    const result = await probeCaptionAgent({
-      ...config,
-      signal: controller.signal
-    });
+    const result = config.capability;
     const availableModels = Array.isArray(result.availableModels)
       ? result.availableModels.map((model) => String(model))
       : [];
@@ -3966,20 +4512,31 @@ async function testCaptionAgentConnection() {
       throw new Error(`로컬 companion이 ${config.model} 모델을 지원하지 않습니다.`);
     }
     const provider = result.provider ? ` · ${result.provider}` : "";
+    const actualStt = config.runtime?.sttModel || result.models?.stt || "확인 불가";
     const model = config.model;
-    const readiness = result.configured?.ready === false
-      ? " · STT/Upstage 설정 미완료"
+    const solar = isSolarCaptionModel(model);
+    const ready = solar
+      ? result.configured?.solarReady !== false
+      : result.configured?.ready !== false;
+    const readiness = !ready
+      ? solar
+        ? " · Solar API 키 또는 STT 설정 미완료"
+        : " · 로컬 STT 설정 미완료"
       : "";
     showToast(
-      `자막 에이전트 연결 확인 완료${provider} · ${model}${readiness}`,
-      result.configured?.ready === false ? "error" : "success",
-      result.configured?.ready === false ? 0 : 5200
+      `자막 에이전트 연결 확인 완료${provider} · ${model} · STT ${actualStt}${readiness}`,
+      ready ? "success" : "error",
+      ready ? 5200 : 0
     );
     setCaptionLocalStatus(
-      result.configured?.ready === false
-        ? "로컬 STT 연결됨 · Solar API 키를 현재 탭에 입력하세요"
-        : "로컬 STT 준비됨 · Solar 자막 초벌을 시작할 수 있습니다",
-      result.configured?.ready === false ? "waiting" : "ready"
+      ready
+        ? solar
+          ? `STT ${actualStt} 준비됨 · 선택한 Solar 고급 초벌을 실행할 수 있습니다`
+          : `로컬 Whisper ${actualStt} 준비됨 · Upstage 호출 0회`
+        : solar
+          ? "로컬 STT 연결됨 · Solar 고급 옵션의 API 키를 입력하세요"
+          : "로컬 Whisper 설정을 확인해 주세요",
+      ready ? "ready" : "waiting"
     );
   } catch (error) {
     const canceled = error.name === "AbortError";
@@ -4036,45 +4593,17 @@ async function generateCaptions() {
     return;
   }
   const selectedModel = elements.caption_model.value;
-  const trustedContextFingerprint =
-    captionAgentEditorialContextFingerprint(project);
-  const resumeEligible = ["running", "error", "canceled"].includes(
-    project.ai?.status
-  );
-  const resumePlan = captionAgentResumePlan(
-    allEnabledClips,
-    project.ai?.captionCheckpoints,
-    selectedModel,
-    {
-      resume: resumeEligible,
-      editorialContextFingerprint: trustedContextFingerprint
-    }
-  );
-  const enabledClips = resumePlan.clips;
-  if (enabledClips.length === 0 && resumePlan.skippedClipIds.length > 0) {
-    project = {
-      ...project,
-      ai: {
-        ...project.ai,
-        status: "done",
-        progress: 1,
-        lastRunAt: new Date().toISOString(),
-        error: null
-      }
-    };
-    await saveProject(project);
-    renderAll({ keepScroll: true });
+  const solarMode = isSolarCaptionModel(selectedModel);
+  if (
+    solarMode
+    && !String(elements.caption_upstage_api_key.value || "").trim()
+  ) {
     showToast(
-      "저장된 컷별 자막 체크포인트를 확인했습니다. 다시 과금할 컷이 없습니다.",
-      "success",
-      6500
+      "Solar 고급 초벌을 쓰려면 현재 탭에 Upstage API 키를 입력해 주세요.",
+      "error",
+      0
     );
-    return;
-  }
-  if (!confirmCaptionAgentRun(enabledClips, {
-    skippedClipCount: resumePlan.skippedClipIds.length
-  })) {
-    showToast("Solar 자막 초벌을 시작하지 않았습니다.", "info");
+    elements.caption_upstage_api_key.focus();
     return;
   }
   const returnFocus = document.activeElement;
@@ -4098,7 +4627,59 @@ async function generateCaptions() {
     }
     return;
   }
-  const { endpoint, token, model, providerConfig } = config;
+  const { endpoint, token, model, providerConfig, runtime } = config;
+  const trustedContextFingerprint =
+    captionAgentEditorialContextFingerprint(project);
+  const resumeEligible = ["running", "error", "canceled"].includes(
+    project.ai?.status
+  );
+  const resumePlan = captionAgentResumePlan(
+    allEnabledClips,
+    project.ai?.captionCheckpoints,
+    selectedModel,
+    {
+      resume: resumeEligible,
+      editorialContextFingerprint: trustedContextFingerprint,
+      pipelineFingerprint: runtime.fingerprint
+    }
+  );
+  const enabledClips = resumePlan.clips;
+  if (enabledClips.length === 0 && resumePlan.skippedClipIds.length > 0) {
+    project = {
+      ...project,
+      ai: {
+        ...project.ai,
+        status: "done",
+        progress: 1,
+        lastRunAt: new Date().toISOString(),
+        error: null
+      }
+    };
+    await saveProject(project);
+    renderAll({ keepScroll: true });
+    showToast(
+      "저장된 컷별 자막 체크포인트를 확인했습니다. 다시 처리할 컷이 없습니다.",
+      "success",
+      6500
+    );
+    activeJobController = null;
+    elements.generate_captions.disabled = false;
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+    }
+    return;
+  }
+  if (!confirmCaptionAgentRun(enabledClips, {
+    skippedClipCount: resumePlan.skippedClipIds.length
+  })) {
+    showToast("자막 초벌을 시작하지 않았습니다.", "info");
+    activeJobController = null;
+    elements.generate_captions.disabled = false;
+    if (returnFocus?.isConnected) {
+      returnFocus.focus();
+    }
+    return;
+  }
   let activeCaptionSessionToken = token;
   const undoSnapshot = cloneProject(project);
   let undoRecorded = false;
@@ -4108,10 +4689,14 @@ async function generateCaptions() {
     : [];
   let generatedCueCount = 0;
   showJob(
-    "Solar 자막 초안을 만드는 중",
+    solarMode
+      ? "Solar 고급 자막 초안을 만드는 중"
+      : "로컬 Whisper 자막 초안을 만드는 중",
     resumePlan.skippedClipIds.length > 0
       ? `이미 저장된 ${resumePlan.skippedClipIds.length}개 컷은 건너뛰고 실패 지점부터 이어서 처리합니다.`
-      : "활성화된 모든 선택 컷의 음성을 차례로 로컬 STT에 보내고, 전사문과 고지된 이름·메모 문맥은 Solar에 보냅니다.",
+      : solarMode
+        ? "활성 컷 음성은 로컬 STT로 전사하고, 제한된 전사문·편집 문맥만 선택한 Solar에 보냅니다."
+        : `활성 컷 음성을 이 기기의 Whisper ${runtime.sttModel}로 전사하고 실제 단어 타임스탬프를 우선해 초벌 자막으로 만듭니다.`,
     0,
     { cancelable: true, returnFocus }
   );
@@ -4144,47 +4729,52 @@ async function generateCaptions() {
       const base = index / clips.length;
       const span = 1 / clips.length;
       captionAgentAudioFootprint(clipDurationMs(clip));
-      setAiProgress(base, `${index + 1}/${clips.length} · 화면 안전 영역을 로컬 분석하는 중`);
-      let placementHints;
-      try {
-        placementHints = await extractClipCaptionPlacementHints(
-          mediaFile,
-          clip,
-          {
-            signal: controller.signal,
-            onProgress: (value) => {
-              setAiProgress(
-                base + span * value * 0.1,
-                `${index + 1}/${clips.length} · 대표 프레임 안전 영역 분석 중`
-              );
+      let placementHints = fallbackCaptionPlacementHints(
+        clipDurationMs(clip)
+      );
+      if (solarMode) {
+        setAiProgress(base, `${index + 1}/${clips.length} · 화면 안전 영역을 로컬 분석하는 중`);
+        try {
+          placementHints = await extractClipCaptionPlacementHints(
+            mediaFile,
+            clip,
+            {
+              signal: controller.signal,
+              onProgress: (value) => {
+                setAiProgress(
+                  base + span * value * 0.1,
+                  `${index + 1}/${clips.length} · 대표 프레임 안전 영역 분석 중`
+                );
+              }
             }
+          );
+        } catch (error) {
+          if (controller.signal.aborted || error?.name === "AbortError") {
+            throw error;
           }
-        );
-      } catch (error) {
-        if (controller.signal.aborted || error?.name === "AbortError") {
-          throw error;
+          console.warn("대표 프레임 자막 위치 분석에 실패했습니다.", error);
+          captionWarnings = mergeAiWarnings(
+            captionWarnings,
+            [{
+              code: "LOCAL_VISUAL_ANALYSIS_FAILED",
+              cueIndex: 0
+            }],
+            clip.id
+          );
         }
-        console.warn("대표 프레임 자막 위치 분석에 실패했습니다.", error);
-        placementHints = fallbackCaptionPlacementHints(clipDurationMs(clip));
-        captionWarnings = mergeAiWarnings(
-          captionWarnings,
-          [{
-            code: "LOCAL_VISUAL_ANALYSIS_FAILED",
-            cueIndex: 0
-          }],
-          clip.id
-        );
       }
+      const audioProgressStart = solarMode ? 0.1 : 0;
+      const audioProgressSpan = solarMode ? 0.16 : 0.26;
       setAiProgress(
-        base + span * 0.1,
+        base + span * audioProgressStart,
         `${index + 1}/${clips.length} · 선택 구간의 음성을 준비하는 중`
       );
       const pcm = await extractClipPcm16k(mediaFile, clip, {
         signal: controller.signal,
         onProgress: (value) => {
           setAiProgress(
-            base + span * (0.1 + value * 0.16),
-            `${index + 1}/${clips.length} · 전송할 음성 추출 중`
+            base + span * (audioProgressStart + value * audioProgressSpan),
+            `${index + 1}/${clips.length} · 로컬 전사용 음성 추출 중`
           );
         }
       });
@@ -4207,7 +4797,9 @@ async function generateCaptions() {
           activeCaptionSessionToken = nextToken;
           elements.caption_agent_token.value = nextToken;
           setCaptionLocalStatus(
-            "로컬 자막 엔진에 다시 연결됨 · 작업을 이어갑니다",
+            solarMode
+              ? `STT ${runtime.sttModel}에 다시 연결됨 · Solar 고급 초벌을 이어갑니다`
+              : `로컬 Whisper ${runtime.sttModel}에 다시 연결됨 · 초벌을 이어갑니다`,
             "ready"
           );
         },
@@ -4216,6 +4808,11 @@ async function generateCaptions() {
           setAiProgress(base + span * local, `${index + 1}/${clips.length} · ${label}`);
         }
       });
+      if (String(result.sttModel || "") !== runtime.sttModel) {
+        throw new Error(
+          "자막 실행 중 실제 STT 모델이 바뀌었습니다. 서로 다른 전사 결과를 섞지 않고 중단합니다."
+        );
+      }
       const normalizedDrafts = normalizeCaptionAgentCues(
         result.cues,
         clipDurationMs(clip)
@@ -4260,7 +4857,8 @@ async function generateCaptions() {
             project.ai?.captionCheckpoints,
             createCaptionAgentCheckpoint(clip, model, {
               requestId: result.requestId,
-              editorialContextFingerprint: trustedContextFingerprint
+              editorialContextFingerprint: trustedContextFingerprint,
+              pipelineFingerprint: runtime.fingerprint
             })
           ),
           status: "running",
@@ -4289,14 +4887,17 @@ async function generateCaptions() {
     const reviewWarningCount = captionWarnings.filter(
       (warning) => CAPTION_REVIEW_WARNING_CODES.has(warning.code)
     ).length;
+    const draftLabel = solarMode
+      ? "Solar 고급 자막"
+      : `로컬 Whisper ${runtime.sttModel} 자막`;
     showToast(
       reviewWarningCount > 0
-        ? `Solar 자막과 로컬 하네스 처리를 마쳤습니다. 재확인이 필요한 품질 경고 ${reviewWarningCount}건을 확인해 주세요.`
+        ? `${draftLabel}과 로컬 하네스 처리를 마쳤습니다. 재확인이 필요한 품질 경고 ${reviewWarningCount}건을 확인해 주세요.`
         : reviewRequiredCount > 0
-        ? `Solar 자막 초안을 만들었습니다. 재확인이 필요한 ${reviewRequiredCount}개 자막은 노란색으로 표시했습니다.`
+        ? `${draftLabel} 초안을 만들었습니다. 재확인이 필요한 ${reviewRequiredCount}개 자막은 노란색으로 표시했습니다.`
         : captionWarnings.length > 0
-          ? `Solar 초안을 만들고 키리누키 품질 하네스가 ${captionWarnings.length}건을 자동 정리했습니다.`
-          : "Solar 자막 초안을 만들었습니다. 텍스트·시간을 한 번 검수해 주세요.",
+          ? `${draftLabel} 초안을 만들고 키리누키 품질 하네스가 ${captionWarnings.length}건을 자동 정리했습니다.`
+          : `${draftLabel} 초안을 만들었습니다. 텍스트·시간을 한 번 검수해 주세요.`,
       reviewWarningCount > 0 ? "error" : "success",
       reviewWarningCount > 0 ? 9000 : 6500
     );
@@ -5278,12 +5879,44 @@ function bindActions() {
     }
   });
   elements.font_size.addEventListener("change", () => endFieldEdit("font-size"));
-  elements.font_color.addEventListener("change", () => endFieldEdit("font-color"));
+  elements.font_color.addEventListener("change", () => {
+    applyFieldProject(
+      rememberSubtitleColor(project, elements.font_color.value),
+      "font-color"
+    );
+    endFieldEdit("font-color");
+  });
+  elements.caption_color_register.addEventListener("click", (event) => {
+    const button = event.target.closest(".caption-color-swatch[data-color]");
+    const cue = selectedCue();
+    if (!button || !cue) {
+      return;
+    }
+    const color = button.dataset.color;
+    const colored = updateSubtitleCue(project, cue.id, { color });
+    applyProject(rememberSubtitleColor(colored, color));
+  });
   elements.reset_font_color.addEventListener("click", () => {
     const cue = selectedCue();
     if (cue) {
-      updateSelectedCue({ color: project.subtitleDefaults.color || "#ffffff" });
+      updateSelectedCue({ color: DEFAULT_SUBTITLE_COLOR });
     }
+  });
+  elements.match_cue_to_asset.addEventListener("click", () => {
+    const cue = selectedCue();
+    const asset = selectedImageAsset();
+    if (!cue || !asset || cue.clipId !== asset.clipId) {
+      showToast("같은 컷의 자막과 에셋을 먼저 선택해 주세요.", "error");
+      renderCueInspector();
+      return;
+    }
+    const next = matchSubtitleCueToImageAsset(project, cue.id, asset.id);
+    if (cueHasOverlap(next, cue.id)) {
+      showToast("맞춘 구간이 같은 자막 레인의 다른 자막과 겹칩니다.", "error");
+      return;
+    }
+    applyProject(next);
+    showToast("자막을 선택 에셋의 시작·끝 시각에 정확히 맞췄습니다.", "success");
   });
   elements.delete_cue.addEventListener("click", () => {
     const cue = selectedCue();
@@ -5353,6 +5986,17 @@ function bindActions() {
     }
     updateSelectedImageAsset({ endOffsetMs: timelineMs - clip.timelineStartMs });
     restoreAssetTimeFields();
+  });
+  elements.match_asset_to_cue.addEventListener("click", () => {
+    const asset = selectedImageAsset();
+    const cue = selectedCue();
+    if (!asset || !cue || asset.clipId !== cue.clipId) {
+      showToast("같은 컷의 에셋과 자막을 먼저 선택해 주세요.", "error");
+      renderImageAssetInspector();
+      return;
+    }
+    applyProject(matchImageAssetToSubtitleCue(project, asset.id, cue.id));
+    showToast("에셋을 선택 자막의 시작·끝 시각에 정확히 맞췄습니다.", "success");
   });
   elements.asset_x.addEventListener("input", () => {
     updateSelectedImageAsset(
@@ -5471,6 +6115,12 @@ function bindActions() {
   });
 
   elements.generate_captions.addEventListener("click", () => void generateCaptions());
+  elements.reset_ai_caption_positions.addEventListener("click", () => {
+    void queueLocalDraftOperation(resetAllAiCaptionPositions)
+      .catch((error) => {
+        showToast(`AI 자막 위치를 정렬하지 못했습니다: ${error.message}`, "error", 0);
+      });
+  });
   elements.test_caption_agent.addEventListener("click", () => void testCaptionAgentConnection());
   elements.caption_style_preset.addEventListener("change", () => {
     const preset = captionStylePreset(elements.caption_style_preset.value);
@@ -5488,19 +6138,17 @@ function bindActions() {
     showToast(`${preset.displayName} 스타일을 적용했습니다.`, "success", 3600);
   });
   elements.caption_model.addEventListener("change", () => {
-    applyProject({
-      ...project,
-      ai: {
-        ...project.ai,
-        provider: "caption-agent",
-        model: elements.caption_model.value
-      }
-    });
+    renderCaptionModeControls();
     void saveCaptionAgentSettings({
       endpoint: elements.caption_agent_endpoint.value,
       model: elements.caption_model.value,
       sttEndpoint: elements.caption_stt_endpoint.value,
       sttModel: elements.caption_stt_model.value
+    }).then((settings) => {
+      captionAgentSettings = settings;
+      elements.caption_agent_endpoint.value = settings.endpoint;
+      elements.caption_stt_endpoint.value = settings.sttEndpoint;
+      elements.caption_stt_model.value = settings.sttModel;
     }).catch((error) => {
       showToast(`자막 에이전트 설정 저장 실패: ${error.message}`, "error", 0);
     });
@@ -5522,6 +6170,9 @@ function bindActions() {
       sttModel: elements.caption_stt_model.value
     }).then((settings) => {
       captionAgentSettings = settings;
+      elements.caption_agent_endpoint.value = settings.endpoint;
+      elements.caption_stt_endpoint.value = settings.sttEndpoint;
+      elements.caption_stt_model.value = settings.sttModel;
     }).catch((error) => {
       showToast(`자막 에이전트 설정 저장 실패: ${error.message}`, "error", 0);
     });
@@ -5568,13 +6219,31 @@ function bindActions() {
   });
   elements.timeline_zoom.addEventListener("input", () => {
     pixelsPerSecond = Number(elements.timeline_zoom.value);
+    hideTimelineSnapGuide();
     renderTimeline();
   });
   elements.fit_timeline.addEventListener("click", () => {
     const durationSeconds = Math.max(1, projectDurationMs(project) / 1000);
     pixelsPerSecond = Math.max(20, Math.min(240, (elements.timeline_scroll.clientWidth - 20) / durationSeconds));
     elements.timeline_zoom.value = String(Math.round(pixelsPerSecond));
+    hideTimelineSnapGuide();
     renderTimeline();
+  });
+  elements.toggle_timeline_snap.addEventListener("click", () => {
+    timelineSnapEnabled = !timelineSnapEnabled;
+    elements.toggle_timeline_snap.classList.toggle("active", timelineSnapEnabled);
+    elements.toggle_timeline_snap.setAttribute("aria-pressed", String(timelineSnapEnabled));
+    elements.toggle_timeline_snap.title = timelineSnapEnabled
+      ? "타임라인 자석 켜짐 · 드래그 중 Alt로 잠시 해제"
+      : "타임라인 자석 꺼짐";
+    if (!timelineSnapEnabled) {
+      hideTimelineSnapGuide();
+    }
+    showToast(
+      timelineSnapEnabled
+        ? "타임라인 자석을 켰습니다. 드래그 중 Alt로 잠시 해제할 수 있어요."
+        : "타임라인 자석을 껐습니다."
+    );
   });
 
   elements.video_track.addEventListener("contextmenu", openTimelineContextMenu);
@@ -5808,6 +6477,7 @@ async function initialize() {
   elements.caption_model.value = captionAgentSettings.model;
   elements.caption_stt_endpoint.value = captionAgentSettings.sttEndpoint;
   elements.caption_stt_model.value = captionAgentSettings.sttModel;
+  renderCaptionModeControls();
   if (isLoopbackCaptionAgentEndpoint(captionAgentSettings.endpoint)) {
     void ensureCaptionAgentPermission(captionAgentSettings.endpoint)
       .then((granted) => {
@@ -5974,7 +6644,6 @@ function normalizeLocalCaptionFirstPass(detail) {
     if (!text || text.length > 500) {
       throw new TypeError(`${index + 1}번 로컬 자막 텍스트가 비었거나 너무 깁니다.`);
     }
-    const placement = String(rawCue.remoteMeta?.placement || "bottom").toLowerCase();
     return {
       ...rawCue,
       id: String(rawCue.id || `cue-codex-${crypto.randomUUID()}`),
@@ -5982,6 +6651,8 @@ function normalizeLocalCaptionFirstPass(detail) {
       startOffsetMs,
       endOffsetMs,
       text,
+      x: 0.5,
+      y: 0.84,
       origin: "ai",
       humanEdited: false,
       remoteMeta: {
@@ -5989,9 +6660,7 @@ function normalizeLocalCaptionFirstPass(detail) {
           rawCue.remoteMeta?.speakerId || "codex-local-first-pass"
         ).slice(0, 80),
         reviewRequired: rawCue.remoteMeta?.reviewRequired !== false,
-        placement: ["top", "center", "bottom"].includes(placement)
-          ? placement
-          : "bottom"
+        placement: "bottom"
       }
     };
   });

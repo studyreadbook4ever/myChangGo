@@ -17,14 +17,17 @@ import {
 } from "./lib/core.js";
 import {
   captureStateSourceConflict,
+  sameSourceSession,
   sourceSessionIdentity
 } from "./lib/editor-core.js";
 import {
   SOURCE_PLATFORM_YOUTUBE,
+  canStartSourceRefresh,
   isSupportedSourceUrl,
   selectSupportedSourceTab,
   sourcePlayerStatusText,
-  sourcePlatformLabel
+  sourcePlatformLabel,
+  sourceRefreshFailureAction
 } from "./lib/source-platform.js";
 
 const elements = {
@@ -85,6 +88,7 @@ let saveTimer = null;
 let statusTimer = null;
 let refreshTimer = null;
 let contextRequestSequence = 0;
+let foregroundContextRequestCount = 0;
 let stateGeneration = 0;
 let resetInProgress = false;
 let persistenceChain = Promise.resolve();
@@ -106,6 +110,13 @@ const recoveryDateFormatter = new Intl.DateTimeFormat("ko-KR", {
 });
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+class SourceTabUnavailableError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SourceTabUnavailableError";
+  }
+}
 
 function setStatus(message, type = "info", timeout = 4200) {
   clearTimeout(statusTimer);
@@ -588,16 +599,61 @@ function contextAsSource(context) {
   };
 }
 
+function remapDraftCaptureSessionIdentity(
+  capture,
+  previousIdentity,
+  nextIdentity
+) {
+  if (
+    !capture
+    || !previousIdentity
+    || !nextIdentity
+    || previousIdentity === nextIdentity
+    || capture.sourceSessionId !== previousIdentity
+  ) {
+    return capture;
+  }
+  return {
+    ...capture,
+    sourceSessionId: nextIdentity
+  };
+}
+
 function applyContextToProject(context) {
   const nextSource = contextAsSource(context);
   const previousIdentity = sourceIdentity(state.source);
   const nextIdentity = sourceIdentity(nextSource);
+  const sameSession = sameSourceSession(state.source, nextSource);
   sourceConflict = captureStateSourceConflict(state, nextSource);
 
   if (!sourceConflict) {
     const preserveStreamer = state.source.streamerName;
     const preserveTitle = state.source.broadcastTitle;
-    const sourceChanged = previousIdentity && nextIdentity && previousIdentity !== nextIdentity;
+    const sourceChanged = Boolean(
+      previousIdentity
+      && nextIdentity
+      && !sameSession
+    );
+    if (
+      sameSession
+      && previousIdentity
+      && nextIdentity
+      && previousIdentity !== nextIdentity
+    ) {
+      state.draft = {
+        ...state.draft,
+        startCapture: remapDraftCaptureSessionIdentity(
+          state.draft.startCapture,
+          previousIdentity,
+          nextIdentity
+        ),
+        endCapture: remapDraftCaptureSessionIdentity(
+          state.draft.endCapture,
+          previousIdentity,
+          nextIdentity
+        )
+      };
+    }
     const candidateSource = {
       ...nextSource,
       streamerName: sourceChanged ? nextSource.streamerName : (preserveStreamer || nextSource.streamerName),
@@ -660,7 +716,7 @@ async function getActiveSourceTab() {
     expectedSource: state.source
   });
   if (!tab?.id || !isSupportedSourceUrl(tab.url)) {
-    throw new Error(
+    throw new SourceTabUnavailableError(
       "치지직·YouTube 영상 탭을 활성화하거나 저장된 원본 페이지를 다시 열어 주세요."
     );
   }
@@ -703,8 +759,26 @@ async function requestLatestPageContext() {
   }
 }
 
+async function requestForegroundPageContext() {
+  foregroundContextRequestCount += 1;
+  try {
+    return await requestLatestPageContext();
+  } finally {
+    foregroundContextRequestCount = Math.max(
+      0,
+      foregroundContextRequestCount - 1
+    );
+  }
+}
+
 async function refreshSource({ silent = false } = {}) {
-  if (resetInProgress) {
+  if (
+    resetInProgress
+    || !canStartSourceRefresh({
+      silent,
+      foregroundRequestCount: foregroundContextRequestCount
+    })
+  ) {
     return;
   }
   try {
@@ -718,9 +792,16 @@ async function refreshSource({ silent = false } = {}) {
     if (error.name === "AbortError") {
       return;
     }
-    currentContext = null;
-    sourceConflict = false;
-    renderSource();
+    const failureAction = sourceRefreshFailureAction({
+      silent,
+      hasCurrentContext: Boolean(currentContext),
+      sourceUnavailable: error instanceof SourceTabUnavailableError
+    });
+    if (failureAction === "clear") {
+      currentContext = null;
+      sourceConflict = false;
+      renderSource();
+    }
     if (!silent) {
       setStatus(error.message, "error");
     }
@@ -735,7 +816,7 @@ async function captureCurrentPosition(kind) {
   const button = kind === "start" ? elements.captureStart : elements.captureEnd;
   button.disabled = true;
   try {
-    const context = await requestLatestPageContext();
+    const context = await requestForegroundPageContext();
     assertOperationCurrent(operationGeneration);
     currentContext = context;
     applyContextToProject(context);
@@ -1153,18 +1234,15 @@ async function openIntegratedEditor() {
 
   elements.openEditor.disabled = true;
   try {
-    const context = await requestLatestPageContext();
+    const context = await requestForegroundPageContext();
     assertOperationCurrent(operationGeneration);
     currentContext = context;
     applyContextToProject(context);
     renderSource();
-    const expectedSessionId = sourceIdentity(state.source);
-    const activeSessionId = sourceIdentity(contextAsSource(context));
+    const activeSource = contextAsSource(context);
     if (
       sourceConflict ||
-      !expectedSessionId ||
-      !activeSessionId ||
-      expectedSessionId !== activeSessionId
+      !sameSourceSession(state.source, activeSource)
     ) {
       throw new Error("저장 구간과 현재 영상 탭의 원본이 다릅니다. 원래 영상 탭에서 다시 열어 주세요.");
     }

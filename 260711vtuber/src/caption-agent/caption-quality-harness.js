@@ -39,7 +39,7 @@ export const KR_VTUBER_CLEAN_PROFILE = Object.freeze({
 
 export const CAPTION_QUALITY_PROFILE_ID = KR_VTUBER_CLEAN_PROFILE.id;
 export const CAPTION_HARNESS_FINGERPRINT =
-  "kr-vtuber-clean-v1:segment-word-v2:context-v1:quality-gate-v1";
+  "kr-vtuber-clean-v1:segment-word-v3:context-v1:quality-gate-v2";
 
 const WIDE_GRAPHEME_PATTERN =
   /[\p{Script=Hangul}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Extended_Pictographic}\uFF01-\uFF60\uFFE0-\uFFE6]/u;
@@ -624,6 +624,103 @@ function wordBoundaryAlignedDurations(
   );
 }
 
+function wordAnchoredLongCueParts(
+  text,
+  startMs,
+  endMs,
+  wordUnits,
+  profile
+) {
+  const anchors = (Array.isArray(wordUnits) ? wordUnits : [])
+    .filter((word) => (
+      word.startMs >= startMs
+      && word.endMs <= endMs
+      && word.endMs > word.startMs
+      && textSignature(word.text)
+    ))
+    .sort((first, second) => (
+      first.startMs - second.startMs
+      || first.endMs - second.endMs
+    ));
+  if (anchors.length === 0) {
+    return null;
+  }
+
+  const sourceText = normalizeCaptionDisplayText(text);
+  const sourceSignature = textSignature(sourceText);
+  const anchorSignatures = anchors.map((anchor) => textSignature(anchor.text));
+  if (
+    !sourceSignature
+    || anchorSignatures.join("") !== sourceSignature
+  ) {
+    return null;
+  }
+
+  const sourceGraphemes = graphemes(sourceText);
+  const signaturePositions = sourceGraphemes
+    .map((grapheme, index) => ({ grapheme, index }))
+    .filter(({ grapheme }) => !/[\s\p{P}\p{S}]/u.test(grapheme))
+    .map(({ index }) => index);
+  if (signaturePositions.length !== graphemes(sourceSignature).length) {
+    return null;
+  }
+
+  const anchoredParts = [];
+  let signatureCursor = 0;
+  let sourceCursor = 0;
+  for (const [anchorIndex, anchor] of anchors.entries()) {
+    signatureCursor += graphemes(anchorSignatures[anchorIndex]).length;
+    const sourceEnd = anchorIndex === anchors.length - 1
+      ? sourceGraphemes.length
+      : signaturePositions[signatureCursor];
+    const rawPart = sourceGraphemes
+      .slice(sourceCursor, sourceEnd)
+      .join("");
+    sourceCursor = sourceEnd;
+    const partText = normalizeCaptionDisplayText(rawPart);
+    if (!partText || anchor.endMs - anchor.startMs > profile.maxCueDurationMs) {
+      return null;
+    }
+    anchoredParts.push({
+      startMs: anchor.startMs,
+      endMs: anchor.endMs,
+      rawText: rawPart
+    });
+  }
+
+  const grouped = [];
+  for (const part of anchoredParts) {
+    const previous = grouped.at(-1);
+    const combinedText = previous
+      ? normalizeCaptionDisplayText(previous.rawText + part.rawText)
+      : "";
+    if (
+      previous
+      && part.endMs - previous.startMs <= profile.maxCueDurationMs
+      && measureKoreanWidthUnits(combinedText) <= profile.maxTotalWidthUnits
+    ) {
+      previous.endMs = part.endMs;
+      previous.rawText += part.rawText;
+      continue;
+    }
+    grouped.push({ ...part });
+  }
+
+  const finalized = grouped.map(({ rawText, ...range }) => ({
+    ...range,
+    text: normalizeCaptionDisplayText(rawText)
+  }));
+  if (finalized.some((part) => (
+    !part.text
+    || part.endMs - part.startMs < 100
+    || part.endMs - part.startMs > profile.maxCueDurationMs
+    || measureKoreanWidthUnits(part.text) > profile.maxTotalWidthUnits
+  ))) {
+    return null;
+  }
+  return finalized;
+}
+
 function splitRawCue(
   rawCue,
   cueIndex,
@@ -632,7 +729,8 @@ function splitRawCue(
   collector,
   {
     wordUnits = [],
-    editorialContext
+    editorialContext,
+    preserveTimedBoundaries = false
   } = {}
 ) {
   const originalText = String(rawCue?.text ?? "");
@@ -667,12 +765,14 @@ function splitRawCue(
     )
   ));
   const desiredTotal = minimumDurations.reduce((sum, value) => sum + value, 0);
-  let expanded = expandRange(
-    range.startMs,
-    range.endMs,
-    desiredTotal,
-    clipDurationMs
-  );
+  let expanded = preserveTimedBoundaries
+    ? { startMs: range.startMs, endMs: range.endMs }
+    : expandRange(
+      range.startMs,
+      range.endMs,
+      desiredTotal,
+      clipDurationMs
+    );
   if (
     expanded.startMs !== range.startMs
     || expanded.endMs !== range.endMs
@@ -680,7 +780,41 @@ function splitRawCue(
     collector.add("HARNESS_EXPANDED_CUE_RANGE", cueIndex);
   }
   const maximumAggregateDuration = parts.length * profile.maxCueDurationMs;
-  if (expanded.endMs - expanded.startMs > maximumAggregateDuration) {
+  if (
+    preserveTimedBoundaries
+    && expanded.endMs - expanded.startMs > maximumAggregateDuration
+  ) {
+    const anchoredParts = wordAnchoredLongCueParts(
+      text,
+      expanded.startMs,
+      expanded.endMs,
+      wordUnits,
+      profile
+    );
+    if (anchoredParts) {
+      collector.add("HARNESS_CONSTRAINED_LONG_CUE_TO_WORD_ANCHORS", cueIndex);
+      return anchoredParts.map((part) => ({
+        ...part,
+        speakerId: normalizeSpeaker(
+          rawCue?.speakerId
+          ?? rawCue?.speaker_id
+          ?? rawCue?.speaker,
+          editorialContext
+        ),
+        reviewRequired: (
+          rawCue?.reviewRequired === true
+          || rawCue?.review_required === true
+          || /\[불명확\]/u.test(part.text)
+        ),
+        placement: String(rawCue?.placement || "").toLowerCase(),
+        sourceCueIndex: cueIndex
+      }));
+    }
+  }
+  if (
+    !preserveTimedBoundaries
+    && expanded.endMs - expanded.startMs > maximumAggregateDuration
+  ) {
     expanded = {
       startMs: expanded.startMs,
       endMs: expanded.startMs + maximumAggregateDuration
@@ -780,7 +914,9 @@ export function chooseStableCaptionPlacement(visualPlacement, {
     : profile.defaultPlacement;
 }
 
-function repairSameSpeakerOverlaps(cues, collector) {
+function repairSameSpeakerOverlaps(cues, collector, {
+  preserveTimedBoundaries = false
+} = {}) {
   const bySpeaker = new Map();
   for (const cue of cues) {
     const speakerCues = bySpeaker.get(cue.speakerId) || [];
@@ -797,6 +933,13 @@ function repairSameSpeakerOverlaps(cues, collector) {
       const previous = speakerCues[index - 1];
       const current = speakerCues[index];
       if (current.startMs >= previous.endMs) {
+        continue;
+      }
+      if (preserveTimedBoundaries) {
+        collector.add(
+          "HARNESS_PRESERVED_SAME_SPEAKER_OVERLAP",
+          current.sourceCueIndex
+        );
         continue;
       }
       const minimumBoundary = previous.startMs + 1;
@@ -1250,6 +1393,7 @@ export function repairSolarCaptionCues(rawCues, {
   visualPlacement,
   editorialContext,
   includeSpeakerColors = false,
+  timingPolicy = "readability",
   profile = KR_VTUBER_CLEAN_PROFILE
 } = {}) {
   const duration = finiteInteger(clipDurationMs);
@@ -1262,6 +1406,10 @@ export function repairSolarCaptionCues(rawCues, {
 
   const collector = warningCollector();
   const context = normalizeCaptionEditorialContext(editorialContext);
+  const preserveTimedBoundaries = timingPolicy === "stt-boundaries";
+  if (!["readability", "stt-boundaries"].includes(timingPolicy)) {
+    throw new TypeError("timingPolicy must be readability or stt-boundaries");
+  }
   const canonicalTranscript = transcript == null
     ? null
     : canonicalizeTranscriptUnits(transcript, {
@@ -1272,7 +1420,8 @@ export function repairSolarCaptionCues(rawCues, {
   const cues = rawCues.flatMap((rawCue, cueIndex) => (
     splitRawCue(rawCue, cueIndex, duration, profile, collector, {
       wordUnits: canonicalTranscript?.wordUnits || [],
-      editorialContext: context
+      editorialContext: context,
+      preserveTimedBoundaries
     })
   ));
   cues.sort((first, second) => (
@@ -1286,13 +1435,17 @@ export function repairSolarCaptionCues(rawCues, {
     }
     cue.placement = placement;
   }
-  repairSameSpeakerOverlaps(cues, collector);
-  expandShortCuesWithoutSpeakerOverlap(
-    cues,
-    duration,
-    profile,
-    collector
-  );
+  repairSameSpeakerOverlaps(cues, collector, {
+    preserveTimedBoundaries
+  });
+  if (!preserveTimedBoundaries) {
+    expandShortCuesWithoutSpeakerOverlap(
+      cues,
+      duration,
+      profile,
+      collector
+    );
+  }
 
   const finalizedCues = cues.map(({ sourceCueIndex, ...cue }) => cue);
   const evaluation = evaluateSolarCaptionCues(finalizedCues, {

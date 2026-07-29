@@ -243,15 +243,200 @@ test("긴 cue 분할 시 균등 나눗셈 대신 실제 STT word 경계를 사�
         endMs: index * 800 + 700,
         text: word
       }))
-    }
+    },
+    timingPolicy: "stt-boundaries"
   });
 
   assert.equal(repaired.harnessFingerprint, CAPTION_HARNESS_FINGERPRINT);
   assert.equal(repaired.cues.length, 2);
+  assert.equal(repaired.cues[0].startMs, 0);
   assert.equal(repaired.cues[0].endMs, 2_350);
   assert.equal(repaired.cues[1].startMs, 2_350);
+  assert.equal(repaired.cues[1].endMs, 6_000);
+  assert(repaired.cues.every(
+    (cue) => cue.startMs >= 0 && cue.endMs <= 6_000
+  ));
   assert(repaired.warnings.some(
     ({ code }) => code === "HARNESS_ALIGNED_SPLIT_TO_WORD_BOUNDARY"
+  ));
+});
+
+test("4초 초과 짧은 segment는 일치하는 word anchor 범위가 있을 때만 안전하게 축소한다", () => {
+  const repaired = repairCaptionDraft([{
+    startMs: 0,
+    endMs: 10_000,
+    text: "아!",
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom"
+  }], {
+    clipDurationMs: 10_000,
+    transcript: {
+      segments: [{
+        startMs: 0,
+        endMs: 10_000,
+        text: "아!",
+        speaker: "main"
+      }],
+      words: [{
+        startMs: 3_000,
+        endMs: 3_500,
+        text: "아"
+      }]
+    },
+    timingPolicy: "stt-boundaries"
+  });
+
+  assert.deepEqual(
+    repaired.cues.map(({ startMs, endMs, text }) => ({
+      startMs,
+      endMs,
+      text
+    })),
+    [{
+      startMs: 3_000,
+      endMs: 3_500,
+      text: "아!"
+    }]
+  );
+  assert(repaired.warnings.some(
+    ({ code }) => code === "HARNESS_CONSTRAINED_LONG_CUE_TO_WORD_ANCHORS"
+  ));
+  assert.notEqual(repaired.report.disposition, "rejected");
+});
+
+test("4초 초과 짧은 segment에 word anchor가 없으면 시간을 발명하지 않고 구조 실패로 남긴다", () => {
+  const repaired = repairCaptionDraft([{
+    startMs: 0,
+    endMs: 10_000,
+    text: "아",
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom"
+  }], {
+    clipDurationMs: 10_000,
+    transcript: {
+      segments: [{
+        startMs: 0,
+        endMs: 10_000,
+        text: "아",
+        speaker: "main"
+      }],
+      words: []
+    },
+    timingPolicy: "stt-boundaries"
+  });
+
+  assert.deepEqual(
+    repaired.cues.map(({ startMs, endMs }) => ({ startMs, endMs })),
+    [{ startMs: 0, endMs: 10_000 }]
+  );
+  assert.equal(
+    repaired.warnings.some(
+      ({ code }) => code === "HARNESS_CONSTRAINED_LONG_CUE_TO_WORD_ANCHORS"
+    ),
+    false
+  );
+  assert.equal(repaired.report.disposition, "rejected");
+  assert(repaired.report.violations.some(
+    ({ code }) => code === "HARNESS_CUE_TOO_LONG"
+  ));
+});
+
+test("STT 경계 보존 모드는 짧은 발화를 늘리지 않고 unknown 화자를 main으로 정리한다", () => {
+  const repaired = repairCaptionDraft([{
+    startMs: 250,
+    endMs: 600,
+    text: "짧은 발화.",
+    speakerId: "unknown",
+    reviewRequired: false,
+    placement: "bottom"
+  }], {
+    clipDurationMs: 2_000,
+    transcript: {
+      segments: [{
+        startMs: 250,
+        endMs: 600,
+        text: "짧은 발화.",
+        speaker: "unknown"
+      }],
+      words: []
+    },
+    timingPolicy: "stt-boundaries"
+  });
+
+  assert.deepEqual(repaired.cues, [{
+    startMs: 250,
+    endMs: 600,
+    text: "짧은 발화",
+    speakerId: "main",
+    reviewRequired: true,
+    placement: "bottom"
+  }]);
+  assert.equal(
+    repaired.warnings.some(
+      ({ code }) => code === "HARNESS_EXPANDED_CUE_RANGE"
+    ),
+    false
+  );
+});
+
+test("STT 경계 보존 모드는 짧은 동일 화자 겹침을 조용히 이동하지 않고 격리 대상으로 남긴다", () => {
+  const repaired = repairCaptionDraft([{
+    startMs: 0,
+    endMs: 100,
+    text: "가",
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom"
+  }, {
+    startMs: 50,
+    endMs: 150,
+    text: "나",
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom"
+  }], {
+    clipDurationMs: 1_000,
+    transcript: {
+      segments: [{
+        startMs: 0,
+        endMs: 100,
+        text: "가",
+        speaker: "main"
+      }, {
+        startMs: 50,
+        endMs: 150,
+        text: "나",
+        speaker: "main"
+      }],
+      words: []
+    },
+    timingPolicy: "stt-boundaries"
+  });
+
+  assert.deepEqual(
+    repaired.cues.map(({ startMs, endMs }) => ({ startMs, endMs })),
+    [{
+      startMs: 0,
+      endMs: 100
+    }, {
+      startMs: 50,
+      endMs: 150
+    }]
+  );
+  assert(repaired.warnings.some(
+    ({ code }) => code === "HARNESS_PRESERVED_SAME_SPEAKER_OVERLAP"
+  ));
+  assert.equal(repaired.warnings.some(
+    ({ code }) => code === "HARNESS_REPAIRED_SAME_SPEAKER_OVERLAP"
+  ), false);
+  assert.equal(repaired.report.disposition, "rejected");
+  assert(repaired.report.violations.some(
+    ({ code, cueIndex }) => (
+      code === "HARNESS_SAME_SPEAKER_OVERLAP"
+      && cueIndex === 1
+    )
   ));
 });
 
