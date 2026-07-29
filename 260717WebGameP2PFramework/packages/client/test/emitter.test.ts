@@ -6,6 +6,14 @@ interface Events {
   message: { readonly text: string };
 }
 
+class ObservedEmitter extends TypedEventEmitter<Events> {
+  readonly listenerErrors: unknown[] = [];
+
+  protected override handleListenerError(error: unknown): void {
+    this.listenerErrors.push(error);
+  }
+}
+
 describe("TypedEventEmitter", () => {
   it("subscribes, unsubscribes, and emits synchronously", () => {
     const emitter = new TypedEventEmitter<Events>();
@@ -27,5 +35,19 @@ describe("TypedEventEmitter", () => {
 
     emitter.emit("message", { text: "first" });
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates a throwing listener and continues dispatch", () => {
+    const emitter = new ObservedEmitter();
+    const healthy = vi.fn();
+    const failure = new Error("UI failed");
+    emitter.on("count", () => {
+      throw failure;
+    });
+    emitter.on("count", healthy);
+
+    expect(emitter.emit("count", 7)).toBe(true);
+    expect(healthy).toHaveBeenCalledWith(7);
+    expect(emitter.listenerErrors).toEqual([failure]);
   });
 });

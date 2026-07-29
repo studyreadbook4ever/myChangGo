@@ -1,7 +1,8 @@
 # RelayPlay
 
-> Pure TypeScript framework for local-first web games with server-relayed
-> progress and occasional canonical interactions. No P2P.
+> Pure TypeScript, non-monolithic harness for one-to-four-player local-first web
+> games with server-relayed progress and occasional canonical interactions. No
+> P2P, required signup, chat, or default persistent ranking.
 
 Primary docs:
 - README.md: product overview and quick start
@@ -11,6 +12,7 @@ Primary docs:
 - docs/protocol.md: message classes, ordering, resume, and scheduling
 - docs/security.md: trust model, authentication hooks, limits, ranked caveats
 - docs/game-design.md: mobile/desktop, Tetris-like, and rhythm-like guidance
+- docs/deploy-on-prem.md: Node/SQLite/Caddy security and operations
 - docs/deploy-cloudflare.md: deployment and operations
 - docs/verification.md: requirement-to-code-to-test traceability
 - docs/ai-guide.md: deterministic coding-agent workflow
@@ -21,12 +23,19 @@ Packages:
 - packages/core: config + protocol + validators + time math
 - packages/client: browser SDK + reconnect + cadence + capability helpers
 - packages/server: provider-neutral room engine + in-memory adapter
+- packages/node: accountless HTTP + WebSocket + SQLite self-hosted adapter
 - packages/cloudflare: Worker + Durable Object adapter
 - examples/live-race: complete browser example
 
 Hard rules:
+- Do not build a source monolith. A single Node deployment is allowed, but
+  protocol, client, room policy, provider adapters, and game code stay separate.
+- Allowed dependencies point inward: client -> core, server -> core, and
+  node/cloudflare -> server + core. Browser source never imports server/provider.
 - Never implement WebRTC/P2P.
 - Never block the local game loop on network response.
+- Keep the supported accountless room at four players or fewer.
+- Do not add chat. Keep persistent ranking opt-in and false by default.
 - Treat progress as replaceable telemetry and canonical interactions as an
   append-only, persist-before-broadcast log.
 - Schedule remote gameplay effects in the future at a logical boundary.
@@ -35,3 +44,6 @@ Hard rules:
 
 Validation:
 `npm run verify`
+
+Architecture guard:
+`npx vitest run test/package-boundaries.test.ts`

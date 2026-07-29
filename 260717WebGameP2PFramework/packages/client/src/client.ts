@@ -14,6 +14,7 @@ import {
   type ServerPresenceMessage,
   type ServerProgressMessage,
   type ServerReadyMessage,
+  type ServerRoomSnapshotMessage,
   type ServerSessionMessage,
 } from "@relayplay/core";
 import { detectCapabilities } from "./capabilities.js";
@@ -84,6 +85,7 @@ export type RelayPlayClientErrorSource =
   | "connection"
   | "protocol"
   | "progress"
+  | "listener"
   | "resume-store"
   | "time-sync";
 
@@ -137,7 +139,9 @@ export interface RelayPlayClientEvents {
   resumed: RelayPlayConnectionInfo & { readonly replayedEvents: number };
   presence: ServerPresenceMessage;
   ready: ServerReadyMessage;
+  snapshot: ServerRoomSnapshotMessage;
   start: CanonicalEvent;
+  finish: CanonicalEvent;
   progress: ServerProgressMessage;
   canonical: CanonicalEvent;
   interaction: CanonicalEvent;
@@ -301,14 +305,17 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
   #gapReplayRequested = false;
   #progressScheduler: ProgressScheduler<JsonValue> | undefined;
   #progressProvider: ProgressProvider<JsonValue> | undefined;
-  #progressSequence = 0;
+  #progressSequence = -1;
   #latestProgress: JsonValue | undefined;
   #desiredReady = false;
   #readyIdempotencyKey: string | undefined;
-  #messageQueue: Promise<void> = Promise.resolve();
   #stopLifecycle: (() => void) | undefined;
   #initialPingRemaining = 0;
   #resumeReplayPending = false;
+  #resumeReplayCount = 0;
+  #resumeTargetSequence: number | undefined;
+  #replayExpectedAfterSequence: number | undefined;
+  #replayPageProcessing = false;
 
   constructor(options: RelayPlayClientOptions) {
     super();
@@ -370,6 +377,11 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
     return this.#state === "connected";
   }
 
+  /** Exposes transport backpressure without coupling games to a WebSocket. */
+  get bufferedAmount(): number {
+    return this.#socket?.bufferedAmount ?? 0;
+  }
+
   get playerId(): string | undefined {
     return this.#resumeState?.playerId ?? this.#options.playerId;
   }
@@ -390,6 +402,10 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
     return this.#sequences.lastSequence;
   }
 
+  get lastProgressSequence(): number {
+    return this.#progressSequence;
+  }
+
   get clockOffsetMs(): number {
     return this.clock.offsetMs;
   }
@@ -405,17 +421,34 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
       return this.#connectDeferred.promise;
     }
 
+    this.#clearReconnectTimer();
+    this.#clearGapRecovery();
     this.#manualClose = false;
     this.#fatalClose = false;
-    this.#connectDeferred = deferred();
+    const attempt = deferred();
+    this.#connectDeferred = attempt;
     try {
       await this.#loadResumeState();
-      void this.#openSocket(false);
+      if (
+        this.#connectDeferred !== attempt ||
+        attempt.settled ||
+        this.#manualClose
+      ) {
+        return attempt.promise;
+      }
+      const socket = this.#socket;
+      if (
+        socket === undefined ||
+        (socket.readyState !== WebSocketReadyState.CONNECTING &&
+          socket.readyState !== WebSocketReadyState.OPEN)
+      ) {
+        void this.#openSocket(false);
+      }
     } catch (error) {
-      this.#connectDeferred.reject(error);
+      attempt.reject(error);
       throw error;
     }
-    return this.#connectDeferred.promise;
+    return attempt.promise;
   }
 
   async disconnect(options: DisconnectOptions = {}): Promise<void> {
@@ -424,6 +457,7 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
     }
     this.#manualClose = true;
     this.#clearReconnectTimer();
+    this.#clearGapRecovery();
     this.#stopConnectedSchedulers();
     this.#setState("closing");
     const socket = this.#socket;
@@ -557,6 +591,18 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
     if (!this.connected) {
       throw new Error("Cannot send evidence while disconnected.");
     }
+    const enabled =
+      (options.evidenceType === "replay-chunk" &&
+        this.#config.features.evidence.replayChunks) ||
+      (options.evidenceType === "state-hash" &&
+        this.#config.features.evidence.stateHashes) ||
+      (options.evidenceType === "result" &&
+        this.#config.features.verification.finalResults);
+    if (!enabled) {
+      throw new Error(
+        `Evidence channel ${options.evidenceType} is disabled by the RelayPlay configuration.`,
+      );
+    }
     const idempotencyKey = options.idempotencyKey ?? this.#ids.next("evidence");
     this.#send({
       version: 1,
@@ -566,6 +612,21 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
       payload: options.payload,
     });
     return idempotencyKey;
+  }
+
+  finish(payload: JsonValue, idempotencyKey?: string): string {
+    if (!this.connected) {
+      throw new Error("Cannot finish while disconnected.");
+    }
+    const resolvedIdempotencyKey =
+      idempotencyKey ?? this.#ids.next("finish");
+    this.#send({
+      version: 1,
+      type: "finish",
+      idempotencyKey: resolvedIdempotencyKey,
+      payload,
+    });
+    return resolvedIdempotencyKey;
   }
 
   ping(): string {
@@ -652,17 +713,24 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
         this.#handleOpen(socket, generation);
       }
     } catch (error) {
+      if (generation !== this.#generation || this.#manualClose) {
+        return;
+      }
       this.#reportError(error, "connection");
       this.#scheduleReconnectOrFail(error);
     }
   }
 
   #attachSocket(socket: WebSocketLike, generation: number): void {
+    let messageQueue: Promise<void> = Promise.resolve();
     const onOpen = (): void => this.#handleOpen(socket, generation);
     const onMessage = (event: MessageEvent<unknown>): void => {
-      this.#messageQueue = this.#messageQueue
+      messageQueue = messageQueue
         .then(() => this.#handleMessageData(event.data, socket, generation))
         .catch((error: unknown) => {
+          if (!this.#isActiveSocket(socket, generation)) {
+            return;
+          }
           this.#reportError(error, "protocol");
           if (socket.readyState === WebSocketReadyState.OPEN) {
             socket.close(1002, "invalid protocol message");
@@ -670,7 +738,9 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
         });
     };
     const onError = (event: Event): void => {
-      this.#reportError(event, "connection");
+      if (this.#isActiveSocket(socket, generation)) {
+        this.#reportError(event, "connection");
+      }
     };
     const onClose = (event: CloseEvent): void => {
       socket.removeEventListener("open", onOpen);
@@ -687,14 +757,18 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
   }
 
   #handleOpen(socket: WebSocketLike, generation: number): void {
-    if (
-      socket !== this.#socket ||
-      generation !== this.#generation ||
-      this.#manualClose
-    ) {
+    if (!this.#isActiveSocket(socket, generation)) {
       return;
     }
     this.#setState("handshaking");
+  }
+
+  #isActiveSocket(socket: WebSocketLike, generation: number): boolean {
+    return (
+      socket === this.#socket &&
+      generation === this.#generation &&
+      !this.#manualClose
+    );
   }
 
   async #handleMessageData(
@@ -702,13 +776,16 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
     socket: WebSocketLike,
     generation: number,
   ): Promise<void> {
-    if (socket !== this.#socket || generation !== this.#generation) {
+    if (!this.#isActiveSocket(socket, generation)) {
       return;
     }
     const decoded = await decodeJsonPayload(
       data,
       this.#config.security.maxMessageBytes,
     );
+    if (!this.#isActiveSocket(socket, generation)) {
+      return;
+    }
     const parsed = safeParseServerMessage(decoded, {
       maxMessageBytes: this.#config.security.maxMessageBytes,
       maxPayloadBytes: this.#config.security.maxPayloadBytes,
@@ -722,15 +799,30 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
       );
     }
     this.emit("message", parsed.data);
-    await this.#handleServerMessage(parsed.data);
+    await this.#handleServerMessage(parsed.data, socket, generation);
   }
 
-  async #handleServerMessage(message: ServerMessage): Promise<void> {
+  async #handleServerMessage(
+    message: ServerMessage,
+    socket: WebSocketLike,
+    generation: number,
+  ): Promise<void> {
     switch (message.type) {
       case "session": {
-        const resumed = this.#resumeState !== undefined;
-        this.#resumeReplayPending = resumed;
-        await this.#acceptSession(message, resumed);
+        await this.#acceptSession(message, socket, generation);
+        return;
+      }
+      case "snapshot": {
+        if (message.roomId !== this.#options.roomId) {
+          throw new Error("Room snapshot belongs to a different room.");
+        }
+        if (
+          this.#resumeState !== undefined &&
+          message.roomEpoch !== this.#resumeState.roomEpoch
+        ) {
+          throw new Error("Room snapshot belongs to a different room epoch.");
+        }
+        this.emit("snapshot", message);
         return;
       }
       case "presence":
@@ -743,7 +835,7 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
         this.emit("progress", message);
         return;
       case "canonical":
-        await this.#acceptCanonical(message.event);
+        await this.#acceptCanonical(message.event, socket, generation);
         return;
       case "replay":
         if (
@@ -752,18 +844,67 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
         ) {
           throw new Error("Replay belongs to a different room epoch.");
         }
-        for (const event of message.events) {
-          await this.#acceptCanonical(event);
+        if (
+          this.#replayExpectedAfterSequence !== undefined &&
+          message.afterSequence !== this.#replayExpectedAfterSequence
+        ) {
+          throw new Error("Replay page does not continue the requested sequence.");
+        }
+        this.#clearGapTimer();
+        this.#replayPageProcessing = true;
+        try {
+          for (const event of message.events) {
+            await this.#acceptCanonical(event, socket, generation);
+            if (!this.#isActiveSocket(socket, generation)) {
+              return;
+            }
+          }
+        } finally {
+          this.#replayPageProcessing = false;
+        }
+        if (message.hasMore) {
+          if (message.throughSequence === message.afterSequence) {
+            throw new Error("Replay page cannot be empty when hasMore is true.");
+          }
+          if (this.#resumeReplayPending) {
+            this.#resumeReplayCount += message.events.length;
+          }
+          this.#replayExpectedAfterSequence = message.throughSequence;
+          this.#send({
+            version: 1,
+            type: "resume",
+            roomEpoch: message.roomEpoch,
+            afterSequence: message.throughSequence,
+          });
+          if (this.#gapExpected !== undefined) {
+            this.#scheduleGapRecovery();
+          }
+          return;
         }
         if (this.#resumeReplayPending) {
+          this.#resumeReplayCount += message.events.length;
+          if (
+            this.#resumeTargetSequence !== undefined &&
+            this.#sequences.lastSequence < this.#resumeTargetSequence
+          ) {
+            throw new Error("Replay ended before the session canonical tail.");
+          }
           this.#resumeReplayPending = false;
+          this.#resumeTargetSequence = undefined;
           const info = this.#connectionInfo(true);
           if (info !== undefined) {
             this.emit("resumed", {
               ...info,
-              replayedEvents: message.events.length,
+              replayedEvents: this.#resumeReplayCount,
             });
           }
+          this.#resumeReplayCount = 0;
+        }
+        this.#replayExpectedAfterSequence = undefined;
+        if (this.#gapExpected !== undefined) {
+          socket.close(4001, "canonical sequence gap after replay");
+        } else {
+          this.#gapReplayRequested = false;
         }
         return;
       case "pong":
@@ -779,16 +920,40 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
 
   async #acceptSession(
     message: ServerSessionMessage,
-    resumed: boolean,
+    socket: WebSocketLike,
+    generation: number,
   ): Promise<void> {
     const previous = this.#resumeState;
     const { roomId, playerId, sessionId, roomEpoch, resumeEpoch } = message;
     if (roomId !== this.#options.roomId) {
       throw new Error("Server joined a different room than requested.");
     }
-    if (!resumed && previous?.roomEpoch !== roomEpoch) {
+    if (message.resumed) {
+      if (previous === undefined) {
+        throw new Error("Server accepted resume without local resume state.");
+      }
+      if (
+        previous.roomId !== roomId ||
+        previous.playerId !== playerId ||
+        previous.sessionId !== sessionId ||
+        previous.roomEpoch !== roomEpoch ||
+        resumeEpoch <= previous.resumeEpoch ||
+        message.lastSequence < this.#sequences.lastSequence
+      ) {
+        throw new Error("Resumed session does not continue the stored session identity.");
+      }
+    } else {
       this.#sequences.reset();
     }
+    this.#progressSequence = message.resumed
+      ? Math.max(this.#progressSequence, message.lastProgressSequence)
+      : message.lastProgressSequence;
+    this.#resumeReplayPending = message.resumed;
+    this.#resumeReplayCount = 0;
+    this.#resumeTargetSequence = message.resumed ? message.lastSequence : undefined;
+    this.#replayExpectedAfterSequence = message.resumed
+      ? this.#sequences.lastSequence
+      : undefined;
     this.#resumeState = {
       roomId,
       playerId,
@@ -798,13 +963,22 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
       lastEventSequence: this.#sequences.lastSequence,
     };
     await this.#safeSaveResume();
+    if (!this.#isActiveSocket(socket, generation)) {
+      return;
+    }
     this.#reconnectAttempt = 0;
     this.#setState("connected");
-    const info = this.#connectionInfo(resumed);
+    this.#connectDeferred?.resolve();
+    if (!this.#isActiveSocket(socket, generation)) {
+      return;
+    }
+    const info = this.#connectionInfo(message.resumed);
     if (info !== undefined) {
       this.emit("connected", info);
     }
-    this.#connectDeferred?.resolve();
+    if (!this.#isActiveSocket(socket, generation)) {
+      return;
+    }
     this.#startConnectedSchedulers();
     if (this.#readyIdempotencyKey !== undefined || this.#desiredReady) {
       this.#sendReady();
@@ -819,7 +993,11 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
     return session === undefined ? undefined : { ...session, resumed };
   }
 
-  async #acceptCanonical(event: CanonicalEvent): Promise<void> {
+  async #acceptCanonical(
+    event: CanonicalEvent,
+    socket: WebSocketLike,
+    generation: number,
+  ): Promise<void> {
     const session = this.#resumeState;
     if (event.roomId !== this.#options.roomId) {
       throw new Error("Canonical event belongs to a different room.");
@@ -854,12 +1032,7 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
       return;
     }
 
-    if (
-      this.#gapExpected !== undefined &&
-      this.#sequences.lastSequence >= this.#gapExpected
-    ) {
-      this.#clearGapRecovery();
-    }
+    this.#refreshGapRecovery();
     for (const accepted of result.events) {
       this.emit("canonical", accepted);
       switch (accepted.kind) {
@@ -870,6 +1043,8 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
           this.emit("interaction", accepted);
           break;
         case "finish":
+          this.emit("finish", accepted);
+          break;
         case "evidence":
           break;
       }
@@ -881,7 +1056,7 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
       };
       await this.#safeSaveResume();
     }
-    if (this.connected) {
+    if (this.connected && this.#isActiveSocket(socket, generation)) {
       this.#send({
         version: 1,
         type: "ack",
@@ -905,6 +1080,7 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
           this.#resumeState !== undefined
         ) {
           this.#gapReplayRequested = true;
+          this.#replayExpectedAfterSequence = this.#sequences.lastSequence;
           this.#send({
             version: 1,
             type: "resume",
@@ -920,12 +1096,33 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
   }
 
   #clearGapRecovery(): void {
+    this.#clearGapTimer();
+    this.#gapExpected = undefined;
+    this.#gapReplayRequested = false;
+  }
+
+  #clearGapTimer(): void {
     if (this.#gapTimer !== undefined) {
       this.#timers.clearTimeout(this.#gapTimer);
       this.#gapTimer = undefined;
     }
-    this.#gapExpected = undefined;
-    this.#gapReplayRequested = false;
+  }
+
+  #refreshGapRecovery(): void {
+    const receivedSequence = this.#sequences.firstBufferedSequence;
+    if (receivedSequence === undefined) {
+      this.#clearGapRecovery();
+      return;
+    }
+    const expectedSequence = this.#sequences.lastSequence + 1;
+    if (this.#gapExpected !== expectedSequence) {
+      this.#gapExpected = expectedSequence;
+      this.emit("sequenceGap", { expectedSequence, receivedSequence });
+    }
+    this.#clearGapTimer();
+    if (!this.#replayPageProcessing) {
+      this.#scheduleGapRecovery();
+    }
   }
 
   #acceptPong(raw: Record<string, unknown>): void {
@@ -1008,6 +1205,8 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
       return;
     }
     this.#socket = undefined;
+    this.#generation += 1;
+    this.#clearGapRecovery();
     this.#stopConnectedSchedulers();
     const willReconnect =
       !this.#manualClose &&
@@ -1115,6 +1314,17 @@ export class RelayPlayClient extends TypedEventEmitter<RelayPlayClientEvents> {
     } catch (error) {
       this.#reportError(error, "resume-store");
     }
+  }
+
+  protected override handleListenerError(
+    error: unknown,
+    event: keyof RelayPlayClientEvents,
+  ): void {
+    if (event === "error") {
+      super.handleListenerError(error, event);
+      return;
+    }
+    this.#reportError(error, "listener");
   }
 
   #reportError(error: unknown, source: RelayPlayClientErrorSource): void {

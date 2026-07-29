@@ -33,6 +33,12 @@ describe("client protocol validation", () => {
       evidenceType: "state-hash",
       payload: { tick: 20, hash: "abc" },
     },
+    {
+      version: 1,
+      type: "finish",
+      idempotencyKey: "finish-key-01",
+      payload: { score: 42 },
+    },
   ];
 
   it.each(validMessages)("accepts $type", (message) => {
@@ -68,6 +74,24 @@ describe("client protocol validation", () => {
       expect(result.issues.some((problem) => problem.code === "too_large")).toBe(true);
     }
   });
+
+  it("requires an idempotency key and bounded payload for finish intent", () => {
+    expect(
+      safeParseClientMessage({ version: 1, type: "finish", payload: { score: 1 } })
+        .success,
+    ).toBe(false);
+    expect(
+      safeParseClientMessage(
+        {
+          version: 1,
+          type: "finish",
+          idempotencyKey: "finish-key-02",
+          payload: "oversized",
+        },
+        { maxPayloadBytes: 2 },
+      ).success,
+    ).toBe(false);
+  });
 });
 
 describe("server protocol validation", () => {
@@ -91,8 +115,28 @@ describe("server protocol validation", () => {
       playerId: "player-one",
       sessionId: "session-one",
       resumeEpoch: 1,
+      resumed: false,
       status: "waiting",
       lastSequence: 0,
+      lastProgressSequence: -1,
+    },
+    {
+      version: 1,
+      type: "snapshot",
+      roomId: "room-demo",
+      roomEpoch: 1,
+      status: "scheduled",
+      startAt: 10_000,
+      serverTime: 9_000,
+      lastSequence: 1,
+      players: [
+        {
+          playerId: "player-one",
+          connected: true,
+          ready: true,
+          lastProgressSequence: 4,
+        },
+      ],
     },
     { version: 1, type: "presence", playerId: "player-two", connected: true, ready: false },
     { version: 1, type: "ready", playerId: "player-two", ready: true },
@@ -105,7 +149,15 @@ describe("server protocol validation", () => {
       payload: { score: 12 },
     },
     { version: 1, type: "canonical", event },
-    { version: 1, type: "replay", roomEpoch: 1, afterSequence: 0, events: [event] },
+    {
+      version: 1,
+      type: "replay",
+      roomEpoch: 1,
+      afterSequence: 0,
+      throughSequence: 1,
+      hasMore: false,
+      events: [event],
+    },
     { version: 1, type: "acknowledged", sequence: 1 },
     { version: 1, type: "pong", pingId: "ping-key-001", clientTime: 100, serverTime: 110 },
     { version: 1, type: "error", code: "RATE_LIMITED", message: "slow down", retriable: true, retryAfterMs: 500 },
@@ -122,6 +174,89 @@ describe("server protocol validation", () => {
       event: { ...event, effectiveAt: undefined },
     });
     expect(result.success).toBe(false);
+  });
+
+  it("strictly validates snapshots and contiguous replay page metadata", () => {
+    const duplicatePlayers = safeParseServerMessage({
+      version: 1,
+      type: "snapshot",
+      roomId: "room-demo",
+      roomEpoch: 1,
+      status: "waiting",
+      serverTime: 9_000,
+      lastSequence: 0,
+      players: [
+        { playerId: "player-one", connected: true, ready: false, lastProgressSequence: 0 },
+        { playerId: "player-one", connected: false, ready: false, lastProgressSequence: 0 },
+      ],
+    });
+    expect(duplicatePlayers.success).toBe(false);
+
+    const nonContiguousReplay = safeParseServerMessage({
+      version: 1,
+      type: "replay",
+      roomEpoch: 1,
+      afterSequence: 0,
+      throughSequence: 2,
+      hasMore: false,
+      events: [event],
+    });
+    expect(nonContiguousReplay.success).toBe(false);
+
+    expect(
+      safeParseServerMessage({
+        version: 1,
+        type: "snapshot",
+        roomId: "room-demo",
+        roomEpoch: 1,
+        status: "scheduled",
+        serverTime: 9_000,
+        lastSequence: 0,
+        players: [],
+      }).success,
+    ).toBe(false);
+
+    expect(
+      safeParseServerMessage({
+        version: 1,
+        type: "replay",
+        roomEpoch: 1,
+        afterSequence: 0,
+        throughSequence: 0,
+        hasMore: true,
+        events: [],
+      }).success,
+    ).toBe(false);
+
+    expect(
+      safeParseServerMessage({
+        version: 1,
+        type: "replay",
+        roomEpoch: 2,
+        afterSequence: 0,
+        throughSequence: 1,
+        hasMore: false,
+        events: [event],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires canonical finish events to identify their actor", () => {
+    expect(
+      safeParseServerMessage({
+        version: 1,
+        type: "canonical",
+        event: {
+          roomId: event.roomId,
+          roomEpoch: event.roomEpoch,
+          eventId: event.eventId,
+          sequence: event.sequence,
+          kind: "finish",
+          createdAt: event.createdAt,
+          payload: {},
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("enforces the encoded frame cap", () => {

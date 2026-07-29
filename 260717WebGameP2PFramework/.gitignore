@@ -3,6 +3,16 @@ dist/
 dist-types/
 .wrangler/
 .dev.vars
+.env
+.env.*
+!.env.example
+!.env.*.example
+/data/
+/backups/
+*.sqlite
+*.sqlite-*
+*.sqlite-shm
+*.sqlite-wal
 coverage/
 *.tsbuildinfo
 *.log

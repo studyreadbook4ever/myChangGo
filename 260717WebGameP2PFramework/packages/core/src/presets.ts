@@ -24,7 +24,7 @@ function freezePreset<T extends RelayPlayConfigInput>(value: T): Readonly<T> {
 
 export const liveRacePreset = freezePreset({
   room: {
-    maxPlayers: 16,
+    maxPlayers: 4,
   },
   features: {
     interactions: {
@@ -46,7 +46,7 @@ export const liveRacePreset = freezePreset({
 
 export const softBattlePreset = freezePreset({
   room: {
-    maxPlayers: 8,
+    maxPlayers: 4,
   },
   features: {
     interactions: {
@@ -77,7 +77,7 @@ export const softBattlePreset = freezePreset({
 
 export const fallingBlockBattlePreset = freezePreset({
   room: {
-    maxPlayers: 8,
+    maxPlayers: 4,
   },
   features: {
     interactions: {
@@ -108,7 +108,7 @@ export const fallingBlockBattlePreset = freezePreset({
 
 export const rhythmRacePreset = freezePreset({
   room: {
-    maxPlayers: 16,
+    maxPlayers: 4,
   },
   features: {
     interactions: {

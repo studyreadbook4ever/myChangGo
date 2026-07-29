@@ -9,6 +9,9 @@
     "progress": {
       "enabled": true
     },
+    "ranking": {
+      "enabled": false
+    },
     "interactions": {
       "enabled": true,
       "targeted": true,

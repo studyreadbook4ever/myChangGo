@@ -5,6 +5,12 @@ object serializes room messages, persists canonical events, and uses
 hibernatable WebSockets so an idle room does not require a continuously running
 game loop.
 
+This is a replaceable outer adapter around the same provider-neutral room
+engine; it must not fork protocol or game policy. The supported product profile
+remains at most four players, no chat, and ranking disabled by default. Unlike
+the Node adapter, the Cloudflare package does not supply a production guest
+control plane: an application must issue and verify room-scoped credentials.
+
 ## Prerequisites
 
 - a Cloudflare account with Workers and Durable Objects enabled;
@@ -35,6 +41,9 @@ adapter is intentionally unsuitable for a public deployment.
    reconnect, resume, and room expiry.
 8. Monitor rejected messages, rate-limit events, reconnect rate, event-log
    growth, alarm errors, and WebSocket backpressure.
+9. Keep chat absent and persistent ranking off until the integrating product
+   provides the corresponding moderation, identity, verification, and retention
+   systems.
 
 The repository's example Wrangler configuration is a development template.
 Copy it for an application, change the Worker/object names, and add the

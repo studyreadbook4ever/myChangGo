@@ -35,4 +35,28 @@ describe("CanonicalSequenceBuffer", () => {
     ).toBe("duplicate");
     expect(buffer.lastSequence).toBe(1);
   });
+
+  it("rejects canonical identity conflicts instead of hiding them as duplicates", () => {
+    const buffer = new CanonicalSequenceBuffer<TestEvent>();
+    buffer.ingest({ eventId: "stable", sequence: 1, value: "first" });
+
+    expect(() =>
+      buffer.ingest({ eventId: "different", sequence: 1, value: "conflict" }),
+    ).toThrow(/changed event ID/u);
+    expect(() =>
+      buffer.ingest({ eventId: "stable", sequence: 2, value: "conflict" }),
+    ).toThrow(/changed sequence/u);
+  });
+
+  it("rejects conflicts while events are buffered across a gap", () => {
+    const buffer = new CanonicalSequenceBuffer<TestEvent>();
+    buffer.ingest({ eventId: "future", sequence: 2, value: "future" });
+
+    expect(() =>
+      buffer.ingest({ eventId: "other", sequence: 2, value: "conflict" }),
+    ).toThrow(/conflicting event IDs/u);
+    expect(() =>
+      buffer.ingest({ eventId: "future", sequence: 3, value: "conflict" }),
+    ).toThrow(/conflicting sequences/u);
+  });
 });

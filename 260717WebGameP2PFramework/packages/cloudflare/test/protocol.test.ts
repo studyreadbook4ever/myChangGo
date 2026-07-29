@@ -26,6 +26,25 @@ describe("Cloudflare protocol boundary", () => {
     });
   });
 
+  it("accepts authoritative finish commands at the adapter boundary", () => {
+    expect(
+      parseRoomCommand(
+        JSON.stringify({
+          version: 1,
+          type: "finish",
+          idempotencyKey: "finish-key-01",
+          payload: { elapsedMs: 12_345 },
+        }),
+        limits,
+      ),
+    ).toEqual({
+      version: 1,
+      type: "finish",
+      idempotencyKey: "finish-key-01",
+      payload: { elapsedMs: 12_345 },
+    });
+  });
+
   it("rejects unknown fields before the room policy runs", () => {
     expect(() =>
       parseRoomCommand(

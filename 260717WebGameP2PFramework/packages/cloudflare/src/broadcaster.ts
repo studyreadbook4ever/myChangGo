@@ -39,6 +39,25 @@ export class DurableObjectBroadcaster implements RoomBroadcaster {
     this.#state = state;
   }
 
+  /** Binds the authenticated attachment before engine signals can target it. */
+  public activateConnection(
+    socket: WebSocket,
+    attachment: WebSocketAttachment,
+    replacedConnectionId?: string,
+  ): void {
+    socket.serializeAttachment(attachment);
+    if (replacedConnectionId === undefined) {
+      return;
+    }
+    for (const replaced of this.#state.getWebSockets(
+      `connection:${replacedConnectionId}`,
+    )) {
+      if (replaced !== socket) {
+        replaced.close(4001, "session replaced by reconnect");
+      }
+    }
+  }
+
   public send(connectionId: string, signal: RoomSignal): void {
     const encoded = JSON.stringify(signal);
     for (const socket of this.#state.getWebSockets(`connection:${connectionId}`)) {

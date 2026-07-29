@@ -48,9 +48,21 @@ export class TypedEventEmitter<Events extends EventMap> {
     }
 
     for (const listener of [...listeners]) {
-      (listener as EventListener<Events[Key]>)(payload);
+      try {
+        (listener as EventListener<Events[Key]>)(payload);
+      } catch (error) {
+        this.handleListenerError(error, event);
+      }
     }
     return true;
+  }
+
+  /** Listener failures are isolated so application code cannot break transport dispatch. */
+  protected handleListenerError(error: unknown, _event: keyof Events): void {
+    const reportError = (globalThis as typeof globalThis & {
+      reportError?: (reported: unknown) => void;
+    }).reportError;
+    reportError?.(error);
   }
 
   listenerCount<Key extends keyof Events>(event: Key): number {

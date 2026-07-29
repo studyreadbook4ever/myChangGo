@@ -1,0 +1,75 @@
+name: relayplay
+
+services:
+  relayplay:
+    build:
+      context: ../..
+      dockerfile: deploy/on-prem/Dockerfile
+      target: relayplay
+    environment:
+      NODE_ENV: production
+      RELAYPLAY_ALLOWED_ORIGINS: ${RELAYPLAY_PUBLIC_ORIGIN:?set RELAYPLAY_PUBLIC_ORIGIN}
+      RELAYPLAY_DATABASE_PATH: /data/relayplay.sqlite
+      RELAYPLAY_EXPOSE_METRICS: ${RELAYPLAY_EXPOSE_METRICS:-false}
+      RELAYPLAY_HOST: 0.0.0.0
+      RELAYPLAY_INSECURE_DEVELOPMENT: "false"
+      RELAYPLAY_MAX_CONNECTIONS: ${RELAYPLAY_MAX_CONNECTIONS:-1000}
+      RELAYPLAY_MAX_CONNECTIONS_PER_IP: ${RELAYPLAY_MAX_CONNECTIONS_PER_IP:-8}
+      RELAYPLAY_MINIMUM_PLAYERS: "2"
+      RELAYPLAY_PORT: "8080"
+      RELAYPLAY_SECURE_COOKIES: "true"
+      RELAYPLAY_TRUST_PROXY: "true"
+    expose:
+      - "8080"
+    volumes:
+      - relayplay_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8080/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/on-prem/Dockerfile
+      target: web
+    environment:
+      RELAYPLAY_SITE_ADDRESS: ${RELAYPLAY_SITE_ADDRESS:?set RELAYPLAY_SITE_ADDRESS}
+    depends_on:
+      relayplay:
+        condition: service_healthy
+    ports:
+      - "${RELAYPLAY_HTTP_PORT:-80}:80"
+      - "${RELAYPLAY_HTTPS_PORT:-443}:443"
+      - "${RELAYPLAY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  relayplay_data:
+    name: ${RELAYPLAY_DATA_VOLUME:-relayplay_data}
+  caddy_data:
+    name: ${RELAYPLAY_CADDY_DATA_VOLUME:-relayplay_caddy_data}
+  caddy_config:
+    name: ${RELAYPLAY_CADDY_CONFIG_VOLUME:-relayplay_caddy_config}

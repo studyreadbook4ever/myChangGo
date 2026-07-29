@@ -42,12 +42,25 @@ function optionalNumber(row: SqlRow, key: string): number | undefined {
   return value;
 }
 
+function optionalString(row: SqlRow, key: string): string | undefined {
+  const value = row[key];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new TypeError(`invalid persisted string column: ${key}`);
+  }
+  return value;
+}
+
 function parseJson<T>(encoded: string): T {
   return JSON.parse(encoded) as T;
 }
 
 function roomFromRow(row: SqlRow): StoredRoom {
   const startAt = optionalNumber(row, "start_at");
+  const participantIds = optionalString(row, "participant_ids_json");
+  const completedPlayerIds = optionalString(row, "completed_player_ids_json");
   return {
     roomId: requiredString(row, "room_id"),
     roomEpoch: requiredNumber(row, "room_epoch"),
@@ -56,6 +69,12 @@ function roomFromRow(row: SqlRow): StoredRoom {
     updatedAt: requiredNumber(row, "updated_at"),
     ...(startAt === undefined ? {} : { startAt }),
     lastSequence: requiredNumber(row, "last_sequence"),
+    ...(participantIds === undefined
+      ? {}
+      : { participantIds: parseJson<readonly string[]>(participantIds) }),
+    ...(completedPlayerIds === undefined
+      ? {}
+      : { completedPlayerIds: parseJson<readonly string[]>(completedPlayerIds) }),
   };
 }
 
@@ -106,7 +125,8 @@ function eventFromCommit(commit: CanonicalCommit, sequence: number): CanonicalEv
 function roomRows(sql: SqlStorage, roomId: string): SqlRow[] {
   return sql
     .exec<SqlRow>(
-      `SELECT room_id, room_epoch, status, created_at, updated_at, start_at, last_sequence
+      `SELECT room_id, room_epoch, status, created_at, updated_at, start_at, last_sequence,
+              participant_ids_json, completed_player_ids_json
        FROM relayplay_rooms WHERE room_id = ?`,
       roomId,
     )
@@ -132,9 +152,23 @@ export class CloudflareRoomStorage implements RoomStorage {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         start_at INTEGER,
-        last_sequence INTEGER NOT NULL
+        last_sequence INTEGER NOT NULL,
+        participant_ids_json TEXT,
+        completed_player_ids_json TEXT
       )
     `);
+    const roomColumns = new Set(
+      this.#sql
+        .exec<SqlRow>("PRAGMA table_info(relayplay_rooms)")
+        .toArray()
+        .map((row) => requiredString(row, "name")),
+    );
+    if (!roomColumns.has("participant_ids_json")) {
+      this.#sql.exec("ALTER TABLE relayplay_rooms ADD COLUMN participant_ids_json TEXT");
+    }
+    if (!roomColumns.has("completed_player_ids_json")) {
+      this.#sql.exec("ALTER TABLE relayplay_rooms ADD COLUMN completed_player_ids_json TEXT");
+    }
     this.#sql.exec(`
       CREATE TABLE IF NOT EXISTS relayplay_sessions (
         room_id TEXT NOT NULL,
@@ -223,15 +257,18 @@ export class CloudflareRoomStorage implements RoomStorage {
   public putRoom(room: StoredRoom): void {
     this.#sql.exec(
       `INSERT INTO relayplay_rooms
-       (room_id, room_epoch, status, created_at, updated_at, start_at, last_sequence)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+       (room_id, room_epoch, status, created_at, updated_at, start_at, last_sequence,
+        participant_ids_json, completed_player_ids_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(room_id) DO UPDATE SET
          room_epoch = excluded.room_epoch,
          status = excluded.status,
          created_at = excluded.created_at,
          updated_at = excluded.updated_at,
          start_at = excluded.start_at,
-         last_sequence = excluded.last_sequence`,
+         last_sequence = excluded.last_sequence,
+         participant_ids_json = excluded.participant_ids_json,
+         completed_player_ids_json = excluded.completed_player_ids_json`,
       room.roomId,
       room.roomEpoch,
       room.status,
@@ -239,6 +276,10 @@ export class CloudflareRoomStorage implements RoomStorage {
       room.updatedAt,
       room.startAt ?? null,
       room.lastSequence,
+      room.participantIds === undefined ? null : JSON.stringify(room.participantIds),
+      room.completedPlayerIds === undefined
+        ? null
+        : JSON.stringify(room.completedPlayerIds),
     );
   }
 
@@ -362,6 +403,9 @@ export class CloudflareRoomStorage implements RoomStorage {
       const status = commit.roomUpdate?.status ?? room.status;
       const updatedAt = commit.roomUpdate?.updatedAt ?? commit.createdAt;
       const startAt = commit.roomUpdate?.startAt ?? room.startAt ?? null;
+      const participantIds = commit.roomUpdate?.participantIds ?? room.participantIds;
+      const completedPlayerIds =
+        commit.roomUpdate?.completedPlayerIds ?? room.completedPlayerIds;
 
       this.#sql.exec(
         `INSERT INTO relayplay_events
@@ -386,12 +430,15 @@ export class CloudflareRoomStorage implements RoomStorage {
       );
       this.#sql.exec(
         `UPDATE relayplay_rooms
-         SET status = ?, updated_at = ?, start_at = ?, last_sequence = ?
+         SET status = ?, updated_at = ?, start_at = ?, last_sequence = ?,
+             participant_ids_json = ?, completed_player_ids_json = ?
          WHERE room_id = ? AND room_epoch = ?`,
         status,
         updatedAt,
         startAt,
         sequence,
+        participantIds === undefined ? null : JSON.stringify(participantIds),
+        completedPlayerIds === undefined ? null : JSON.stringify(completedPlayerIds),
         commit.roomId,
         commit.roomEpoch,
       );

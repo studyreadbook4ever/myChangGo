@@ -25,10 +25,11 @@ normalization. Numeric values outside these limits are rejected.
 | Path | Default | Allowed / meaning |
 | --- | --- | --- |
 | `protocolVersion` | `1` | fixed at `1` |
-| `room.maxPlayers` | `8` | integer `1..256` |
+| `room.maxPlayers` | `4` | integer `1..256`; the Node small-room adapter caps this at `4` |
 | `room.disconnectGraceMs` | `15000` | integer `0..300000` |
 | `room.eventLogCapacity` | `4096` | integer `1..1000000` |
 | `features.progress.enabled` | `true` | progress snapshots |
+| `features.ranking.enabled` | `false` | opt-in product ranking policy; per-room placement does not require it |
 | `features.interactions.enabled` | `true` | server-mediated intents |
 | `features.interactions.targeted` | `true` | explicit recipients |
 | `features.interactions.scheduled` | `true` | future effective time/boundary |
@@ -37,7 +38,7 @@ normalization. Numeric values outside these limits are rejected.
 | `features.evidence.replayChunks` | `false` | replay evidence messages |
 | `features.evidence.stateHashes` | `false` | state-hash evidence messages |
 | `features.verification.interactionClaims` | `false` | validator hook required by policy |
-| `features.verification.finalResults` | `false` | result verifier hook required by policy |
+| `features.verification.finalResults` | `false` | finish validator and replay verifier hooks required by policy |
 | `progress.intervalMs` | `1000` | integer `100..60000` ms |
 | `progress.broadcast` | `true` | relay accepted snapshots |
 | `time.clockMode` | `monotonic` | `monotonic`, `fixed-tick`, `audio` |
@@ -71,6 +72,13 @@ normalization. Numeric values outside these limits are rejected.
 
 Game presets may intentionally override a default—for example an audio race can
 report every 500 ms. A final explicit override always wins.
+
+All shipping game presets set `room.maxPlayers` to four. The provider-neutral
+configuration retains a wider validation range for custom adapters, but the
+self-hosted accountless harness rejects values above four. The generic core
+default enables interactions; the Node adapter's safe base profile overrides
+them off until a composition root supplies game-specific validators and
+interaction policy.
 
 ## Configuration groups
 
@@ -135,6 +143,22 @@ authenticated session policy and observed input class.
 Development may use an explicit insecure auth adapter. Production deployment
 must replace it rather than hide it behind a generic boolean.
 
+### Ranking
+
+`features.ranking.enabled` defaults to `false`. A canonical finish can still
+contain server-derived elapsed time and placement for the current match. That
+does not create a durable identity, rating, or leaderboard.
+
+Treat ranking as a separate application layer. Enabling it requires stable
+identity, a result verifier, retention/deletion policy, matchmaking rules, and
+a ranking store. `platform.crossPlay.rankedPool` only describes how an
+application could divide an already-enabled competitive pool; it does not turn
+ranking on.
+
+Guest room/invite settings, allowed origins, cookie security, database paths,
+and reverse-proxy trust belong to provider deployment configuration rather than
+this shared game configuration. See `docs/deploy-on-prem.md`.
+
 ## Preset recipes
 
 ### Progress-only live race
@@ -164,4 +188,6 @@ uncertainty.
 Validation rejects conditions such as an interaction-enabled game with no
 allowed actions, a scheduled action with no lead/boundary policy, negative time
 values, unsafe payload limits, incompatible platform/input policies, or
-production auth without an auth hook.
+production auth without an auth hook. Room policy also fails closed when
+interaction/result verification is required but the corresponding validator or
+evidence verifier is absent.

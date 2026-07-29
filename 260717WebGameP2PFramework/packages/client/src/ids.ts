@@ -1,5 +1,5 @@
 export interface ClientIdGenerator {
-  next(prefix: "ping" | "interaction" | "ready" | "evidence"): string;
+  next(prefix: "ping" | "interaction" | "ready" | "evidence" | "finish"): string;
 }
 
 let fallbackSequence = 0;
