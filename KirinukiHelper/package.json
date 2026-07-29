@@ -1,0 +1,37 @@
+{
+  "name": "chzzk-kirinuki-prompt-extension",
+  "version": "2.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "acquire:youtube": "node scripts/acquire-youtube.mjs",
+    "build": "node scripts/build-editor.mjs",
+    "caption-gateway": "node scripts/caption-gateway.mjs",
+    "caption-stack": "node scripts/local-caption-stack.mjs",
+    "caption-stack:doctor": "node scripts/local-caption-stack.mjs doctor",
+    "caption-stack:setup": "node scripts/local-caption-stack.mjs setup",
+    "caption-stack:start": "node scripts/local-caption-stack.mjs start",
+    "caption-stack:status": "node scripts/local-caption-stack.mjs status",
+    "caption-stack:stop": "node scripts/local-caption-stack.mjs stop",
+    "test": "node --test tests/*.test.js",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:export": "node scripts/media-export-e2e.mjs",
+    "test:interaction": "node scripts/editor-interaction-e2e.mjs",
+    "validate": "node scripts/validate-extension.mjs",
+    "license:check": "node scripts/check-third-party-licenses.mjs",
+    "audit": "npm audit --audit-level=high",
+    "check": "npm run build && npm run validate && npm run license:check && npm test && npm run audit",
+    "check:full": "npm run check && npm run test:browser && npm run test:interaction && npm run test:export",
+    "package": "npm run check:full && node scripts/package-extension.mjs",
+    "check:policy-links": "node scripts/check-policy-links.mjs"
+  },
+  "engines": {
+    "node": ">=20.9"
+  },
+  "dependencies": {
+    "mediabunny": "1.51.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.6"
+  }
+}
