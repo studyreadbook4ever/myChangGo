@@ -190,6 +190,11 @@ test("YouTube SPA에서는 stale og:url 대신 URL과 활성 플레이어 ID를 
   assert.equal(watchResponse.context.channelId, "");
   assert.equal(watchResponse.context.contentType, "vod");
   assert.equal(watchResponse.context.player.positionSeconds, 42.125);
+  assert.equal(
+    watchResponse.context.player.liveEdgeOffsetSeconds,
+    null,
+    "VOD의 남은 재생시간을 라이브 지연으로 노출하면 안 됩니다."
+  );
 
   activeWatchId = ids.old;
   const transitionResponse = await readContext();

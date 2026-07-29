@@ -75,6 +75,7 @@ import {
   MAX_CAPTION_AGENT_CLIPS_PER_RUN,
   MAX_CAPTION_AGENT_CUES_PER_RUN,
   captionAgentAudioFootprint,
+  captionAgentEditorialContextFingerprint,
   captionAgentResumePlan,
   captionAgentRunEstimate,
   createCaptionAgentCheckpoint,
@@ -295,7 +296,9 @@ let mediaHandle = null;
 let mediaUrl = null;
 let sourceBindingConnected = false;
 let pixelsPerSecond = 70;
-let saveTimer = null;
+let saveDispatchPending = false;
+let pendingSaveSnapshot = null;
+let projectSaveSequence = 0;
 let imageAssetPruneTimer = null;
 let toastTimer = null;
 let activeClipId = null;
@@ -438,27 +441,57 @@ function showToast(message, type = "info", timeout = 3600) {
   }
 }
 
-function scheduleSave() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    void saveProject(project)
-      .then(() => scheduleImageAssetBlobPrune())
-      .catch((error) => {
-        showToast(`프로젝트 저장 실패: ${error.message}`, "error", 0);
-      });
-  }, 180);
-}
-
-function flushSave() {
-  clearTimeout(saveTimer);
-  saveTimer = null;
-  if (!project) {
-    return Promise.resolve();
-  }
-  return saveProject(project).then((savedProject) => {
+function startProjectSnapshotSave(snapshot) {
+  const sequence = ++projectSaveSequence;
+  const operation = saveProject(snapshot).then((savedProject) => {
     scheduleImageAssetBlobPrune();
     return savedProject;
   });
+  void operation.catch((error) => {
+    if (sequence === projectSaveSequence) {
+      showToast(`프로젝트 저장 실패: ${error.message}`, "error", 0);
+    }
+  });
+  return operation;
+}
+
+function discardPendingProjectSave() {
+  pendingSaveSnapshot = null;
+  saveDispatchPending = false;
+}
+
+function dispatchPendingProjectSave() {
+  saveDispatchPending = false;
+  const snapshot = pendingSaveSnapshot;
+  pendingSaveSnapshot = null;
+  if (snapshot) {
+    startProjectSnapshotSave(snapshot);
+  }
+}
+
+function scheduleSave() {
+  if (!project) {
+    return;
+  }
+  pendingSaveSnapshot = cloneProject(project);
+  if (saveDispatchPending) {
+    return;
+  }
+  saveDispatchPending = true;
+  // A microtask runs after the current mutation event and before the next user
+  // event (including a tab-close event). Every immutable snapshot therefore
+  // creates its IndexedDB readwrite transaction in mutation order without
+  // blocking rendering on disk I/O.
+  queueMicrotask(dispatchPendingProjectSave);
+}
+
+function flushSave() {
+  if (!project) {
+    return Promise.resolve();
+  }
+  const snapshot = cloneProject(project);
+  discardPendingProjectSave();
+  return startProjectSnapshotSave(snapshot);
 }
 
 const localDraftDateFormatter = new Intl.DateTimeFormat("ko-KR", {
@@ -605,8 +638,7 @@ async function saveCurrentLocalDraft(reason, {
   if (reason !== "auto") {
     fieldEditSession = null;
   }
-  clearTimeout(saveTimer);
-  saveTimer = null;
+  discardPendingProjectSave();
   const snapshot = cloneProject(project);
   const draft = await saveLocalDraft(snapshot, {
     reason,
@@ -757,8 +789,7 @@ async function restoreSelectedLocalDraft() {
     closeTimelineContextMenu();
     lockProjectMutations();
     try {
-      clearTimeout(saveTimer);
-      saveTimer = null;
+      discardPendingProjectSave();
       await restoreLocalDraft(currentProject, draft, {
         now: Date.now(),
         id: crypto.randomUUID()
@@ -4005,6 +4036,8 @@ async function generateCaptions() {
     return;
   }
   const selectedModel = elements.caption_model.value;
+  const trustedContextFingerprint =
+    captionAgentEditorialContextFingerprint(project);
   const resumeEligible = ["running", "error", "canceled"].includes(
     project.ai?.status
   );
@@ -4012,7 +4045,10 @@ async function generateCaptions() {
     allEnabledClips,
     project.ai?.captionCheckpoints,
     selectedModel,
-    { resume: resumeEligible }
+    {
+      resume: resumeEligible,
+      editorialContextFingerprint: trustedContextFingerprint
+    }
   );
   const enabledClips = resumePlan.clips;
   if (enabledClips.length === 0 && resumePlan.skippedClipIds.length > 0) {
@@ -4223,7 +4259,8 @@ async function generateCaptions() {
           captionCheckpoints: upsertCaptionAgentCheckpoint(
             project.ai?.captionCheckpoints,
             createCaptionAgentCheckpoint(clip, model, {
-              requestId: result.requestId
+              requestId: result.requestId,
+              editorialContextFingerprint: trustedContextFingerprint
             })
           ),
           status: "running",
@@ -5694,13 +5731,30 @@ function bindActions() {
 async function loadSeed() {
   const params = new URLSearchParams(location.search);
   const requestedProjectId = params.get("project");
+  const resumeSavedSession = params.get("session") === "resume";
+  const openRecoveryDrafts = (
+    resumeSavedSession && params.get("recovery") === "drafts"
+  );
+  if (resumeSavedSession) {
+    if (!requestedProjectId) {
+      throw new Error("다시 열 편집 프로젝트 ID가 없습니다.");
+    }
+    return {
+      projectId: requestedProjectId,
+      captureState: null,
+      resumeSavedSession: true,
+      openRecoveryDrafts
+    };
+  }
   if (requestedProjectId) {
     const key = `${EDITOR_SEED_PREFIX}${requestedProjectId}`;
     const stored = await chrome.storage.local.get(key);
     if (stored[key]?.captureState) {
       return {
         projectId: requestedProjectId,
-        captureState: stored[key].captureState
+        captureState: stored[key].captureState,
+        resumeSavedSession: false,
+        openRecoveryDrafts: false
       };
     }
   }
@@ -5708,7 +5762,9 @@ async function loadSeed() {
   const captureState = stored[STORAGE_KEY] || {};
   return {
     projectId: requestedProjectId || captureProjectId(captureState),
-    captureState
+    captureState,
+    resumeSavedSession: false,
+    openRecoveryDrafts: false
   };
 }
 
@@ -5767,16 +5823,27 @@ async function initialize() {
         );
       });
   }
-  const { projectId, captureState } = await loadSeed();
+  const {
+    projectId,
+    captureState,
+    resumeSavedSession,
+    openRecoveryDrafts
+  } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;
   if (storedProject) {
-    try {
-      project = mergeCaptureIntoEditorProject(storedProject, captureState);
-    } catch (error) {
+    if (resumeSavedSession) {
       project = storedProject;
-      seedMergeError = error;
+    } else {
+      try {
+        project = mergeCaptureIntoEditorProject(storedProject, captureState);
+      } catch (error) {
+        project = storedProject;
+        seedMergeError = error;
+      }
     }
+  } else if (resumeSavedSession) {
+    throw new Error("이 기기에서 다시 열 편집 프로젝트를 찾지 못했습니다.");
   } else {
     project = createEditorProjectFromCapture(captureState, { id: projectId });
   }
@@ -5830,6 +5897,9 @@ async function initialize() {
     elements.local_draft_status.textContent = "임시저장 목록 확인 실패";
   }
   startLocalDraftAutosave();
+  if (openRecoveryDrafts) {
+    await openLocalDraftDialog();
+  }
 }
 
 function applyCaptureSeedUpdate(captureState) {
@@ -6039,6 +6109,11 @@ chrome.runtime.onMessage.addListener((message) => {
     } else {
       applyCaptureSeedUpdate(message.captureState);
     }
+  } else if (
+    message?.type === "KIRINUKI_OPEN_RECOVERY_DRAFTS" &&
+    message.projectId === project?.id
+  ) {
+    void openLocalDraftDialog();
   }
 });
 

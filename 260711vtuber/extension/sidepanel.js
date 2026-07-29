@@ -22,11 +22,18 @@ import {
 import {
   SOURCE_PLATFORM_YOUTUBE,
   isSupportedSourceUrl,
+  selectSupportedSourceTab,
+  sourcePlayerStatusText,
   sourcePlatformLabel
 } from "./lib/source-platform.js";
 
 const elements = {
   connectionBadge: document.querySelector("#connection-badge"),
+  refreshRecoverySessions: document.querySelector("#refresh-recovery-sessions"),
+  recoverySessionsLoading: document.querySelector("#recovery-sessions-loading"),
+  recoverySessionsEmpty: document.querySelector("#recovery-sessions-empty"),
+  recoverySessionsList: document.querySelector("#recovery-sessions-list"),
+  recoverySessionTemplate: document.querySelector("#recovery-session-template"),
   refreshSource: document.querySelector("#refresh-source"),
   sourceEmpty: document.querySelector("#source-empty"),
   sourceDetails: document.querySelector("#source-details"),
@@ -87,6 +94,16 @@ const panelWriterId = crypto.randomUUID();
 let dirtyFieldSequence = 0;
 const dirtyFields = new Map();
 let lastPersistedStateSignature = "";
+let recoveryLoadSequence = 0;
+let recoveryOpenInProgress = false;
+
+const recoveryDateFormatter = new Intl.DateTimeFormat("ko-KR", {
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit"
+});
 
 const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -99,6 +116,144 @@ function setStatus(message, type = "info", timeout = 4200) {
     statusTimer = setTimeout(() => {
       elements.statusBar.hidden = true;
     }, timeout);
+  }
+}
+
+function recoveryDraftReasonLabel(reason) {
+  return {
+    manual: "수동 저장",
+    auto: "자동 저장",
+    "pre-restore": "복원 직전 저장"
+  }[reason] || "임시저장";
+}
+
+function recoveryCountsLabel(counts = {}) {
+  return [
+    `컷 ${Number(counts.clips) || 0}`,
+    `자막 ${Number(counts.subtitles) || 0}`,
+    `에셋 ${Number(counts.assets) || 0}`,
+    `음성 ${Number(counts.audio) || 0}`
+  ].join(" · ");
+}
+
+function renderRecoverySessions(sessions) {
+  const fragment = document.createDocumentFragment();
+  for (const session of sessions) {
+    const item = elements.recoverySessionTemplate.content
+      .firstElementChild
+      .cloneNode(true);
+    item.dataset.projectId = session.projectId;
+    item.dataset.draftCount = String(session.draftCount || 0);
+    item.querySelector(".recovery-session-title").textContent = session.title;
+    const time = item.querySelector(".recovery-session-time");
+    if (session.updatedAt) {
+      time.dateTime = session.updatedAt;
+      time.textContent = `최근 편집 ${recoveryDateFormatter.format(
+        new Date(session.updatedAt)
+      )}`;
+    } else {
+      time.textContent = "최근 편집 시각 정보 없음";
+    }
+    item.querySelector(".recovery-session-counts").textContent = (
+      recoveryCountsLabel(session.counts)
+    );
+    const draftCount = Number(session.draftCount) || 0;
+    const drafts = item.querySelector(".recovery-session-drafts");
+    drafts.textContent = draftCount > 0
+      ? `복구본 ${draftCount}개 · 최신 ${recoveryDraftReasonLabel(
+        session.latestDraftReason
+      )}`
+      : "아직 선택할 복구본 없음";
+    const draftButton = item.querySelector('[data-recovery-action="drafts"]');
+    draftButton.disabled = draftCount === 0;
+    draftButton.title = draftCount > 0
+      ? "최근 임시저장 중 하나를 골라 불러오기"
+      : "이 프로젝트에는 아직 임시저장이 없습니다.";
+    fragment.append(item);
+  }
+  elements.recoverySessionsList.replaceChildren(fragment);
+  elements.recoverySessionsEmpty.hidden = sessions.length > 0;
+}
+
+async function refreshRecoverySessions({ silent = false } = {}) {
+  const requestSequence = ++recoveryLoadSequence;
+  elements.refreshRecoverySessions.disabled = true;
+  if (!silent || elements.recoverySessionsList.children.length === 0) {
+    elements.recoverySessionsLoading.hidden = false;
+    elements.recoverySessionsLoading.textContent = "저장된 편집을 확인하는 중…";
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "KIRINUKI_LIST_RECOVERY_SESSIONS"
+    });
+    if (requestSequence !== recoveryLoadSequence) {
+      return;
+    }
+    if (!response?.ok || !Array.isArray(response.sessions)) {
+      throw new Error(response?.error || "저장된 편집 목록을 읽지 못했습니다.");
+    }
+    renderRecoverySessions(response.sessions);
+    elements.recoverySessionsLoading.hidden = true;
+  } catch (error) {
+    if (requestSequence !== recoveryLoadSequence) {
+      return;
+    }
+    elements.recoverySessionsLoading.hidden = false;
+    elements.recoverySessionsLoading.textContent = (
+      `저장된 편집 확인 실패 · ${error.message}`
+    );
+    if (!silent) {
+      setStatus(`최근 편집을 확인하지 못했습니다: ${error.message}`, "error");
+    }
+  } finally {
+    if (requestSequence === recoveryLoadSequence) {
+      elements.refreshRecoverySessions.disabled = false;
+    }
+  }
+}
+
+async function openSavedEditor(projectId, { recoveryDrafts = false } = {}) {
+  if (recoveryOpenInProgress) {
+    return;
+  }
+  const item = [...elements.recoverySessionsList.children].find(
+    (candidate) => candidate.dataset.projectId === projectId
+  );
+  if (!item) {
+    setStatus("다시 열 프로젝트를 목록에서 찾지 못했습니다.", "error");
+    return;
+  }
+  recoveryOpenInProgress = true;
+  item.classList.add("is-opening");
+  for (const button of item.querySelectorAll("button")) {
+    button.disabled = true;
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "KIRINUKI_OPEN_SAVED_EDITOR",
+      projectId,
+      recovery: recoveryDrafts ? "drafts" : "current"
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || "저장된 편집기를 열지 못했습니다.");
+    }
+    setStatus(
+      recoveryDrafts
+        ? "편집기를 열고 복구본 목록을 표시했습니다."
+        : "마지막 저장 상태로 편집기를 열었습니다.",
+      "success"
+    );
+  } catch (error) {
+    setStatus(`편집기를 다시 열지 못했습니다: ${error.message}`, "error", 0);
+  } finally {
+    recoveryOpenInProgress = false;
+    item.classList.remove("is-opening");
+    for (const button of item.querySelectorAll("button")) {
+      button.disabled = (
+        button.dataset.recoveryAction === "drafts"
+        && Number(item.dataset.draftCount) === 0
+      );
+    }
   }
 }
 
@@ -486,20 +641,7 @@ function renderSource() {
   elements.playerPosition.textContent = Number.isFinite(player.positionSeconds)
     ? formatTimestamp(player.positionSeconds)
     : "--:--:--";
-  if (!player.found) {
-    elements.playerStatus.textContent = "영상 플레이어 미검출";
-  } else if (player.adActive) {
-    elements.playerStatus.textContent = "YouTube 광고 재생 중 · 스탬프 일시 중지";
-  } else {
-    const playback = player.paused ? "일시정지" : "재생 중";
-    const liveEdge = Number.isFinite(player.liveEdgeOffsetSeconds)
-      ? ` · 라이브 지연 ${player.liveEdgeOffsetSeconds.toFixed(1)}초`
-      : "";
-    const clipState = typeof currentContext.clipActive === "boolean"
-      ? ` · 클립 ${currentContext.clipActive ? "허용" : "미허용"}`
-      : "";
-    elements.playerStatus.textContent = `${playback}${liveEdge}${clipState}`;
-  }
+  elements.playerStatus.textContent = sourcePlayerStatusText(currentContext);
 
   if (sourceConflict) {
     setConnectionBadge("다른 원본", "badge-policy");
@@ -513,9 +655,14 @@ function renderSource() {
 }
 
 async function getActiveSourceTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  const tab = selectSupportedSourceTab(tabs, {
+    expectedSource: state.source
+  });
   if (!tab?.id || !isSupportedSourceUrl(tab.url)) {
-    throw new Error("현재 탭에서 치지직 또는 YouTube 영상을 열어 주세요.");
+    throw new Error(
+      "치지직·YouTube 영상 탭을 활성화하거나 저장된 원본 페이지를 다시 열어 주세요."
+    );
   }
   return tab;
 }
@@ -1201,6 +1348,20 @@ function bindInputPersistence() {
 }
 
 function bindActions() {
+  elements.refreshRecoverySessions.addEventListener(
+    "click",
+    () => void refreshRecoverySessions()
+  );
+  elements.recoverySessionsList.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-recovery-action]");
+    const item = event.target.closest(".recovery-session");
+    if (!button || !item || button.disabled) {
+      return;
+    }
+    void openSavedEditor(item.dataset.projectId, {
+      recoveryDrafts: button.dataset.recoveryAction === "drafts"
+    });
+  });
   elements.refreshSource.addEventListener("click", () => void refreshSource());
   elements.captureStart.addEventListener("click", () => void captureCurrentPosition("start"));
   elements.captureEnd.addEventListener("click", () => void captureCurrentPosition("end"));
@@ -1243,6 +1404,7 @@ function bindActions() {
 async function initialize() {
   bindInputPersistence();
   bindActions();
+  const recoveryLoad = refreshRecoverySessions();
   try {
     await Promise.all([loadState(), loadKnowledge()]);
     syncStateToForm();
@@ -1252,6 +1414,7 @@ async function initialize() {
   } catch (error) {
     setStatus(`Extension 초기화 실패: ${error.message}`, "error", 0);
   }
+  await recoveryLoad;
 
   refreshTimer = setInterval(() => {
     if (!document.hidden) {
@@ -1274,6 +1437,8 @@ document.addEventListener("visibilitychange", () => {
         setStatus(`저장 실패: ${error.message}`, "error");
       }
     });
+  } else {
+    void refreshRecoverySessions({ silent: true });
   }
 });
 

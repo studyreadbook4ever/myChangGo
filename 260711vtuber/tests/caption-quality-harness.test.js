@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CAPTION_HARNESS_FINGERPRINT,
   CAPTION_QUALITY_PROFILE_ID,
   KR_VTUBER_CLEAN_PROFILE,
   canonicalTimedTranscript,
@@ -159,6 +160,101 @@ test("timed transcript를 ms로 정규화하고 범위·중복·종결 마침표
   ));
 });
 
+test("segment 문장을 보존하면서 word를 중복 본문이 아닌 실제 경계 anchor로 결합한다", () => {
+  const canonical = canonicalTimedTranscript({
+    text: "안녕하세요 여러분",
+    segments: [{
+      startMs: 100,
+      endMs: 1_900,
+      text: "안녕하세요 여러분",
+      speaker: "카린"
+    }],
+    words: [{
+      startMs: 100,
+      endMs: 800,
+      text: "안녕하세요"
+    }, {
+      startMs: 1_000,
+      endMs: 1_900,
+      text: "여러분"
+    }]
+  }, {
+    clipDurationMs: 2_000,
+    editorialContext: {
+      schema: "kr-vtuber-editorial-context/v1",
+      glossary: [],
+      speakers: [{
+        id: "main",
+        aliases: ["main", "카린", "karin"]
+      }],
+      style: {
+        terminalPeriod: "omit",
+        placement: "bottom",
+        maxWidthUnits: 20,
+        examples: []
+      }
+    }
+  });
+
+  assert.deepEqual(canonical.units, [{
+    startMs: 100,
+    endMs: 1_900,
+    text: "안녕하세요 여러분",
+    speakerId: "main",
+    wordAnchors: [[100, 800], [1_000, 1_900]]
+  }]);
+  assert.equal(canonical.wordUnits.length, 2);
+  assert.deepEqual(canonical.anchorCoverage, {
+    segmentTextCoverage: 1,
+    wordTextPrecision: 1
+  });
+  assert.equal(
+    canonical.warnings.some(
+      ({ code }) => code === "HARNESS_WORD_ANCHOR_COVERAGE_LOW"
+    ),
+    false
+  );
+});
+
+test("긴 cue 분할 시 균등 나눗셈 대신 실제 STT word 경계를 사용한다", () => {
+  const text = "안녕하세요 여러분 오늘도 정말 너무너무 반가워요 친구들";
+  const words = [
+    "안녕하세요",
+    "여러분",
+    "오늘도",
+    "정말",
+    "너무너무",
+    "반가워요",
+    "친구들"
+  ];
+  const repaired = repairCaptionDraft([{
+    startMs: 0,
+    endMs: 6_000,
+    text,
+    speakerId: "main",
+    reviewRequired: false,
+    placement: "bottom"
+  }], {
+    clipDurationMs: 6_000,
+    transcript: {
+      segments: [{ startMs: 0, endMs: 6_000, text }],
+      words: words.map((word, index) => ({
+        startMs: index * 800,
+        endMs: index * 800 + 700,
+        text: word
+      }))
+    }
+  });
+
+  assert.equal(repaired.harnessFingerprint, CAPTION_HARNESS_FINGERPRINT);
+  assert.equal(repaired.cues.length, 2);
+  assert.equal(repaired.cues[0].endMs, 2_350);
+  assert.equal(repaired.cues[1].startMs, 2_350);
+  assert(repaired.warnings.some(
+    ({ code }) => code === "HARNESS_ALIGNED_SPLIT_TO_WORD_BOUNDARY"
+  ));
+});
+
 test("Solar 초안을 발화 삭제 없이 한 줄 cue로 분할하고 시간·속도·겹침을 보정한다", () => {
   const clipDurationMs = 12_000;
   const rawCues = [
@@ -279,6 +375,8 @@ test("평가기는 transcript 누락·환각, 과속, 여러 줄과 같은 hard 
   const codes = new Set(report.violations.map(({ code }) => code));
 
   assert.equal(report.valid, false);
+  assert.equal(report.disposition, "rejected");
+  assert.equal(report.cueReviews[0].status, "rejected");
   assert(codes.has("HARNESS_TERMINAL_PERIOD"));
   assert(codes.has("HARNESS_TOO_MANY_LINES"));
   assert(codes.has("HARNESS_READING_RATE_EXCEEDED"));

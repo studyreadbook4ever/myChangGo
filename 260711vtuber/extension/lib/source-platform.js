@@ -53,6 +53,55 @@ export function isSupportedSourceUrl(value) {
   return Boolean(sourcePlatformFromUrl(value));
 }
 
+function sameSourceIdentity(left, right) {
+  if (!left?.platform || !right?.platform || left.platform !== right.platform) {
+    return false;
+  }
+  if (left.contentId || right.contentId) {
+    return Boolean(
+      left.contentId
+      && right.contentId
+      && left.contentId === right.contentId
+    );
+  }
+  return Boolean(
+    left.channelId
+    && right.channelId
+    && left.channelId === right.channelId
+    && left.contentType === right.contentType
+  );
+}
+
+export function selectSupportedSourceTab(tabs, {
+  expectedSource = null
+} = {}) {
+  const candidates = (Array.isArray(tabs) ? tabs : [])
+    .filter((tab) => (
+      Number.isInteger(tab?.id)
+      && isSupportedSourceUrl(tab?.url)
+    ));
+  const active = candidates.find((tab) => tab.active === true);
+  if (active) {
+    return active;
+  }
+
+  const expectedUrl = String(
+    expectedSource?.canonicalUrl || expectedSource?.url || ""
+  ).trim();
+  const expectedIdentity = inferSourceIdentifiers(expectedUrl);
+  if (expectedIdentity.platform) {
+    const matches = candidates.filter((tab) => sameSourceIdentity(
+      inferSourceIdentifiers(tab.url),
+      expectedIdentity
+    ));
+    if (matches.length === 1) {
+      return matches[0];
+    }
+  }
+
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
 function youtubeVideoId(value) {
   const candidate = String(value || "").trim();
   return YOUTUBE_VIDEO_ID_PATTERN.test(candidate) ? candidate : "";
@@ -187,4 +236,25 @@ export function canonicalSourceUrl(value, identifiers = null) {
 
 export function sourcePlatformLabel(platform) {
   return platform === SOURCE_PLATFORM_YOUTUBE ? "YouTube" : "치지직";
+}
+
+export function sourcePlayerStatusText(context) {
+  const player = context?.player || {};
+  if (!player.found) {
+    return "영상 플레이어 미검출";
+  }
+  if (player.adActive) {
+    return "YouTube 광고 재생 중 · 스탬프 일시 중지";
+  }
+  const parts = [player.paused ? "일시정지" : "재생 중"];
+  if (
+    context?.contentType === "live"
+    && Number.isFinite(player.liveEdgeOffsetSeconds)
+  ) {
+    parts.push(`라이브 지연 ${player.liveEdgeOffsetSeconds.toFixed(1)}초`);
+  }
+  if (typeof context?.clipActive === "boolean") {
+    parts.push(`클립 ${context.clipActive ? "허용" : "미허용"}`);
+  }
+  return parts.join(" · ");
 }

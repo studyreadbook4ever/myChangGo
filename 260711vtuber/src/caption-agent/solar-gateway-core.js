@@ -9,10 +9,15 @@ import {
   validateCaptionAgentRequest
 } from "./protocol.js";
 import {
+  CAPTION_HARNESS_FINGERPRINT,
   CAPTION_QUALITY_PROFILE_ID,
   canonicalTimedTranscript,
+  evaluateCaptionDraft,
   repairCaptionDraft
 } from "./caption-quality-harness.js";
+import {
+  captionEditorialContextFingerprint
+} from "./editorial-context.js";
 
 export const UPSTAGE_CHAT_COMPLETIONS_URL =
   "https://api.upstage.ai/v1/chat/completions";
@@ -762,8 +767,18 @@ export function buildSolarCaptionUserPrompt(request, transcript) {
   const canonical = Array.isArray(transcript?.units)
     ? transcript
     : canonicalTimedTranscript(transcript, {
-      clipDurationMs: request.clipDurationMs
+      clipDurationMs: request.clipDurationMs,
+      editorialContext: request.editorialContext
     });
+  const timedUnits = canonical.units.map((unit) => ({
+    startMs: unit.startMs,
+    endMs: unit.endMs,
+    text: unit.text,
+    speakerId: unit.speakerId,
+    ...(Array.isArray(unit.wordAnchors) && unit.wordAnchors.length > 0
+      ? { wordAnchors: unit.wordAnchors }
+      : {})
+  }));
   const prompt = JSON.stringify({
     instruction: [
       "timedUnits만 근거로 발화의 맞춤법·말맛·화자를 정리해",
@@ -773,14 +788,19 @@ export function buildSolarCaptionUserPrompt(request, transcript) {
       "시각 스타일은 로컬 품질 하네스가 결정하므로 꾸밈 지시를 만들지 마세요."
     ].join(" "),
     qualityProfile: CAPTION_QUALITY_PROFILE_ID,
+    harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
     clipDurationMs: request.clipDurationMs,
     context: {
       projectName: request.projectName,
       streamerName: request.streamerName,
       clipNote: request.clipNote
     },
+    editorialContext: request.editorialContext,
+    editorialContextFingerprint: captionEditorialContextFingerprint(
+      request.editorialContext
+    ),
     visualPlacement: request.visualPlacement,
-    timedUnits: canonical.units
+    timedUnits
   });
   if (Buffer.byteLength(prompt) > MAX_SOLAR_PROMPT_BYTES) {
     throw new CaptionGatewayError("Solar 자막 프롬프트가 허용 상한을 넘었습니다.", {
@@ -878,7 +898,8 @@ export async function requestSolarCaptions(request, transcript, {
     httpStatus: 400
   });
   const canonicalTranscript = canonicalTimedTranscript(transcript, {
-    clipDurationMs: request.clipDurationMs
+    clipDurationMs: request.clipDurationMs,
+    editorialContext: request.editorialContext
   });
   const apiKey = providerApiKey(
     upstageApiKey,
@@ -968,11 +989,61 @@ export async function requestSolarCaptions(request, transcript, {
       const repaired = repairCaptionDraft(normalized.cues, {
         clipDurationMs: request.clipDurationMs,
         transcript: canonicalTranscript,
-        visualPlacement: request.visualPlacement
+        visualPlacement: request.visualPlacement,
+        editorialContext: request.editorialContext
       });
       const finalized = normalizeCaptionCuesDetailed(repaired.cues, {
         clipDurationMs: request.clipDurationMs
       });
+      const finalEvaluation = evaluateCaptionDraft(finalized.cues, {
+        clipDurationMs: request.clipDurationMs,
+        transcript: canonicalTranscript,
+        visualPlacement: request.visualPlacement,
+        editorialContext: request.editorialContext
+      });
+      const anchorCoverageLow = canonicalTranscript.warnings.some(
+        ({ code }) => code === "HARNESS_WORD_ANCHOR_COVERAGE_LOW"
+      );
+      const qualityReport = anchorCoverageLow
+        ? {
+          ...finalEvaluation,
+          valid: false,
+          disposition: finalEvaluation.disposition === "rejected"
+            ? "rejected"
+            : "review-required",
+          violations: [
+            ...finalEvaluation.violations,
+            ...finalEvaluation.cueReviews
+              .filter((review) => !review.codes.includes(
+                "HARNESS_WORD_ANCHOR_COVERAGE_LOW"
+              ))
+              .map((review) => ({
+                code: "HARNESS_WORD_ANCHOR_COVERAGE_LOW",
+                cueIndex: review.cueIndex,
+                severity: "error"
+              }))
+          ],
+          cueReviews: finalEvaluation.cueReviews.map((review) => ({
+            ...review,
+            status: review.status === "rejected"
+              ? "rejected"
+              : "review-required",
+            codes: [...new Set([
+              ...review.codes,
+              "HARNESS_WORD_ANCHOR_COVERAGE_LOW"
+            ])]
+          }))
+        }
+        : finalEvaluation;
+      if (qualityReport.disposition === "rejected") {
+        throw new CaptionGatewayError(
+          "로컬 품질 하네스가 구조 계약을 만족하지 못한 Solar 결과를 격리했습니다. 유료 자동 재호출은 하지 않았습니다.",
+          {
+            code: "CAPTION_QUALITY_GATE_FAILED",
+            httpStatus: 422
+          }
+        );
+      }
       if (
         transcriptHasRecognizableContent(transcript)
         && finalized.cues.length === 0
@@ -982,21 +1053,45 @@ export async function requestSolarCaptions(request, transcript, {
           { code: "EMPTY_SOLAR_CAPTIONS" }
         );
       }
+      const reviewsByCue = new Map(
+        qualityReport.cueReviews.map((review) => [
+          review.cueIndex,
+          review
+        ])
+      );
+      const qualityCues = finalized.cues.map((cue, cueIndex) => {
+        const review = reviewsByCue.get(cueIndex);
+        const status = review?.status === "review-required"
+          ? "review-required"
+          : "accepted";
+        return {
+          ...cue,
+          reviewRequired: cue.reviewRequired || status === "review-required",
+          quality: {
+            status,
+            codes: (review?.codes || []).slice(0, 32)
+          }
+        };
+      });
       responseFormatCache?.set?.(selectedModel, attempt);
       return {
-        cues: finalized.cues,
+        cues: qualityCues,
         warnings: boundedCaptionWarnings(
           canonicalTranscript.warnings,
           normalized.warnings,
           repaired.warnings,
           finalized.warnings,
-          repaired.report.violations.map(({ code, cueIndex }) => ({
+          qualityReport.violations.map(({ code, cueIndex }) => ({
             code,
             cueIndex
           }))
         ),
         qualityProfile: repaired.profileId,
-        qualityReport: repaired.report,
+        harnessFingerprint: repaired.harnessFingerprint,
+        qualityReport,
+        editorialContextFingerprint: captionEditorialContextFingerprint(
+          request.editorialContext
+        ),
         resolvedModel: String(payload.json.model || selectedModel)
       };
     } catch (error) {
@@ -1078,7 +1173,30 @@ export async function runCaptionPipeline(rawRequest, {
         warnings: [{
           code: "NO_RECOGNIZABLE_SPEECH",
           cueIndex: 0
-        }]
+        }],
+        qualityReport: {
+          profileId: CAPTION_QUALITY_PROFILE_ID,
+          harnessFingerprint: CAPTION_HARNESS_FINGERPRINT,
+          valid: true,
+          disposition: "review-required",
+          violations: [{
+            code: "NO_RECOGNIZABLE_SPEECH",
+            cueIndex: 0,
+            severity: "warning"
+          }],
+          cueReviews: [],
+          metrics: {
+            cueCount: 0,
+            maximumDurationMs: 0,
+            maximumLineWidthUnits: 0,
+            maximumTotalWidthUnits: 0,
+            maximumReadingRate: 0,
+            transcriptCoverage: null,
+            transcriptPrecision: null,
+            wordAnchorCoverage: null,
+            placement: "bottom"
+          }
+        }
       });
     }
     const result = await requestSolarCaptions(request, transcript, {
@@ -1094,7 +1212,10 @@ export async function runCaptionPipeline(rawRequest, {
       captionModel,
       resolvedModel: result.resolvedModel,
       cues: result.cues,
-      warnings: result.warnings
+      warnings: result.warnings,
+      qualityProfile: result.qualityProfile,
+      harnessFingerprint: result.harnessFingerprint,
+      qualityReport: result.qualityReport
     });
   } catch (error) {
     if (

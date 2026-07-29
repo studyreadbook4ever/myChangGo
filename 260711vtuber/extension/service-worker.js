@@ -13,9 +13,16 @@ import {
   isSupportedSourceUrl,
   sourcePlatformFromUrl
 } from "./lib/source-platform.js";
+import {
+  buildRecoverySessionSummaries,
+  buildSavedEditorUrl,
+  editorTabMatchesProject
+} from "./lib/session-recovery.js";
 
 const BINDINGS_KEY = "chzzkKirinukiSourceBindingsV1";
 const LEGACY_TRANSFORMERS_CACHE_NAME = "transformers-cache";
+const EDITOR_PROJECTS_STORE = "projects";
+const EDITOR_LOCAL_DRAFTS_STORE = "local-drafts";
 let workspaceOperationQueue = Promise.resolve();
 
 function queueWorkspaceOperation(operation) {
@@ -153,6 +160,114 @@ async function sourceTabExists(binding) {
   }
 }
 
+async function openExistingEditorDatabase() {
+  if (
+    typeof indexedDB === "undefined"
+    || typeof indexedDB.open !== "function"
+  ) {
+    return null;
+  }
+  if (typeof indexedDB.databases === "function") {
+    try {
+      const databases = await indexedDB.databases();
+      if (!databases.some((entry) => entry.name === EDITOR_DATABASE_NAME)) {
+        return null;
+      }
+    } catch {
+      // Opening with an aborted upgrade below is still safe when enumeration
+      // is unavailable or temporarily fails.
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(EDITOR_DATABASE_NAME);
+    let rejectedCreation = false;
+    request.onupgradeneeded = () => {
+      rejectedCreation = true;
+      request.transaction?.abort();
+    };
+    request.onerror = () => {
+      if (rejectedCreation || request.error?.name === "AbortError") {
+        resolve(null);
+        return;
+      }
+      reject(request.error || new Error("저장된 편집 세션을 확인하지 못했습니다."));
+    };
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+async function readEditorRecoveryRecords() {
+  const database = await openExistingEditorDatabase();
+  if (!database) {
+    return { projects: [], drafts: [] };
+  }
+  try {
+    if (!database.objectStoreNames.contains(EDITOR_PROJECTS_STORE)) {
+      return { projects: [], drafts: [] };
+    }
+    const storeNames = [EDITOR_PROJECTS_STORE];
+    if (database.objectStoreNames.contains(EDITOR_LOCAL_DRAFTS_STORE)) {
+      storeNames.push(EDITOR_LOCAL_DRAFTS_STORE);
+    }
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction(storeNames, "readonly");
+      const projectRequest = transaction
+        .objectStore(EDITOR_PROJECTS_STORE)
+        .getAll();
+      const draftRequest = storeNames.includes(EDITOR_LOCAL_DRAFTS_STORE)
+        ? transaction.objectStore(EDITOR_LOCAL_DRAFTS_STORE).getAll()
+        : null;
+      transaction.oncomplete = () => resolve({
+        projects: Array.isArray(projectRequest.result)
+          ? projectRequest.result
+          : [],
+        drafts: Array.isArray(draftRequest?.result)
+          ? draftRequest.result
+          : []
+      });
+      transaction.onerror = () => reject(
+        transaction.error || new Error("저장된 편집 세션을 읽지 못했습니다.")
+      );
+      transaction.onabort = () => reject(
+        transaction.error || new Error("저장된 편집 세션 읽기가 중단되었습니다.")
+      );
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function listRecoverySessions() {
+  const { projects, drafts } = await readEditorRecoveryRecords();
+  return buildRecoverySessionSummaries(projects, drafts);
+}
+
+async function focusProjectEditor(projectId, {
+  editorUrl,
+  openRecoveryDrafts = false
+}) {
+  const editorRoot = chrome.runtime.getURL("editor.html");
+  const tabs = await chrome.tabs.query({});
+  const existing = tabs.find((tab) => (
+    editorTabMatchesProject(tab.url, editorRoot, projectId)
+  ));
+  if (existing?.id) {
+    await chrome.tabs.update(existing.id, { active: true });
+    if (Number.isInteger(existing.windowId)) {
+      await chrome.windows.update(existing.windowId, { focused: true });
+    }
+    if (openRecoveryDrafts) {
+      await chrome.runtime.sendMessage({
+        type: "KIRINUKI_OPEN_RECOVERY_DRAFTS",
+        projectId
+      }).catch(() => {});
+    }
+    return { tabId: existing.id, reused: true };
+  }
+  const created = await chrome.tabs.create({ url: editorUrl, active: true });
+  return { tabId: created.id, reused: false };
+}
+
 async function openEditor(message) {
   const { projectId, sourceTabId, captureState } = message;
   if (!projectId || !Number.isInteger(sourceTabId) || !captureState) {
@@ -178,23 +293,33 @@ async function openEditor(message) {
   ]);
 
   const editorUrl = chrome.runtime.getURL(`editor.html?project=${encodeURIComponent(projectId)}`);
-  const editorRoot = chrome.runtime.getURL("editor.html");
-  const tabs = await chrome.tabs.query({});
-  const existing = tabs.find((tab) => tab.url?.startsWith(editorRoot) && new URL(tab.url).searchParams.get("project") === projectId);
-  if (existing?.id) {
-    await chrome.tabs.update(existing.id, { active: true });
-    if (Number.isInteger(existing.windowId)) {
-      await chrome.windows.update(existing.windowId, { focused: true });
-    }
+  const opened = await focusProjectEditor(projectId, { editorUrl });
+  if (opened.reused) {
     await chrome.runtime.sendMessage({
       type: "KIRINUKI_CAPTURE_SEED_UPDATED",
       projectId,
       captureState
     }).catch(() => {});
-    return existing.id;
   }
-  const created = await chrome.tabs.create({ url: editorUrl, active: true });
-  return created.id;
+  return opened.tabId;
+}
+
+async function openSavedEditor(message) {
+  const projectId = String(message.projectId || "").trim();
+  const { projects } = await readEditorRecoveryRecords();
+  if (!projects.some((project) => String(project?.id || "") === projectId)) {
+    throw new Error("이 기기에서 다시 열 편집 프로젝트를 찾지 못했습니다.");
+  }
+  const recoveryDrafts = message.recovery === "drafts";
+  const editorRoot = chrome.runtime.getURL("editor.html");
+  const editorUrl = buildSavedEditorUrl(editorRoot, projectId, {
+    recoveryDrafts
+  });
+  const opened = await focusProjectEditor(projectId, {
+    editorUrl,
+    openRecoveryDrafts: recoveryDrafts
+  });
+  return opened.tabId;
 }
 
 async function closeEditorTabs() {
@@ -305,6 +430,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         error: error.message,
         workspaceMeta: error.workspaceMeta
       }));
+    return true;
+  }
+
+  if (message.type === "KIRINUKI_LIST_RECOVERY_SESSIONS") {
+    void listRecoverySessions()
+      .then((sessions) => sendResponse({ ok: true, sessions }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "KIRINUKI_OPEN_SAVED_EDITOR") {
+    void queueWorkspaceOperation(() => openSavedEditor(message))
+      .then((editorTabId) => sendResponse({ ok: true, editorTabId }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 

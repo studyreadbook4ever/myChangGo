@@ -147,7 +147,10 @@ for (const id of [
   "open-editor",
   "generate-prompt",
   "copy-prompt",
-  "download-prompt"
+  "download-prompt",
+  "refresh-recovery-sessions",
+  "recovery-sessions-list",
+  "recovery-session-template"
 ]) {
   assert(html.includes(`id="${id}"`), `필수 UI 요소가 없습니다: #${id}`);
 }
@@ -161,6 +164,11 @@ assert(panelScript.includes("creator-policy-index.json"), "Codex 작업폴더에
 assert(panelScript.includes("writePolicyCacheFiles"), "선택 정책 캐시를 별도 파일로 쓰는 로직이 없습니다.");
 assert(panelScript.includes("showDirectoryPicker"), "Codex 작업 폴더 선택 로직이 없습니다.");
 assert(panelScript.includes("KIRINUKI_OPEN_EDITOR"), "사이드패널에서 통합 편집기를 열지 않습니다.");
+assert(
+  panelScript.includes("KIRINUKI_LIST_RECOVERY_SESSIONS")
+    && panelScript.includes("KIRINUKI_OPEN_SAVED_EDITOR"),
+  "사이드패널에서 닫힌 편집 세션 목록을 읽고 다시 여는 경로가 없습니다."
+);
 assert(panelScript.includes("captureStateSourceConflict"), "서로 다른 방송의 캡처 구간 혼합 방지가 없습니다.");
 const saveSegmentSource = panelScript.slice(
   panelScript.indexOf("async function saveSegment()"),
@@ -197,6 +205,12 @@ assert(serviceWorker.includes("sourceSessionIdentity"), "서비스 워커가 방
 assert(serviceWorker.includes("KIRINUKI_GET_CONTEXT"), "서비스 워커가 현재 치지직 탭 문맥을 재검증하지 않습니다.");
 assert(serviceWorker.includes("KIRINUKI_RESET_BINDINGS"), "서비스 워커에 source binding 초기화가 없습니다.");
 assert(serviceWorker.includes("KIRINUKI_PERSIST_STATE"), "서비스 워커에 프로젝트 저장 직렬화가 없습니다.");
+assert(
+  serviceWorker.includes("KIRINUKI_LIST_RECOVERY_SESSIONS")
+    && serviceWorker.includes("KIRINUKI_OPEN_SAVED_EDITOR")
+    && serviceWorker.includes("buildSavedEditorUrl"),
+  "서비스 워커에 projectId 기반 저장 세션 복구 경로가 없습니다."
+);
 assert(serviceWorker.includes("queueWorkspaceOperation"), "저장·열기·초기화 공용 직렬화 큐가 없습니다.");
 assert(serviceWorker.includes("indexedDB.deleteDatabase"), "편집 프로젝트 초기화 경로가 없습니다.");
 assert(
@@ -307,6 +321,16 @@ assert(
     editorScript.includes("restoreLocalDraft") &&
     editorScript.includes("LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS"),
   "수동·5분 자동·복원 직전 로컬 임시저장 경로가 없습니다."
+);
+assert(
+  editorScript.includes('params.get("session") === "resume"')
+    && editorScript.includes("KIRINUKI_OPEN_RECOVERY_DRAFTS"),
+  "원본 탭과 무관한 저장 세션 재개 또는 복구본 자동 열기 경로가 없습니다."
+);
+assert(
+  editorScript.includes("pendingSaveSnapshot = cloneProject(project)")
+    && editorScript.includes("queueMicrotask(dispatchPendingProjectSave)"),
+  "편집 변경을 다음 사용자 이벤트 전에 불변 스냅샷으로 저장하기 시작하지 않습니다."
 );
 assert(editorScript.includes("imageAssetsAtTimeline"), "이미지 에셋 미리보기 경로가 없습니다.");
 assert(

@@ -531,7 +531,7 @@ if (!globalThis.__kirinukiSourceBridgeLoaded) {
     const rawPlayer = readPlayer(platform, {
       youtubeMetadataFresh
     });
-    const player = (
+    const normalizedPlayer = (
       platform === SOURCE_PLATFORM_CHZZK
       && identifiers.contentType === "live"
     )
@@ -543,10 +543,16 @@ if (!globalThis.__kirinukiSourceBridgeLoaded) {
       : rawPlayer;
     const contentType = (
       platform === SOURCE_PLATFORM_YOUTUBE
-      && player.liveInProgress
+      && normalizedPlayer.liveInProgress
     )
       ? "live"
       : identifiers.contentType;
+    const player = contentType === "live"
+      ? normalizedPlayer
+      : {
+        ...normalizedPlayer,
+        liveEdgeOffsetSeconds: null
+      };
 
     if (platform === SOURCE_PLATFORM_YOUTUBE) {
       const activeVideoId = readActiveYouTubeVideoId();

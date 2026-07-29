@@ -434,11 +434,30 @@ async function main() {
   assert(runtime.localAgentPermission === true, "127.0.0.1 자막 에이전트 host permission이 없습니다.");
   assert(!runtime.cacheNames.includes("transformers-cache"), "이전 로컬 Whisper 모델 캐시가 남아 있습니다.");
 
+  await webdriver(baseUrl, "POST", `/session/${sessionId}/goog/cdp/execute`, {
+    cmd: "Emulation.setDeviceMetricsOverride",
+    params: {
+      width: 360,
+      height: 900,
+      deviceScaleFactor: 1,
+      mobile: false
+    }
+  });
+
   const sidepanelUrl = `chrome-extension://${extensionId}/sidepanel.html`;
   await webdriver(baseUrl, "POST", `/session/${sessionId}/url`, { url: sidepanelUrl });
   const sidepanel = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/sync`, {
     script: `
       const requiredIds = [
+        "refresh-recovery-sessions",
+        "recovery-sessions-list",
+        "source-empty",
+        "source-details",
+        "source-type",
+        "player-position",
+        "player-status",
+        "streamer-name",
+        "broadcast-title",
         "capture-start",
         "capture-end",
         "save-segment",
@@ -457,6 +476,64 @@ async function main() {
   assert(sidepanel.readyState === "complete", `sidepanel readyState가 complete가 아닙니다: ${sidepanel.readyState}`);
   assert(sidepanel.missingIds.length === 0, `sidepanel 핵심 DOM 누락: ${sidepanel.missingIds.join(", ")}`);
 
+  const sourceLayout = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/sync`, {
+    script: `
+      const empty = document.getElementById("source-empty");
+      const details = document.getElementById("source-details");
+      const card = document.querySelector(".source-card");
+      const row = details?.querySelector(".source-row");
+      const type = document.getElementById("source-type");
+      const position = document.getElementById("player-position");
+      const status = document.getElementById("player-status");
+      const streamer = document.getElementById("streamer-name");
+      const broadcast = document.getElementById("broadcast-title");
+
+      empty.hidden = true;
+      details.hidden = false;
+      type.className = "badge badge-vod";
+      type.textContent = "VOD";
+      position.textContent = "123:45:56";
+      status.textContent = "원본 VOD 플레이어 연결됨 · 최대 화질 재생 준비 완료 · 타임스탬프 동기화 확인 중";
+      streamer.value = "아주 긴 방송인 채널 이름이 자동 인식된 360픽셀 사이드패널 회귀 검사";
+      broadcast.value = "처음부터 끝까지 아주 긴 치지직 다시보기 방송 제목이 잘리지 않고 입력 영역 안에 머무르는지 확인하는 회귀 검사";
+
+      const dimensions = (element) => ({
+        clientWidth: element?.clientWidth ?? -1,
+        scrollWidth: element?.scrollWidth ?? -1,
+        left: element?.getBoundingClientRect().left ?? -1,
+        right: element?.getBoundingClientRect().right ?? -1
+      });
+
+      return {
+        viewportWidth: window.innerWidth,
+        card: dimensions(card),
+        details: dimensions(details),
+        row: dimensions(row),
+        streamer: dimensions(streamer),
+        broadcast: dimensions(broadcast)
+      };
+    `,
+    args: []
+  });
+  assert(
+    sourceLayout.viewportWidth === 360,
+    `sidepanel SOURCE 회귀 검사 viewport가 360px이 아닙니다: ${sourceLayout.viewportWidth}px`
+  );
+  for (const key of ["card", "details", "row"]) {
+    const box = sourceLayout[key];
+    assert(
+      box.scrollWidth <= box.clientWidth,
+      `360px sidepanel SOURCE ${key} 가로 overflow: scrollWidth=${box.scrollWidth}, clientWidth=${box.clientWidth}`
+    );
+  }
+  for (const key of ["streamer", "broadcast"]) {
+    const input = sourceLayout[key];
+    assert(
+      input.right <= sourceLayout.details.right,
+      `360px sidepanel SOURCE ${key} 입력이 details 오른쪽을 벗어났습니다: input.right=${input.right}, details.right=${sourceLayout.details.right}`
+    );
+  }
+
   await delay(300);
   const browserLogs = await webdriver(baseUrl, "POST", `/session/${sessionId}/log`, { type: "browser" });
   const severeLogs = browserLogs.filter((entry) => entry.level === "SEVERE");
@@ -471,6 +548,7 @@ async function main() {
     editor,
     runtime,
     sidepanel,
+    sourceLayout,
     browserSevereLogs: severeLogs.length
   }, null, 2));
 }

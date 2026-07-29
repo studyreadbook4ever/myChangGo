@@ -14,6 +14,7 @@ export const EXTENSION_PACKAGE_FILES = Object.freeze([
   "lib/core.js",
   "lib/caption-style.js",
   "lib/editor-core.js",
+  "lib/session-recovery.js",
   "lib/source-platform.js",
   "licenses/MEDIABUNNY-MPL-2.0.txt",
   "licenses/PAPERLOGY-OFL-1.1.txt",
