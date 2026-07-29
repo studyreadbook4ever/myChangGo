@@ -121,14 +121,16 @@ const QUIZ = [
   },
   {
     id: "shadow",
-    question: "전기 한 칸을 더 받았을 때 안전점수가 7점 늘었습니다. 7점은 무엇에 가장 가까운가요?",
+    question:
+      "전기 8칸의 최적점수와 9칸으로 다시 최적 배분한 점수의 차이가 7점입니다. 7점은 무엇에 가장 가까운가요?",
     options: [
       ["market", "전기의 실제 시장가격"],
       ["shadow", "그림자가격에 대응하는 현재 배분 근처의 이산 한계가치"],
       ["average", "지금까지 쓴 전기의 평균효과"],
     ],
     correct: "shadow",
-    explanation: "이 정수 사례의 7점은 고전적 그림자가격의 생각에 대응하는 다음 한 칸의 이산 한계가치입니다.",
+    explanation:
+      "두 예산에서 각각 다시 최적 배분한 점수 차이 7점은, 고전적 그림자가격의 생각에 대응하는 다음 한 칸의 이산 한계가치입니다.",
   },
   {
     id: "causal",
@@ -150,7 +152,34 @@ const QUIZ = [
       ["price", "시장가격표"],
     ],
     correct: "comparison",
-    explanation: "볼 수 없는 다른 세계, 즉 반사실을 대신할 비교집단이 필요합니다.",
+    explanation:
+      "적절한 설계와 가정 아래 비교집단의 평균으로, 볼 수 없는 집단 평균 반사실을 추정합니다.",
+  },
+  {
+    id: "measurement",
+    question: "AI가 신고 1,000개를 분류했습니다. 사람은 4개만 확인했고 그중 2개가 틀렸습니다. 다음 행동은?",
+    options: [
+      ["exact-half", "전체 1,000개도 정확히 절반이 틀렸다고 확정한다"],
+      ["audit-more", "대표 검증표본을 더 뽑아 오류 종류와 흔들릴 범위를 기록한다"],
+      ["trust-ai", "AI가 자신 있게 답했으니 처음 분류를 그대로 쓴다"],
+    ],
+    correct: "audit-more",
+    explanation: "4개는 전체 오류율을 확정하기에 너무 작은 검증표본입니다. 대표 표본을 늘리고 거짓 양성·거짓 음성을 따로 기록해야 합니다.",
+  },
+  {
+    id: "uncertainty",
+    question: "작은 무작위 비교에서 평균효과 추정값이 +2점 나왔습니다. 가장 정직한 보고는?",
+    options: [
+      ["everyone-two", "모든 사람의 점수가 반드시 정확히 2점 오른다"],
+      [
+        "estimate-range",
+        "표본을 다시 뽑으면 달라질 수 있으므로 계산법이 분명한 불확실성 범위와 설계 가정을 함께 제시한다",
+      ],
+      ["proved-zero", "+2점만 쓰고 표본의 흔들림과 설계 가정은 생략한다"],
+    ],
+    correct: "estimate-range",
+    explanation:
+      "추정값 하나는 정답표가 아닙니다. 전시의 0~4점은 원리 설명용일 뿐이며, 실제 연구에서는 범위의 뜻과 계산법을 정해 자료로 계산하고 설계 가정도 밝혀야 합니다.",
   },
   {
     id: "agent",
@@ -165,19 +194,24 @@ const QUIZ = [
   },
   {
     id: "zero-token",
-    question: "매일 같은 안전 점검이 충분히 검증됐다면 제로토큰 공방의 제안은?",
+    question: "매일 같은 형식의 저위험 파일 이름 정리가 충분히 검증됐다면 제로토큰 공방의 제안은?",
     options: [
-      ["agent-always", "매번 LLM에게 처음부터 판단시킨다"],
-      ["tool", "반복 규칙은 도구로 굳히고 낯선 예외만 에이전트에게 보낸다"],
+      ["agent-always", "매번 대규모 언어모델(LLM)에게 처음부터 판단시킨다"],
+      [
+        "tool",
+        "반복 규칙은 검증된 도구로 굳혀 감시하고, 낯선 예외는 에이전트와 사람이 감사하며 고위험 판단은 사람이 승인한다",
+      ],
       ["free", "아무 비용도 들지 않는다고 가정한다"],
     ],
     correct: "tool",
-    explanation: "제로토큰은 런타임 LLM 호출을 줄이는 설계입니다. 일반 계산·개발·검증비는 남습니다.",
+    explanation:
+      "제로토큰은 검증된 반복 경로의 런타임 대규모 언어모델(LLM) 호출을 줄이는 설계입니다. 일반 계산·개발·감시·검증비는 남고, 낯선 예외는 에이전트와 사람이 감사하며 고위험 판단은 사람이 승인해야 합니다.",
   },
 ];
 
 const defaultState = {
   goal: "balance",
+  explanationMode: "guided",
   budget: 8,
   allocation: { understanding: 0, verification: 0, experience: 0 },
   optPrediction: null,
@@ -266,7 +300,7 @@ function syncCertificateState({ scroll = false } = {}) {
     const result = document.querySelector("#quiz-result");
     if (result) {
       result.className = "quiz-result is-success";
-      result.textContent = "6 / 6 + 전시 9곳 체험. 새 상황에 개념을 옮겼습니다. 한 바퀴 이해 완료!";
+      result.textContent = `${QUIZ.length} / ${QUIZ.length} + 전시 9곳 체험. 새 상황에 개념을 옮겼습니다. 한 바퀴 이해 완료!`;
     }
     if (scroll) {
       certificate.scrollIntoView({
@@ -348,6 +382,20 @@ function setGoal(goal, resetProposal = true) {
   renderProposal();
   saveState();
   updateDocent();
+}
+
+function applyExplanationMode() {
+  const guided = state.explanationMode === "guided";
+  document.body.classList.toggle("quick-explanations", !guided);
+  document.querySelectorAll('input[name="explanation-mode"]').forEach((radio) => {
+    radio.checked = radio.value === state.explanationMode;
+  });
+  document.querySelectorAll("[data-walkthrough]").forEach((details) => {
+    details.open = guided;
+  });
+  document.querySelector("#visit-duration").textContent = guided
+    ? "약 25분 · 9개 전시 + 출구 검표소 · 정답보다 좋은 질문"
+    : "약 12분 · 9개 전시 + 출구 검표소 · 핵심 체험";
 }
 
 function renderAllocation() {
@@ -699,8 +747,9 @@ function selectExperiment(kind) {
       “힌트의 효과”와 “선택 차이”가 섞였습니다.`;
   } else {
     result.innerHTML = `
-      제비뽑기 집단 차이는 <strong>약 +2점</strong>이었습니다. 두 집단을 출발점에서 비슷하게 만들어
-      힌트의 평균 효과를 묻기 더 좋은 설계입니다. 우연한 흔들림과 가정은 여전히 남습니다.`;
+      제비뽑기 집단 차이는 <strong>약 +2점</strong>이었습니다. 누가 힌트를 받을지를 원래
+      특성과 관계없이 정해, 반복·평균적으로 힌트의 평균 효과를 묻기 더 타당한 설계입니다.
+      작은 표본의 우연한 불균형과 설계 가정은 여전히 남습니다.`;
     markComplete("parallel");
   }
   saveState();
@@ -917,7 +966,7 @@ function checkQuiz(event) {
     } else {
       result.className = "quiz-result is-review";
       result.textContent =
-        `6 / 6 이해 완료! 한 바퀴 도장은 아직 ${missing.map((id) => EXHIBIT_LABELS[id]).join(" · ")} 체험 뒤 열립니다.`;
+        `${QUIZ.length} / ${QUIZ.length} 이해 완료! 한 바퀴 도장은 아직 ${missing.map((id) => EXHIBIT_LABELS[id]).join(" · ")} 체험 뒤 열립니다.`;
       syncCertificateState();
     }
   } else {
@@ -939,64 +988,64 @@ function docentMessages() {
     entrance: {
       short: `계산보다 먼저 “성공”의 뜻을 골랐어. 지금 점수판은 ${GOALS[state.goal].label}이야.`,
       analogy: "목적지는 내비게이션이 정하지 않아. 사람이 목적지를 고르면 계산은 길을 찾는 역할을 해.",
-      deep: `목적함수는 가치판단을 숫자로 옮긴 장치야. ${GOALS[state.goal].label}을 바꾸면 같은 데이터에서도 최적해가 달라질 수 있어.`,
+      deep: `목적함수는 “무엇을 성공이라 부를까?”를 숫자 점수판으로 옮긴 거야. 점수판을 “${GOALS[state.goal].label}”으로 바꾸면 같은 자료와 ${state.budget}칸이어도 최고 배분이 달라져.`,
     },
     scarcity: {
       short: `${used}/${state.budget}칸을 썼어. 총점보다 각 카드의 “다음 칸 효과”를 비교해 봐.`,
       analogy: "피자 첫 조각은 배고픔을 크게 줄이지만 여섯 번째 조각은 덜해. 추가 한 칸의 효과도 그래.",
-      deep: "결정변수는 세 활동의 칸 수, 제약은 합계 예산, 목적함수는 가중 한계효과의 합이야.",
+      deep: "고를 것은 세 활동의 칸 수, 넘지 못할 선은 전체 예산, 크게 만들 것은 다음 칸 효과를 더한 점수야. 한 칸을 고르면 다른 칸을 포기한다는 점도 기억해.",
     },
     garden: {
       short: state.optimizerRun
         ? `현재 목표의 최적안은 ${allocationLabel(optimum.allocations)}, ${formatNumber(optimum.totalValue)}점이야.`
         : "네 예상부터 남기고 모든 조합을 계산해 보자. 틀린 예상도 좋은 관찰 기록이야.",
       analogy: "정원 길을 전부 걸어 보고, 네가 정한 풍경 점수가 가장 높은 길을 표시하는 셈이야.",
-      deep: "체감효과를 시간 조각별 활동으로 펼치면 작은 선형계획 문제로 볼 수 있어. 여기서는 가능한 정수 조합을 전부 검산해.",
+      deep: `먼저 ${state.budget}칸을 넘는 불가능한 조합을 버리고, 남은 정수 조합의 점수를 하나씩 모두 계산해. 그래서 ${allocationLabel(optimum.allocations)}의 ${formatNumber(optimum.totalValue)}점이 정말 최고인지 검산할 수 있어.`,
     },
     shadow: {
       short: state.shadowRevealed
         ? `지금 다음 작업칸의 이산 한계가치는 +${formatNumber(optimum.extraUnitValue)}점이야.`
         : "한 칸을 늘리기 전에 어디로 갈지 예측해 봐. 이산 한계가치는 “다음 한 칸”의 가치야.",
       analogy: "매진된 공연의 보조의자 한 자리처럼, 지금 딱 하나 더 생겼을 때 얻는 가치라고 보면 돼.",
-      deep: "고전 LP의 그림자가격을 닮은 이산값 V(B+1)-V(B)를 보여줘. 시장가격도, 모든 예산에 고정된 값도 아니야.",
+      deep: `${state.budget}칸 최고점 ${formatNumber(optimum.totalValue)}와 ${state.budget + 1}칸 최고점 ${formatNumber(optimum.totalValue + optimum.extraUnitValue)}를 빼면 ${formatNumber(optimum.extraUnitValue)}야. 이 값은 다음 한 칸의 현재 가치라서 시장가격도 아니고, 자원이 더 늘어도 계속 같은 값도 아니야.`,
     },
     mirror: {
       short: state.readinessLens
         ? `그냥 본 기울기 ${formatNumber(analysis.raw.slope ?? 0, 2)}가 준비도 통제 뒤 ${formatNumber(analysis.adjusted.slope ?? 0, 2)}로 바뀌었어.`
         : "둘이 같이 움직이는 것은 출발점이지 원인 판정문은 아니야. 준비도 렌즈를 켜 봐.",
       analogy: "우산과 교통사고가 함께 늘어도 우산이 사고를 만든 건 아니야. 비가 둘을 함께 움직일 수 있어.",
-      deep: "통제 회귀는 관찰한 준비도와 선형으로 연결된 부분을 잔차로 덜어냈어. 관찰 못 한 교란은 여전히 남을 수 있어.",
+      deep: "준비도와의 직선 관계로 예상되는 사용시간과 점수 몫을 먼저 빼고 남은 차이끼리 비교했어. 그 남은 차이를 잔차라고 해. 하지만 현실에서 모르는 원인까지 자동으로 빠지는 것은 아니야.",
     },
     parallel: {
       short: state.experiment === "random"
-        ? "제비뽑기는 출발점을 비슷하게 만들어 볼 수 없는 평행세계를 집단 평균으로 대신해."
+        ? "제비뽑기는 힌트 여부를 원래 특성과 관계없이 정해, 집단 평균으로 평균 반사실을 추정하기 더 타당하게 도와."
         : "같은 사람의 두 미래를 동시에 볼 수 없어서 비교 가능한 집단이 필요해.",
       analogy: "한 씨앗을 동시에 햇빛 아래와 그늘에 심을 수 없으니, 비슷한 씨앗 두 무리를 비교하는 것과 같아.",
-      deep: "인과효과는 잠재결과의 차이야. 무작위 배정은 평균적으로 처치와 다른 원인의 연결을 끊는 설계야.",
+      deep: "한 학생의 두 세계를 함께 못 보니 학생들을 제비뽑기로 두 무리에 나눠. 누가 힌트를 받을지 원래 준비도가 정하지 않게 한 뒤 평균 차이로 집단 평균 효과를 추정해. 다만 한 번의 작은 표본이 꼭 균형 잡힌다고 보장하지는 않아.",
     },
     measurement: {
       short: `사람이 ${auditCount}/${AUDIT_ITEMS.length}개 라벨을 확인했어. AI의 자신감도 측정오차를 없애지는 않아.`,
       analogy: "자동 온도계도 가끔 틀리니 몇 곳은 손 온도계로 대조하듯, AI 라벨도 사람 표본으로 감사해.",
-      deep: "AI 생성 공변량의 오분류는 추정치를 편향시킬 수 있어. 라벨 정확도와 표본추출 규칙을 함께 기록해야 해.",
+      deep: "AI가 혼란한 글을 ‘이해함’으로 잘못 붙이면 전체 이해율과 효과 계산도 한쪽으로 기울 수 있어. 어떤 문장을 표본으로 뽑았고 어떤 종류로 틀렸는지 함께 기록해야 해.",
     },
     cockpit: {
       short: state.proposalStatus === "approved"
         ? "네가 네 질문을 확인하고 되돌릴 수 있는 모의실행만 승인했어. 이제 결과를 다시 데이터로 보낼 차례야."
         : "나는 후보를 계산했어. 무엇을 성공이라 부르고 어디서 멈출지는 네가 정해.",
       analogy: "자동차가 경로를 계산해도 목적지와 위험한 길을 피할지는 운전자가 정하는 것과 같아.",
-      deep: "검증기가 모든 경제 주장에 완전한 정답표를 갖지 못하므로, 비가역성이 큰 결정에 사람 게이트를 집중해야 해.",
+      deep: "현실의 경제 주장에는 언제나 완벽한 정답지가 있는 게 아니야. 그래서 틀렸을 때 되돌리기 어렵고 피해가 큰 결정일수록 사람이 근거를 더 천천히 읽고 직접 멈출 수 있어야 해.",
     },
     workshop: {
-      short: `반복 ${state.runs}회. 안정된 반복은 도구로, 낯선 예외는 에이전트로 보내자.`,
+      short: `반복 ${state.runs}회. 안정된 반복은 도구로, 낯선 예외는 에이전트와 사람 감사로 보내자.`,
       analogy: "매번 머리로 긴 나눗셈을 하기보다 검증된 계산기를 만드는 것과 같아.",
-      deep: "고정 구축비 F와 회당 비용 차이 p-q가 있을 때 손익분기는 대략 F/(p-q)야. 유지보수와 검토비도 빼먹으면 안 돼.",
+      deep: "도구는 처음 만들 때 120이 들지만 매번 2만 더 들고, 에이전트는 매번 14가 들어. 10회에서 둘 다 140이 되고, 그 뒤에야 도구가 싸져. 수정·검토비도 비용에 넣어야 해.",
     },
     exit: {
       short: state.quizMastered
         ? "축하해. 축제 밖 대피소 문제에도 같은 생각법을 옮겼어."
         : "새 상황에서 목표·제약·인과·승인을 다시 구분하면 진짜 네 지식이 돼.",
       analogy: "박물관 지도를 외운 게 아니라 다른 도시에서도 북쪽을 찾을 수 있는지 보는 마지막 문이야.",
-      deep: "전이는 개념 숙달의 더 강한 증거야. 추정→최적화→인간 승인→새 데이터의 루프를 상황과 분리해 기억해.",
+      deep: "전이는 배운 생각을 처음 보는 문제에 옮겨 쓰는 능력이야. 축제 이름은 잊어도 ‘효과를 추정하고, 제약 안에서 배분하고, 사람이 승인하고, 새 자료로 고친다’는 순서는 남겨 봐.",
     },
   };
 }
@@ -1039,6 +1088,20 @@ function resetTour() {
 }
 
 function bindEvents() {
+  document.querySelectorAll(".skip-link").forEach((link) => {
+    link.addEventListener("click", () => {
+      const target = document.querySelector(link.hash);
+      if (!target) return;
+      requestAnimationFrame(() => target.focus({ preventScroll: true }));
+    });
+  });
+  document.querySelectorAll('input[name="explanation-mode"]').forEach((radio) => {
+    radio.addEventListener("change", () => {
+      state.explanationMode = radio.value;
+      applyExplanationMode();
+      saveState();
+    });
+  });
   document.querySelectorAll('input[name="goal"]').forEach((radio) => {
     radio.addEventListener("change", () => setGoal(radio.value));
   });
@@ -1244,20 +1307,44 @@ function bindEvents() {
 }
 
 function observeExhibits() {
-  const observer = new IntersectionObserver(
-    (entries) => {
-      const visible = entries
-        .filter((entry) => entry.isIntersecting)
-        .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
-      if (visible?.target?.id) setActiveExhibit(visible.target.id);
-    },
-    { rootMargin: "-18% 0px -55% 0px", threshold: [0.08, 0.25, 0.5] },
-  );
-  document.querySelectorAll("[data-exhibit]").forEach((section) => observer.observe(section));
+  const sections = [...document.querySelectorAll("[data-exhibit]")];
+  let scheduledFrame = null;
+
+  const updateActiveRoom = () => {
+    scheduledFrame = null;
+    const readingLine = window.innerHeight * 0.35;
+    let nearest = null;
+
+    sections.forEach((section) => {
+      const rect = section.getBoundingClientRect();
+      const containsReadingLine = rect.top <= readingLine && rect.bottom > readingLine;
+      const distance = containsReadingLine
+        ? 0
+        : Math.min(Math.abs(rect.top - readingLine), Math.abs(rect.bottom - readingLine));
+
+      if (!nearest || distance < nearest.distance) {
+        nearest = { section, distance };
+      }
+    });
+
+    if (nearest?.section?.id && nearest.section.id !== currentExhibit) {
+      setActiveExhibit(nearest.section.id);
+    }
+  };
+
+  const scheduleRoomUpdate = () => {
+    if (scheduledFrame !== null) return;
+    scheduledFrame = requestAnimationFrame(updateActiveRoom);
+  };
+
+  window.addEventListener("scroll", scheduleRoomUpdate, { passive: true });
+  window.addEventListener("resize", scheduleRoomUpdate);
+  updateActiveRoom();
 }
 
 function normalizeStoredState() {
   if (!GOALS[state.goal]) state.goal = "balance";
+  if (!["guided", "quick"].includes(state.explanationMode)) state.explanationMode = "guided";
   if (!Number.isSafeInteger(state.budget) || state.budget < 4 || state.budget > 12) state.budget = 8;
   if (!Number.isFinite(state.confounding) || state.confounding < 0 || state.confounding > 1) state.confounding = 1;
   if (![0, 1].includes(state.trueEffect)) state.trueEffect = 0;
@@ -1349,6 +1436,7 @@ function normalizeStoredState() {
 
 function hydrate() {
   normalizeStoredState();
+  applyExplanationMode();
   document.querySelector(`input[name="goal"][value="${state.goal}"]`).checked = true;
   document.querySelectorAll("[data-opt-prediction]").forEach((button) => {
     const selected = button.dataset.optPrediction === state.optPrediction;
