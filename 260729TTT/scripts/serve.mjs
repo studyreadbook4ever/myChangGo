@@ -1,9 +1,10 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join, normalize } from "node:path";
+import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
+const rootPrefix = root.endsWith(sep) ? root : `${root}${sep}`;
 const requestedPort = Number.parseInt(process.env.PORT ?? "4173", 10);
 const port = Number.isSafeInteger(requestedPort) && requestedPort > 0 ? requestedPort : 4173;
 const types = {
@@ -17,11 +18,22 @@ const types = {
 
 createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://localhost");
-  const pathname = decodeURIComponent(url.pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    response.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+    response.end("Bad request");
+    return;
+  }
   const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  const candidate = normalize(join(root, relative));
+  const candidate = resolve(root, relative);
 
-  if (!candidate.startsWith(root) || !existsSync(candidate) || !statSync(candidate).isFile()) {
+  if (
+    !candidate.startsWith(rootPrefix) ||
+    !existsSync(candidate) ||
+    !statSync(candidate).isFile()
+  ) {
     response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     response.end("Not found");
     return;
@@ -33,5 +45,5 @@ createServer((request, response) => {
   });
   createReadStream(candidate).pipe(response);
 }).listen(port, "127.0.0.1", () => {
-  process.stdout.write(`TTT museum: http://127.0.0.1:${port}\n`);
+  process.stdout.write(`TTT daily economics: http://127.0.0.1:${port}\n`);
 });
