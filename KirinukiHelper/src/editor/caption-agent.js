@@ -56,6 +56,16 @@ export function isAudSegCaptionModel(model) {
   return model === LOCAL_AUDSEG_CAPTION_MODEL;
 }
 
+export function captionAgentRunClipLimit(model) {
+  if (model === LOCAL_AUDSEG_CAPTION_MODEL) {
+    return null;
+  }
+  if (model === LOCAL_WHISPER_CAPTION_MODEL) {
+    return MAX_CAPTION_AGENT_CLIPS_PER_RUN;
+  }
+  throw new Error("선택한 자막 초벌 모델이 올바르지 않습니다.");
+}
+
 const AUTOMATIC_CAPTION_PLACEMENT = "bottom";
 const AUTOMATIC_CAPTION_Y = 0.84;
 
@@ -184,10 +194,19 @@ export async function saveCaptionAgentSettings(
   settings,
   storageArea = chrome.storage.local
 ) {
-  const normalized = normalizeCaptionAgentSettings({
-    ...settings,
-    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint)
-  });
+  const requestedModel = ALLOWED_CAPTION_MODELS.has(settings?.model)
+    ? settings.model
+    : DEFAULT_CAPTION_AGENT_SETTINGS.model;
+  const normalized = requestedModel === LOCAL_AUDSEG_CAPTION_MODEL
+    ? normalizeCaptionAgentSettings({
+      ...settings,
+      model: requestedModel
+    })
+    : normalizeCaptionAgentSettings({
+      ...settings,
+      endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint),
+      model: requestedModel
+    });
   await storageArea.set({ [CAPTION_AGENT_SETTINGS_KEY]: normalized });
   await storageArea.remove([
     LEGACY_CAPTION_AGENT_SETTINGS_KEY,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -13,12 +13,25 @@ import {
   resolveCreatorPolicies
 } from "../extension/lib/core.js";
 import { EXTENSION_PACKAGE_FILES } from "./extension-package-files.mjs";
+import {
+  acquireDevRunnerLock,
+  failClosedOnDevRunnerOwnerLoss,
+  releaseDevRunnerLock
+} from "./dev-runner-lock.mjs";
 import { PAPERLOGY_FONT } from "./paperlogy-font.mjs";
 import { PRETENDARD_FONT } from "./pretendard-font.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const extensionRoot = path.join(root, "extension");
+const devRunnerLockPath = path.join(root, ".dev-editor.lock");
+const devRunnerLockLease = await acquireDevRunnerLock(devRunnerLockPath, {
+  pid: process.pid,
+  role: "validate",
+  inheritedToken: process.env.KIRINUKI_RELEASE_LOCK_TOKEN,
+  onOwnerLost: failClosedOnDevRunnerOwnerLoss("validate")
+});
 
+try {
 const errors = [];
 const assert = (condition, message) => {
   if (!condition) {
@@ -31,7 +44,7 @@ const read = (relativePath) => readFile(path.join(extensionRoot, relativePath), 
 const manifest = JSON.parse(await read("manifest.json"));
 assert(manifest.manifest_version === 3, "manifest_version은 3이어야 합니다.");
 assert(manifest.side_panel?.default_path === "sidepanel.html", "사이드패널 진입점이 없습니다.");
-assert(manifest.version === "2.4.0", "통합 편집기 manifest 버전이 2.4.0이 아닙니다.");
+assert(manifest.version === "2.5.0", "통합 편집기 manifest 버전이 2.5.0이 아닙니다.");
 assert(manifest.host_permissions?.includes("https://chzzk.naver.com/*"), "치지직 host permission이 없습니다.");
 assert(manifest.host_permissions?.includes("https://api.chzzk.naver.com/*"), "치지직 라이브 상태 메타데이터 permission이 없습니다.");
 assert(manifest.host_permissions?.includes("https://youtube.com/*"), "YouTube 루트 영상 permission이 없습니다.");
@@ -65,6 +78,7 @@ const referencedFiles = [
   "knowledge/default-creator-policy.md",
   "knowledge/codex-job-agents.md",
   "knowledge/creator-policy-index.json",
+  "LICENSE",
   "THIRD_PARTY_NOTICES.md",
   "licenses/MEDIABUNNY-MPL-2.0.txt",
   "licenses/AUDSEG-MIT.txt",
@@ -99,6 +113,45 @@ for (const relativePath of [
   }
 }
 
+const devMarkerPath = path.join(extensionRoot, "dev-reload.json");
+try {
+  await unlink(devMarkerPath);
+} catch (error) {
+  if (error?.code !== "ENOENT") {
+    errors.push(`개발 marker 확인 실패: ${error.message}`);
+  }
+}
+
+for (const entry of await readdir(extensionRoot)) {
+  const match = /^dev-reload\.json\.(\d+)\.tmp$/u.exec(entry);
+  if (!match) {
+    continue;
+  }
+  const temporaryMarkerPath = path.join(extensionRoot, entry);
+  try {
+    await unlink(temporaryMarkerPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      errors.push(`개발 임시 marker 정리 실패: ${entry} (${error.message})`);
+    }
+  }
+}
+
+for (const entry of await readdir(root)) {
+  const match = /^\.dev-editor\.lock\.(\d+)\.[^.]+\..+\.tmp$/u.exec(entry);
+  if (!match) {
+    continue;
+  }
+  const temporaryLockPath = path.join(root, entry);
+  try {
+    await unlink(temporaryLockPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      errors.push(`이전 개발 임시 lock 정리 실패: ${entry} (${error.message})`);
+    }
+  }
+}
+
 for (const [label, relativePath, expectedSha256] of [
   ["Pretendard", PRETENDARD_FONT.extensionFontPath, PRETENDARD_FONT.fontSha256],
   ["Pretendard", PRETENDARD_FONT.extensionLicensePath, PRETENDARD_FONT.licenseSha256],
@@ -121,7 +174,7 @@ for (const [label, relativePath, expectedSha256] of [
   );
 }
 
-const [html, panelScript, contentScript, editorHtml, editorScript, audsegWorkerScript, serviceWorker, editingGuide, policyGuide, codexAgentGuide, policyIndexText, audsegLicense] = await Promise.all([
+const [html, panelScript, contentScript, editorHtml, editorScript, audsegWorkerScript, serviceWorker, editingGuide, policyGuide, codexAgentGuide, policyIndexText, audsegLicense, projectLicense, distributedProjectLicense] = await Promise.all([
   read("sidepanel.html"),
   read("sidepanel.js"),
   read("content-script.js"),
@@ -133,9 +186,15 @@ const [html, panelScript, contentScript, editorHtml, editorScript, audsegWorkerS
   read("knowledge/default-creator-policy.md"),
   read("knowledge/codex-job-agents.md"),
   read("knowledge/creator-policy-index.json"),
-  readFile(path.join(root, "..", "AudSeg", "LICENSE"), "utf8")
+  readFile(path.join(root, "..", "AudSeg", "LICENSE"), "utf8"),
+  readFile(path.join(root, "LICENSE"), "utf8"),
+  read("LICENSE")
 ]);
 const policyIndex = JSON.parse(policyIndexText);
+assert(
+  projectLicense === distributedProjectLicense,
+  "배포 Extension의 KirinukiHelper MIT 라이선스가 소스 원문과 다릅니다."
+);
 assert(
   await read("licenses/AUDSEG-MIT.txt") === audsegLicense,
   "배포 AudSeg MIT 라이선스가 sibling 원본과 다릅니다."
@@ -300,9 +359,15 @@ assert(editorScript.includes("MAX_REMOTE_CUE_DURATION_MS = 4e3"), "원격 자막
 assert(editorScript.includes("encodePcm16WavBase64"), "선택 구간 PCM을 표준 WAV 요청으로 바꾸지 않습니다.");
 assert(
   editorScript.includes("MAX_CAPTION_AGENT_CLIPS_PER_RUN = 16")
+    && editorScript.includes("captionAgentRunClipLimit")
+    && editorScript.includes("allEnabledClips.length")
     && editorScript.includes("captionAgentResumePlan")
     && editorScript.includes("captionCheckpoints"),
-  "16컷 요청 가드 또는 실패 지점 재개 체크포인트가 없습니다."
+  "Whisper 16컷 요청 가드, AudSeg 전체 활성 컷 처리 또는 실패 지점 재개 체크포인트가 없습니다."
+);
+assert(
+  editorScript.includes("busyReasonAfterTabQuery = devReloadBusyReason()"),
+  "핫 리로드의 비동기 중복 탭 확인 직후 busy 상태 재검사가 없습니다."
 );
 assert(editorScript.includes("isLoopbackCaptionAgentEndpoint"), "Whisper companion loopback 제한이 없습니다.");
 assert(
@@ -455,4 +520,7 @@ if (errors.length > 0) {
   process.exitCode = 1;
 } else {
   console.log(`Extension 검증 통과: ${uniqueReferencedFiles.length}개 필수 파일, 핵심 UI, MD 지침, 프롬프트 smoke test`);
+}
+} finally {
+  await releaseDevRunnerLock(devRunnerLockLease);
 }

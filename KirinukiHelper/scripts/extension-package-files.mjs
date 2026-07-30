@@ -1,4 +1,5 @@
 export const EXTENSION_PACKAGE_FILES = Object.freeze([
+  "LICENSE",
   "THIRD_PARTY_NOTICES.md",
   "content-script.js",
   "editor.html",

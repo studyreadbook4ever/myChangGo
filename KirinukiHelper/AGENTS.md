@@ -9,7 +9,14 @@
 
 ## 가장 짧은 사용 절차
 
-Whisper를 처음 쓸 때:
+Linux의 사람 사용자는 먼저 대화형 도우미를 사용한다.
+
+```bash
+./setup.sh
+./kirinuki.sh start "https://chzzk.naver.com/video/..."
+```
+
+Whisper 수동 설치가 필요할 때:
 
 ```bash
 npm ci --ignore-scripts
@@ -30,6 +37,45 @@ npm run caption-stack:start
 7. 임시저장 후 영상·프로젝트 JSON·SRT를 내보낸다.
 
 AudSeg만 쓸 때는 caption stack 설치·실행이 필요 없다.
+
+## Linux 사람용 셸 도우미 계약
+
+- `setup.sh`는 `kirinuki.sh setup`의 얇고 안정적인 첫 진입점이다.
+- `kirinuki.sh`는 Bash preflight 뒤 Node 내장 모듈만 쓰는
+  `scripts/linux-helper.mjs`에 인자를 그대로 전달한다.
+- 인자 없는 TTY 실행은 한글 메뉴를 열고, 비대화형 실행은 입력을 기다리며
+  멈추지 않고 명령 사용법을 보여 준다.
+- 시스템 패키지를 대신 설치하거나 `sudo`, `su`, `curl | sh`, 원격 설치
+  스크립트를 실행하지 않는다. 빠진 도구와 대표 배포판별 설치 힌트만
+  표시한다.
+- AudSeg 선택은 companion을 설치·조회·시작하지 않는다.
+- Whisper 선택만 기존 `local-caption-stack.mjs`의
+  `doctor/setup/start/status/stop` 계약을 사용한다.
+- 브라우저 실행은 고정된 XDG 사용자 전용 프로필, 현재 저장소의 정확한
+  `extension` 절대 경로와 인자 배열을 사용한다. `eval`, 문자열 셸 실행과
+  원격 디버깅 포트를 사용하지 않는다.
+- 자동 브라우저 후보는 unpacked Extension 명령행 로드를 지원하는 Chromium
+  과 `chromium-browser`뿐이다. 일반 Google Chrome은 자동 지원으로 오인하지
+  않고 `chrome://extensions` 수동 로드를 안내한다.
+- 허용된 HTTPS 치지직·YouTube·`naver.me` URL만 브라우저 인자로 받고 제어
+  문자를 거부한다.
+- 실행 중인 Chromium을 강제 종료하지 않는다. `stop`은 관리하는 로컬 Whisper
+  서비스만 정상 종료한다.
+- foreground Whisper의 PID claim은 exact CLI 경로, Linux process start tick,
+  boot ID가 모두 맞을 때만 관리형으로 인정한다. 동시 start는 배타적 PID
+  claim으로 실패시키며 검증되지 않은 stale claim이나 외부 포트의 프로세스를
+  임의로 제거하지 않는다.
+- helper의 Whisper 재설정은 직전 manager가 foreground일 때만 완전 종료를
+  확인한 뒤 같은 manager로 복원한다. active systemd-user는 저수준 setup의
+  restart 계약을 사용한다.
+- 저장소 절대 경로 변경으로 Extension ID·Origin이 바뀐 상태를 조용히
+  재사용하지 않고 setup 재실행을 안내한다.
+- API 키, 세션 토큰, 브라우저 쿠키와 프로젝트 데이터를 helper 설정·인자·
+  로그에 기록하지 않는다.
+- `--dry-run`은 설치·브라우저·서비스 상태를 바꾸지 않고 예정된 동작만
+  검증 가능하게 출력한다.
+- 셸과 Node helper의 구문, URL 검증, 비대화형 동작, XDG 경로, dry-run과
+  자막 방식 분기는 `tests/linux-helper.test.js`에서 회귀 검사한다.
 
 ## 절대 불변조건
 
@@ -100,6 +146,7 @@ AudSeg는 저장소 루트의 독립 Python 패키지 `AudSeg/` 0.1.0 철학과 
 - 라이선스: MIT
 - 런타임: 브라우저 JavaScript, Python·companion 불필요
 - 입력: 16kHz mono PCM
+- 리소스 상한: 컷당 30분, Float32 PCM 128MiB
 - 분석: 20ms RMS frame, 10ms hop
 - threshold: adaptive noise floor
 - 상태 전환: Schmitt hysteresis
@@ -116,7 +163,7 @@ Python 기준 구현의 기본 placeholder 정책과 별개로 편집기 모델�
 요구 환경:
 
 - Node.js 20.9 이상
-- Chrome/Chromium 120 이상
+- 자동 도우미는 Chromium 120 이상, 수동 로드는 Chrome/Chromium 120 이상
 - Linux에서 Whisper를 쓸 경우 C/C++ build toolchain
 - 실제 브라우저 통합 검증에는 Chromium과 ChromeDriver
 - 미디어 통합 검증에는 FFmpeg와 ffprobe
@@ -130,7 +177,7 @@ npm run caption-stack:start
 npm run caption-stack:status
 ```
 
-`setup`은 고정 revision, 크기와 SHA-256을 검증한 whisper.cpp, 선택 모델, VAD를 XDG 사용자 데이터 경로에 설치한다. 저장소와 Extension package 안에 binary나 모델을 넣지 않는다.
+`setup`은 고정 revision, 크기와 SHA-256을 검증한 whisper.cpp, 선택 모델, VAD를 XDG 사용자 데이터 경로에 설치한다. 저장소와 Extension package 안에 binary나 모델을 넣지 않는다. `./kirinuki.sh setup`은 관리형 foreground를 `stop → setup → foreground 복원`으로 처리한다. 저수준 `caption-stack:setup`은 foreground가 실행 중이면 fail-closed하고 명시적인 `stop → setup → start`를 요구하며, active-like systemd-user 서비스만 자체 재시작한다.
 
 `extension` 폴더의 절대 경로가 바뀌면 압축해제 확장의 ID와 companion이 허용하는 exact Origin도 바뀐다. 경로를 옮긴 뒤에는 새 폴더를 Chromium에 다시 불러오고, 기존 설치 프로필과 backend를 유지한 채 `caption-stack:setup`을 다시 실행한다. 경로가 다른 임시 ZIP smoke에서 기존 Origin용 companion이 `/v1/session`을 403으로 거절하는 것은 보안 계약상 정상이며, 일반 실행의 다른 브라우저 오류를 허용하는 근거로 쓰지 않는다.
 
@@ -181,10 +228,13 @@ AudSeg에는 위 명령이 필요 없다. 모델 설치 안내나 companion 오�
 
 실행 전:
 
-- 활성 컷 수가 1~16개인지 확인한다.
+- 활성 컷이 1개 이상인지 확인한다.
+- Whisper는 한 번에 활성 컷 최대 16개까지만 처리한다.
+- AudSeg는 프로젝트의 모든 활성 컷을 한 컷씩 순차 처리하고 각 컷 뒤 결과와 체크포인트를 저장한다.
 - 총 길이와 선택 방식을 표시한다.
 - Whisper라면 companion capability와 실제 모델 지문을 확인한다.
 - AudSeg라면 companion probe, 권한 요청, session 발급을 수행하지 않는다.
+- AudSeg는 저장된 Whisper endpoint·token이 비어 있거나 잘못되어도 그 값을 읽거나 검증하지 않고 실행한다.
 - 사용자가 취소하면 오디오 추출을 시작하지 않는다.
 
 ### 5. 사람 검수
@@ -355,6 +405,22 @@ AudSeg 기준 구현은 MIT 라이선스다.
 12. 문서와 UI copy를 실제 코드 상태와 맞춘다.
 13. 변경 범위에 맞는 테스트 뒤 전체 검증을 실행한다.
 
+### 개발용 안전 핫 리로드
+
+- `npm run dev:editor`는 개발 전용 `extension/dev-reload.json`을 만들며, 일반 편집기는 URL에 `dev=1`이 없으면 marker를 읽지 않는다.
+- CSS만 바뀌면 stylesheet만 교체하고 File 객체·영상 연결·재생 위치·CURRENT를 유지한다.
+- 편집기 JavaScript·Worker를 다시 열기 전에는 진행 중인 작업, 같은 프로젝트 중복 탭과 저장되지 않은 원본 파일 핸들을 검사한다.
+- 현재 입력을 확정하고 모든 선행 project write를 기다린 뒤 CURRENT를 다시 읽어 fingerprint가 같을 때만 `project=<id>&session=resume&dev=1`로 재로드한다.
+- 저장 확인 중 새 capture seed가 도착하면 재로드하지 않고 잠금을 풀어 그 seed를 먼저 반영한다.
+- 핫 리로드 때문에 최근 5개 사용자 임시저장을 새로 만들거나 밀어내지 않는다.
+- JavaScript 재로드는 CURRENT만 보존한다. undo/redo, 타임라인 범위·확대 같은 탭 메모리를 보존한다고 표현하지 않는다.
+- content script와 manifest/service worker 변경은 좌표 작업 중인 원본 탭이나 Extension을 자동 재로드하지 않는다.
+- editor·sidepanel·service worker가 함께 import하는 공용 모듈은 혼합 runtime을 막도록 Extension 변경으로 분류한다.
+- 개발 runner·validator·패키저는 같은 OS 커널 mutex를 원자적으로 점유한다. 강제 종료 후 stale 파일 삭제 경쟁으로 상호 배제를 구현하지 않는다.
+- `npm run package`는 build·`check:full`·ZIP·체크섬 전체를 하나의 최상위 release lease로 감싸고, 자식 validator·패키저는 일치하는 live owner token으로만 그 lease를 빌린다.
+- 핫 리로드 browser smoke는 같은 mutex에 참여하고 임시 Extension 복사본의 marker만 조작한다. 실제 `extension/dev-reload.json`을 테스트 revision으로 덮어쓰지 않는다.
+- 개발 runner와 marker·lock·임시 marker는 패키지에 포함하지 않는다. 실행 중 runner가 있으면 릴리스 검증과 패키징은 fail closed한다.
+
 기본:
 
 ```bash
@@ -363,6 +429,13 @@ git diff --check
 ```
 
 `npm run check`에는 fail-closed third-party 라이선스 인벤토리 검사가 포함된다. 현재 허용 목록은 runtime `mediabunny@1.51.0`(MPL-2.0), build-only `esbuild@0.25.6`(MIT)와 그 고정 transitive type/platform 패키지, AudSeg(MIT), 두 OFL-1.1 글꼴이다. 새 패키지·버전·라이선스·바이너리 에셋을 추가하려면 원문과 배포 의무를 먼저 검토하고 고지·allowlist·검사를 같은 변경에서 명시적으로 갱신한다.
+
+KirinukiHelper가 직접 작성한 코드는 `LICENSE`의 MIT 조건으로 공개한다. 이것은
+Mediabunny(MPL-2.0), Pretendard·Paperlogy(OFL-1.1)와 별도 다운로드되는
+whisper.cpp·Whisper 모델·Silero VAD의 고유 라이선스를 덮어쓰지 않는다.
+Extension ZIP에는 프로젝트 MIT 원문과 모든 제3자 고지·필수 원문을 함께 넣고,
+`license:check`가 소스와 배포 사본의 바이트 일치 및 고정 dependency 인벤토리를
+검증해야 한다.
 
 Chromium·ChromeDriver·FFmpeg가 있으면:
 
@@ -404,7 +477,7 @@ uv run --project ../AudSeg --extra dev ruff format --check ../AudSeg
 - [ ] Python 기준 구현과 JavaScript 포트의 핵심 fixture가 일치함
 - [ ] 자동 자막 기본 위치와 문장부호 계약이 결정적임
 - [ ] 사람 cue와 human-edited cue가 재실행 후 보존됨
-- [ ] 활성 컷 0/16/17 경계가 오디오 추출 전에 동작함
+- [ ] Whisper 활성 컷 0/16/17 경계와 AudSeg 17개 이상 실행이 오디오 추출 전에 올바르게 분기함
 - [ ] 컷별 저장과 동일 지문 재개가 동작함
 - [ ] 다른 원본·방식·pipeline은 낡은 체크포인트를 재사용하지 않음
 - [ ] 빈 cue가 가짜 SRT 문구로 출력되지 않음

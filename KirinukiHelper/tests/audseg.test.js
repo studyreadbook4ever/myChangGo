@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   AUDSEG_DRAFT_MODEL,
   AUDSEG_PIPELINE_FINGERPRINT,
+  audSegAudioFootprint,
   audSegBlankSubtitleDrafts,
   segmentAudSegPcm,
   segmentAudSegPcmInWorker
@@ -128,6 +129,22 @@ test("AudSeg 브라우저 통합은 모델·네트워크 없이 활동 구간만
     [2_400, 11_040]
   );
   assert.deepEqual(result.warnings, []);
+});
+
+test("AudSeg 오디오 용량 검사는 Whisper WAV와 무관한 Float32 PCM 기준이다", () => {
+  assert.deepEqual(audSegAudioFootprint(1_000), {
+    durationMs: 1_000,
+    sampleCount: 16_000,
+    floatPcmBytes: 64_000
+  });
+  assert.throws(
+    () => audSegAudioFootprint(31 * 60 * 1_000),
+    /AudSeg 빈 타이밍.*30분.*나눠/u
+  );
+  assert.throws(
+    () => audSegAudioFootprint(0),
+    /AudSeg 빈 타이밍/u
+  );
 });
 
 test("긴 연속 활동은 조용한 골짜기 또는 hard limit에서 4초 이하로 나눈다", () => {

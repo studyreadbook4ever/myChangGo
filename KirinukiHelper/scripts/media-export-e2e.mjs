@@ -54,6 +54,17 @@ function assert(condition, message) {
   }
 }
 
+function isExpectedLocalCaptionOffline(entry) {
+  return (
+    entry?.level === "SEVERE"
+    && entry?.source === "network"
+    && String(entry?.message || "").startsWith(
+      "http://127.0.0.1:4319/v1/session - Failed to load resource:"
+    )
+    && String(entry.message).includes("net::ERR_CONNECTION_REFUSED")
+  );
+}
+
 function appendOutput(target, chunk) {
   const next = `${target}${chunk.toString()}`;
   return next.length > 80_000 ? next.slice(-80_000) : next;
@@ -2210,9 +2221,20 @@ async function main() {
 
   const browserLogs = await webdriver("POST", `/session/${sessionId}/log`, { type: "browser" });
   const severeLogs = browserLogs.filter((entry) => entry.level === "SEVERE");
+  const expectedLocalCaptionOffline = severeLogs.filter(
+    isExpectedLocalCaptionOffline
+  );
+  const unexpectedSevereLogs = severeLogs.filter(
+    (entry) => !isExpectedLocalCaptionOffline(entry)
+  );
   assert(
-    severeLogs.length === 0,
-    `브라우저 SEVERE 로그가 있습니다:\n${JSON.stringify(severeLogs, null, 2)}`
+    expectedLocalCaptionOffline.length <= 2,
+    "로컬 Whisper startup offline probe가 예상보다 많이 반복됐습니다.\n"
+      + JSON.stringify(expectedLocalCaptionOffline, null, 2)
+  );
+  assert(
+    unexpectedSevereLogs.length === 0,
+    `브라우저 SEVERE 로그가 있습니다:\n${JSON.stringify(unexpectedSevereLogs, null, 2)}`
   );
 
   const downloads = await readdir(downloadRoot).catch(() => []);
@@ -2308,7 +2330,8 @@ async function main() {
       diagnostics: encoderDiagnostics
     },
     exportUi,
-    browserSevereLogs: severeLogs.length
+    browserSevereLogs: unexpectedSevereLogs.length,
+    expectedLocalCaptionOffline: expectedLocalCaptionOffline.length
   }, null, 2));
 }
 

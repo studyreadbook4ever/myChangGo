@@ -1,5 +1,10 @@
 # Third-party notices
 
+KirinukiHelper의 프로젝트 작성 코드는 배포물의 `LICENSE`에 적힌 MIT
+라이선스로 제공됩니다. 아래 구성요소는 그 MIT 라이선스로 재허가되는 것이
+아니며, 각각 표시된 MPL-2.0, OFL-1.1 또는 MIT 조건과 저작권 고지를 그대로
+유지합니다.
+
 CHZZK Kirinuki Studio bundles the following third-party browser libraries. No
 third-party Node.js native module is shipped in the extension archive.
 

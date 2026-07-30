@@ -82,6 +82,7 @@ import {
 import {
   AUDSEG_DRAFT_MODEL,
   AUDSEG_ENGINE_VERSION,
+  audSegAudioFootprint,
   audSegBlankSubtitleDrafts,
   segmentAudSegPcmInWorker
 } from "./audseg.js";
@@ -92,6 +93,7 @@ import {
   captionAgentAudioFootprint,
   captionAgentEditorialContextFingerprint,
   captionAgentResumePlan,
+  captionAgentRunClipLimit,
   captionAgentRuntimeIdentity,
   captionAgentRunEstimate,
   createCaptionAgentCheckpoint,
@@ -109,6 +111,12 @@ import {
   saveCaptionAgentSettings,
   upsertCaptionAgentCheckpoint
 } from "./caption-agent.js";
+import {
+  devReloadProjectFingerprint,
+  devReloadResumeUrl,
+  devReloadStyleUrl,
+  normalizeDevReloadMarker
+} from "./dev-reload.js";
 import {
   nextEnabledPreviewClip,
   preparedPreviewMatches,
@@ -330,6 +338,7 @@ let timelineSnapEnabled = true;
 let saveDispatchPending = false;
 let pendingSaveSnapshot = null;
 let projectSaveSequence = 0;
+const projectSaveOperations = new Set();
 let imageAssetPruneTimer = null;
 let toastTimer = null;
 let activeClipId = null;
@@ -373,6 +382,11 @@ let localDraftAutosaveAnchorAtMs = 0;
 let focusBeforeLocalDraftDialog = null;
 let captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
 let captionAgentRuntime = null;
+let devReloadPollTimer = null;
+let devReloadProcessing = false;
+let devReloadObserverActive = false;
+let devReloadMissingCount = 0;
+let devReloadNotice = "";
 const imageAssetObjectUrls = new Map();
 const clipGroupSelection = new Set();
 
@@ -390,6 +404,10 @@ const PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
 const PREVIEW_PRELOAD_TIMEOUT_MS = 12_000;
 const LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1_000;
 const LOCAL_DRAFT_BUSY_RETRY_MS = 30 * 1_000;
+const DEV_RELOAD_POLL_INTERVAL_MS = 900;
+const DEV_RELOAD_FETCH_FAILURE_LIMIT = 3;
+const DEV_RELOAD_LAST_REVISION_KEY = "kirinuki:dev-reload:last-revision";
+const DEV_RELOAD_EXPECTED_PROJECT_KEY = "kirinuki:dev-reload:expected-project";
 const ALLOWED_IMAGE_ASSET_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -483,6 +501,11 @@ function startProjectSnapshotSave(snapshot) {
     scheduleImageAssetBlobPrune();
     return savedProject;
   });
+  projectSaveOperations.add(operation);
+  operation.then(
+    () => projectSaveOperations.delete(operation),
+    () => projectSaveOperations.delete(operation)
+  );
   void operation.catch((error) => {
     if (sequence === projectSaveSequence) {
       showToast(`프로젝트 저장 실패: ${error.message}`, "error", 0);
@@ -528,6 +551,12 @@ function flushSave() {
   const snapshot = cloneProject(project);
   discardPendingProjectSave();
   return startProjectSnapshotSave(snapshot);
+}
+
+async function waitForProjectSaves() {
+  while (projectSaveOperations.size > 0) {
+    await Promise.allSettled([...projectSaveOperations]);
+  }
 }
 
 const localDraftDateFormatter = new Intl.DateTimeFormat("ko-KR", {
@@ -843,11 +872,374 @@ async function countSameProjectEditorTabs() {
       return false;
     }
     try {
-      return new URL(tab.url).searchParams.get("project") === project.id;
+      const tabProjectId = new URL(tab.url).searchParams.get("project");
+      return !tabProjectId || tabProjectId === project.id;
     } catch {
       return false;
     }
   }).length;
+}
+
+function devReloadEnabled() {
+  return new URLSearchParams(location.search).get("dev") === "1";
+}
+
+function devReloadSessionValue(key) {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function setDevReloadSessionValue(key, value) {
+  sessionStorage.setItem(key, value);
+}
+
+function removeDevReloadSessionValue(key) {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+    // A disabled session store simply prevents hard reload below.
+  }
+}
+
+function announceDevReload(message, type = "info", timeout = 5_000) {
+  const notice = `${type}:${message}`;
+  if (notice === devReloadNotice) {
+    return;
+  }
+  devReloadNotice = notice;
+  showToast(message, type, timeout);
+}
+
+async function readDevReloadMarker() {
+  try {
+    const markerUrl = new URL(chrome.runtime.getURL("dev-reload.json"));
+    markerUrl.searchParams.set("cache", `${Date.now()}-${Math.random()}`);
+    const response = await fetch(markerUrl, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return normalizeDevReloadMarker(await response.json());
+  } catch {
+    return null;
+  }
+}
+
+function devReloadBusyReason() {
+  if (
+    activeJobController
+    || exportRequestPending
+    || projectMutationLockCount > 0
+    || pointerEditActive
+    || rangeHandleDragActive
+    || previewBoundaryTransitioning
+    || localDraftOperationActive
+    || automaticLocalDraftOperation
+    || !elements.job_dialog.hidden
+    || elements.local_draft_dialog.open
+  ) {
+    return "진행 중인 편집·저장·내보내기 작업";
+  }
+  if (mediaFile && (
+    project?.mediaAsset?.fileHandleStored !== true
+    || !mediaHandle
+  )) {
+    return "재시작용 원본 파일 핸들이 없는 현재 세션";
+  }
+  return "";
+}
+
+async function saveAndVerifyDevReloadProject() {
+  if (!project?.id) {
+    throw new Error("저장할 CURRENT 프로젝트가 없습니다.");
+  }
+  const snapshot = cloneProject(project);
+  discardPendingProjectSave();
+  await startProjectSnapshotSave(snapshot);
+  await waitForProjectSaves();
+  const stored = await loadProject(snapshot.id);
+  const expectedFingerprint = devReloadProjectFingerprint(snapshot);
+  const storedFingerprint = devReloadProjectFingerprint(stored);
+  const currentFingerprint = devReloadProjectFingerprint(project);
+  if (
+    !stored
+    || storedFingerprint !== expectedFingerprint
+    || currentFingerprint !== expectedFingerprint
+  ) {
+    throw new Error(
+      "CURRENT 저장을 다시 읽은 결과가 달라 자동 재로드를 중단했습니다."
+    );
+  }
+  return {
+    projectId: snapshot.id,
+    fingerprint: storedFingerprint
+  };
+}
+
+function verifyExpectedDevReloadProject(candidateProject) {
+  if (!devReloadEnabled()) {
+    return false;
+  }
+  const raw = devReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+  if (!raw) {
+    return false;
+  }
+  let expected;
+  try {
+    expected = JSON.parse(raw);
+  } catch {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    return false;
+  }
+  if (
+    expected?.projectId !== candidateProject?.id
+    || typeof expected?.fingerprint !== "string"
+  ) {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    return false;
+  }
+  const actualFingerprint = devReloadProjectFingerprint(candidateProject);
+  if (actualFingerprint !== expected.fingerprint) {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    throw new Error(
+      "핫 리로드 직전 CURRENT와 다시 불러온 프로젝트가 다릅니다. "
+      + "자동 저장본을 덮어쓰지 않았으니 저장 목록을 확인해 주세요."
+    );
+  }
+  removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+  return true;
+}
+
+async function replaceDevReloadStylesheet(revision) {
+  const current = document.querySelector(
+    'link[rel~="stylesheet"][href*="editor/editor.css"]'
+  );
+  if (!current) {
+    throw new Error("교체할 편집기 stylesheet를 찾지 못했습니다.");
+  }
+  const replacement = current.cloneNode();
+  replacement.href = devReloadStyleUrl(current.href, revision);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      replacement.remove();
+      reject(new Error("새 CSS를 5초 안에 불러오지 못했습니다."));
+    }, 5_000);
+    replacement.addEventListener("load", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+    replacement.addEventListener("error", () => {
+      clearTimeout(timer);
+      replacement.remove();
+      reject(new Error("새 CSS 파일을 불러오지 못했습니다."));
+    }, { once: true });
+    current.after(replacement);
+  });
+  current.remove();
+}
+
+async function hardReloadEditorFromMarker(marker) {
+  const busyReason = devReloadBusyReason();
+  if (busyReason) {
+    announceDevReload(
+      `코드 변경을 감지했지만 ${busyReason} 때문에 자동 재로드를 기다립니다.`,
+      "info",
+      0
+    );
+    return false;
+  }
+  if (await countSameProjectEditorTabs() > 1) {
+    announceDevReload(
+      "같은 프로젝트 편집기 탭이 둘 이상이라 자동 재로드를 보류했습니다. 다른 탭을 닫아 주세요.",
+      "error",
+      0
+    );
+    return false;
+  }
+  const busyReasonAfterTabQuery = devReloadBusyReason();
+  if (busyReasonAfterTabQuery) {
+    announceDevReload(
+      `탭 확인 중 ${busyReasonAfterTabQuery}이 시작되어 자동 재로드를 기다립니다.`,
+      "info",
+      0
+    );
+    return false;
+  }
+
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement) {
+    activeElement.blur();
+  }
+  elements.preview_video.pause();
+  standbyPreviewVideo?.pause();
+  await Promise.resolve();
+
+  const previousInert = document.body.inert;
+  let navigationStarted = false;
+  document.body.inert = true;
+  lockProjectMutations();
+  try {
+    const verified = await saveAndVerifyDevReloadProject();
+    if (pendingCaptureSeed) {
+      throw new Error(
+        "저장 확인 중 원본 탭의 새 선택 구간이 도착해 먼저 반영합니다."
+      );
+    }
+    setDevReloadSessionValue(
+      DEV_RELOAD_EXPECTED_PROJECT_KEY,
+      JSON.stringify({
+        projectId: verified.projectId,
+        fingerprint: verified.fingerprint,
+        revision: marker.revision
+      })
+    );
+    setDevReloadSessionValue(
+      DEV_RELOAD_LAST_REVISION_KEY,
+      marker.revision
+    );
+    const resumeUrl = devReloadResumeUrl(location.href, verified.projectId);
+    history.replaceState(null, "", resumeUrl);
+    location.reload();
+    navigationStarted = true;
+    return true;
+  } catch (error) {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    announceDevReload(
+      `자동 재로드를 안전하게 중단했습니다: ${error.message}`,
+      "error",
+      0
+    );
+    return false;
+  } finally {
+    if (!navigationStarted) {
+      unlockProjectMutations();
+      document.body.inert = previousInert;
+    }
+  }
+}
+
+async function applyDevReloadMarker(marker) {
+  const lastRevision = devReloadSessionValue(
+    DEV_RELOAD_LAST_REVISION_KEY
+  );
+  if (!lastRevision) {
+    setDevReloadSessionValue(
+      DEV_RELOAD_LAST_REVISION_KEY,
+      marker.revision
+    );
+    announceDevReload(
+      "개발용 안전 핫 리로드가 연결됐습니다.",
+      "success"
+    );
+    return;
+  }
+  if (lastRevision === marker.revision) {
+    return;
+  }
+  if (marker.kind === "initial") {
+    await hardReloadEditorFromMarker({
+      ...marker,
+      kind: "editor"
+    });
+    return;
+  }
+
+  if (marker.kind === "style") {
+    await replaceDevReloadStylesheet(marker.revision);
+    setDevReloadSessionValue(
+      DEV_RELOAD_LAST_REVISION_KEY,
+      marker.revision
+    );
+    devReloadNotice = "";
+    announceDevReload(
+      "CSS 변경을 영상·재생 위치 그대로 반영했습니다.",
+      "success"
+    );
+    return;
+  }
+  if (marker.kind === "editor") {
+    await hardReloadEditorFromMarker(marker);
+    return;
+  }
+
+  if (marker.kind === "extension") {
+    await flushSave();
+    await waitForProjectSaves();
+  }
+  setDevReloadSessionValue(
+    DEV_RELOAD_LAST_REVISION_KEY,
+    marker.revision
+  );
+  announceDevReload(
+    marker.kind === "content"
+      ? "원본 페이지 bridge 변경을 빌드했습니다. 좌표 작업 보호를 위해 원본 탭은 자동 새로고침하지 않습니다."
+      : "확장 설정 변경을 빌드하고 CURRENT를 유지했습니다. chrome://extensions에서 확장을 다시 로드해 주세요.",
+    "info",
+    0
+  );
+}
+
+function scheduleDevReloadPoll(delayMs = DEV_RELOAD_POLL_INTERVAL_MS) {
+  clearTimeout(devReloadPollTimer);
+  devReloadPollTimer = setTimeout(() => {
+    devReloadPollTimer = null;
+    void pollDevReloadMarker();
+  }, delayMs);
+}
+
+async function pollDevReloadMarker() {
+  if (
+    !devReloadEnabled()
+    || !devReloadObserverActive
+    || devReloadProcessing
+  ) {
+    return;
+  }
+  devReloadProcessing = true;
+  try {
+    const marker = await readDevReloadMarker();
+    if (!marker) {
+      devReloadMissingCount += 1;
+      if (devReloadMissingCount >= DEV_RELOAD_FETCH_FAILURE_LIMIT) {
+        devReloadObserverActive = false;
+        announceDevReload(
+          "개발용 marker가 없어 안전 핫 리로드 감시를 종료했습니다.",
+          "info"
+        );
+        return;
+      }
+    } else {
+      devReloadMissingCount = 0;
+      await applyDevReloadMarker(marker);
+    }
+  } catch (error) {
+    announceDevReload(
+      `핫 리로드 변경을 적용하지 않았습니다: ${error.message}`,
+      "error",
+      0
+    );
+  } finally {
+    devReloadProcessing = false;
+  }
+  if (devReloadObserverActive) {
+    scheduleDevReloadPoll();
+  }
+}
+
+function startDevReloadObserver() {
+  if (!devReloadEnabled()) {
+    return;
+  }
+  devReloadObserverActive = true;
+  scheduleDevReloadPoll(0);
+}
+
+function stopDevReloadObserver() {
+  devReloadObserverActive = false;
+  clearTimeout(devReloadPollTimer);
+  devReloadPollTimer = null;
 }
 
 async function restoreSelectedLocalDraft() {
@@ -4291,10 +4683,18 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
 }
 
 function readCaptionAgentConfig() {
+  const model = elements.caption_model.value;
+  if (model === AUDSEG_DRAFT_MODEL) {
+    return {
+      endpoint: captionAgentSettings.endpoint,
+      model,
+      token: ""
+    };
+  }
   return {
     endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
     token: elements.caption_agent_token.value,
-    model: elements.caption_model.value
+    model
   };
 }
 
@@ -4563,13 +4963,16 @@ async function generateCaptions() {
   const allEnabledClips = project.clips.filter(
     (clip) => clip.enabled !== false
   );
+  const selectedModel = elements.caption_model.value;
+  const audsegMode = selectedModel === AUDSEG_DRAFT_MODEL;
+  const clipLimit = captionAgentRunClipLimit(selectedModel);
   if (allEnabledClips.length === 0) {
     showToast("선택한 구간이 없습니다.", "error");
     return;
   }
-  if (allEnabledClips.length > MAX_CAPTION_AGENT_CLIPS_PER_RUN) {
+  if (clipLimit != null && allEnabledClips.length > clipLimit) {
     showToast(
-      `한 번에 자막을 만들 수 있는 활성 컷은 최대 ${MAX_CAPTION_AGENT_CLIPS_PER_RUN}개입니다.`,
+      `한 번에 Whisper 자막 초안을 만들 수 있는 활성 컷은 최대 ${clipLimit}개입니다. 컷을 ${clipLimit}개 이하 묶음으로 나눠 실행해 주세요.`,
       "error",
       0
     );
@@ -4578,8 +4981,19 @@ async function generateCaptions() {
   if (activeJobController || projectMutationLockCount > 0) {
     return;
   }
-  const selectedModel = elements.caption_model.value;
-  const audsegMode = selectedModel === AUDSEG_DRAFT_MODEL;
+  try {
+    for (const clip of allEnabledClips) {
+      const durationMs = clipDurationMs(clip);
+      if (audsegMode) {
+        audSegAudioFootprint(durationMs);
+      } else {
+        captionAgentAudioFootprint(durationMs);
+      }
+    }
+  } catch (error) {
+    showToast(error.message, "error", 0);
+    return;
+  }
   const returnFocus = document.activeElement;
   const controller = new AbortController();
   activeJobController = controller;
@@ -4718,7 +5132,6 @@ async function generateCaptions() {
       const clip = clips[index];
       const base = index / clips.length;
       const span = 1 / clips.length;
-      captionAgentAudioFootprint(clipDurationMs(clip));
       setAiProgress(
         base,
         `${index + 1}/${clips.length} · 선택 구간의 음성을 준비하는 중`
@@ -4845,7 +5258,12 @@ async function generateCaptions() {
               requestId: result.requestId,
               editorialContextFingerprint: trustedContextFingerprint,
               pipelineFingerprint: runtime.fingerprint
-            })
+            }),
+            {
+              maximum: audsegMode
+                ? allEnabledClips.length
+                : MAX_CAPTION_AGENT_CLIPS_PER_RUN
+            }
           ),
           status: "running",
           progress: Math.min(0.99, (index + 1) / clips.length),
@@ -6465,9 +6883,11 @@ async function initialize() {
   } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;
+  let devReloadRestored = false;
   if (storedProject) {
     if (resumeSavedSession) {
       project = storedProject;
+      devReloadRestored = verifyExpectedDevReloadProject(project);
     } else {
       try {
         project = mergeCaptureIntoEditorProject(storedProject, captureState);
@@ -6534,6 +6954,14 @@ async function initialize() {
   if (openRecoveryDrafts) {
     await openLocalDraftDialog();
   }
+  if (devReloadRestored) {
+    showToast(
+      "핫 리로드 직전 CURRENT를 확인하고 같은 프로젝트를 다시 열었습니다.",
+      "success",
+      5_000
+    );
+  }
+  startDevReloadObserver();
 }
 
 function applyCaptureSeedUpdate(captureState) {
@@ -6751,6 +7179,7 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 window.addEventListener("beforeunload", () => {
+  stopDevReloadObserver();
   stopLocalDraftAutosave();
   stopPreviewPlaybackClock();
   stopPreviewAudioClock({ sync: false });
@@ -6764,6 +7193,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 window.addEventListener("pagehide", () => {
+  stopDevReloadObserver();
   stopLocalDraftAutosave();
   void flushSave();
 });
@@ -6794,6 +7224,9 @@ window.addEventListener("pageshow", () => {
     scheduleLocalDraftAutosave(
       Math.max(0, LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS - elapsed)
     );
+  }
+  if (project && devReloadEnabled() && !devReloadObserverActive) {
+    startDevReloadObserver();
   }
 });
 

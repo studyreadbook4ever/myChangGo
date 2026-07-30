@@ -13,9 +13,23 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { EXTENSION_PACKAGE_FILES } from "./extension-package-files.mjs";
+import {
+  acquireDevRunnerLock,
+  failClosedOnDevRunnerOwnerLoss,
+  releaseDevRunnerLock
+} from "./dev-runner-lock.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const extensionRoot = path.join(root, "extension");
+const devRunnerLockPath = path.join(root, ".dev-editor.lock");
+const devRunnerLockLease = await acquireDevRunnerLock(devRunnerLockPath, {
+  pid: process.pid,
+  role: "package",
+  inheritedToken: process.env.KIRINUKI_RELEASE_LOCK_TOKEN,
+  onOwnerLost: failClosedOnDevRunnerOwnerLoss("package")
+});
+
+try {
 const manifest = JSON.parse(await readFile(path.join(extensionRoot, "manifest.json"), "utf8"));
 const version = manifest.version;
 const distRoot = path.join(root, "dist");
@@ -27,6 +41,14 @@ function assert(condition, message) {
     throw new Error(message);
   }
 }
+
+const packageMetadata = JSON.parse(
+  await readFile(path.join(root, "package.json"), "utf8")
+);
+assert(
+  packageMetadata.version === version,
+  "package.json과 Extension manifest 버전이 다릅니다."
+);
 
 async function listFiles(directory, prefix = "") {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -135,3 +157,6 @@ console.log(JSON.stringify({
   sha256: digest,
   checksum: path.relative(root, checksumPath)
 }, null, 2));
+} finally {
+  await releaseDevRunnerLock(devRunnerLockLease);
+}

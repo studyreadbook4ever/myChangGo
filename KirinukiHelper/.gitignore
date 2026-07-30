@@ -24,5 +24,9 @@ dist/
 *.webm
 *.kirinuki.json
 raw-transcript.json
+extension/dev-reload.json
+extension/dev-reload.json.*.tmp
+.dev-editor.lock
+.dev-editor.lock.*.tmp
 *.py[cod]
 .DS_Store

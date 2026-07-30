@@ -13,6 +13,7 @@ const PROJECT_STORE = "projects";
 const LOCAL_DRAFT_STORE = "local-drafts";
 const SEED_PREFIX = "chzzkKirinukiEditorSeed:";
 const STORAGE_KEY = "chzzkKirinukiProjectV1";
+const CAPTION_AGENT_SETTINGS_KEY = "chzzk-kirinuki-caption-agent-settings-v3";
 const WORKSPACE_META_KEY = "chzzkKirinukiWorkspaceMetaV1";
 const BINDINGS_KEY = "chzzkKirinukiSourceBindingsV1";
 const LEGACY_MODEL_CACHE_NAME = "transformers-cache";
@@ -906,18 +907,27 @@ async function main() {
   const seedResult = await executeAsync(`
     const key = arguments[0];
     const captureState = arguments[1];
+    const captionSettingsKey = arguments[2];
     const done = arguments[arguments.length - 1];
     chrome.storage.local.set({
       [key]: {
         captureState,
         sourceTabId: null,
         updatedAt: new Date().toISOString()
+      },
+      [captionSettingsKey]: {
+        endpoint: "malformed-whisper-endpoint",
+        model: "audseg-local"
       }
     }, () => {
       const error = chrome.runtime.lastError;
       done(error ? { error: error.message } : { ok: true });
     });
-  `, [`${SEED_PREFIX}${PROJECT_ID}`, captureState]);
+  `, [
+    `${SEED_PREFIX}${PROJECT_ID}`,
+    captureState,
+    CAPTION_AGENT_SETTINGS_KEY
+  ]);
   assert(seedResult?.ok, `extension storage seed 실패: ${seedResult?.error || "알 수 없는 오류"}`);
 
   const editorUrl = `chrome-extension://${extensionId}/editor.html?project=${encodeURIComponent(PROJECT_ID)}`;
@@ -1114,8 +1124,14 @@ async function main() {
 
   const aiProbeSetup = await executeSync(`
     const button = document.querySelector("#generate-captions");
+    const captionModel = document.querySelector("#caption-model");
+    const captionEndpoint = document.querySelector("#caption-agent-endpoint");
+    captionModel.value = "whisper-tiny";
+    captionEndpoint.value = "http://127.0.0.1:4319/v1/captions";
+    captionModel.dispatchEvent(new Event("change", { bubbles: true }));
     globalThis.__kirinukiE2eOriginalFetch = globalThis.fetch;
     globalThis.__kirinukiE2eCaptionFetch = {
+      sessions: 0,
       probes: 0,
       requests: 0,
       aborted: 0,
@@ -1125,7 +1141,24 @@ async function main() {
     };
     globalThis.fetch = (input, init = {}) => {
       if (String(input).startsWith("http://127.0.0.1:4319/")) {
-        if (String(init.method || "GET").toUpperCase() === "GET") {
+        const method = String(init.method || "GET").toUpperCase();
+        if (
+          method === "POST"
+          && String(input).endsWith("/v1/session")
+        ) {
+          globalThis.__kirinukiE2eCaptionFetch.sessions += 1;
+          return Promise.resolve(new Response(JSON.stringify({
+            schema: "chzzk-kirinuki-caption-agent/session-v1",
+            status: "ok",
+            authentication: "bearer-process-memory",
+            expires: "companion-restart",
+            token: "e2e-local-session-token-1234567890"
+          }), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }));
+        }
+        if (method === "GET") {
           globalThis.__kirinukiE2eCaptionFetch.probes += 1;
           return Promise.resolve(new Response(JSON.stringify({
             schema: "chzzk-kirinuki-caption-agent/capability-v1",
@@ -1197,11 +1230,14 @@ async function main() {
     });
     return {
       activeId: document.activeElement?.id || null,
-      fetchWrapped: globalThis.fetch !== globalThis.__kirinukiE2eOriginalFetch
+      fetchWrapped: globalThis.fetch !== globalThis.__kirinukiE2eOriginalFetch,
+      model: captionModel.value
     };
   `);
   assert(
-    aiProbeSetup.activeId === "generate-captions" && aiProbeSetup.fetchWrapped,
+    aiProbeSetup.activeId === "generate-captions"
+      && aiProbeSetup.fetchWrapped
+      && aiProbeSetup.model === "whisper-tiny",
     `AI dialog probe 준비 실패: ${JSON.stringify(aiProbeSetup)}`
   );
 
@@ -1310,7 +1346,8 @@ async function main() {
     `).catch(() => null);
   }
   assert(
-    aiFetchProbe?.probes === 2 &&
+    aiFetchProbe?.sessions === 1 &&
+      aiFetchProbe?.probes === 1 &&
       aiFetchProbe?.requests === 1 &&
       aiFetchProbe?.aborted === 1 &&
       aiFetchProbe?.lastModel === "whisper-tiny" &&
@@ -1380,6 +1417,8 @@ async function main() {
       endpointCalls: []
     };
     const captionModel = document.querySelector("#caption-model");
+    const captionEndpoint = document.querySelector("#caption-agent-endpoint");
+    captionEndpoint.value = "malformed-whisper-endpoint";
     globalThis.fetch = async (input, init = {}) => {
       const trace = globalThis.__kirinukiE2eAiSuccessFetch;
       const url = String(input);
@@ -1396,6 +1435,7 @@ async function main() {
       tokenHidden: document.querySelector("#caption-agent-token")?.type === "hidden",
       tokenPresent: Boolean(document.querySelector("#caption-agent-token")?.value),
       modelValue: captionModel.value,
+      malformedEndpoint: captionEndpoint.value,
       advancedHidden: document.querySelector("#caption-advanced-settings")?.hidden
     };
   `);
@@ -1403,6 +1443,7 @@ async function main() {
     aiSuccessSetup.wrapped &&
       aiSuccessSetup.tokenHidden === true &&
       aiSuccessSetup.modelValue === "audseg-local" &&
+      aiSuccessSetup.malformedEndpoint === "malformed-whisper-endpoint" &&
       aiSuccessSetup.advancedHidden === true,
     `AudSeg 성공 경로 준비 실패: ${JSON.stringify(aiSuccessSetup)}`
   );
@@ -1728,12 +1769,45 @@ async function main() {
     "cue trim handle Arrow nudge autosave"
   );
 
+  await clickElement(`.cue-block[data-id="${cueId}"] .cue-block-body`);
+  await waitUntil(
+    () => executeSync(`
+      return [...document.querySelectorAll("#subtitle-overlays .subtitle-overlay")]
+        .some((overlay) => overlay.dataset.cueId === arguments[0] && !overlay.hidden);
+    `, [cueId]),
+    "자막 input hot reload 검증용 overlay 표시"
+  );
   await clearAndType("#cue-text", EDITED_TEXT);
-  await executeSync("document.querySelector('#cue-text').blur();");
+  const cueTextHotReload = await waitUntil(async () => {
+    const state = await executeSync(`
+      const cueId = arguments[0];
+      const timeline = document.querySelector(
+        '.cue-block[data-id="' + cueId + '"] .cue-block-body'
+      );
+      const overlay = [
+        ...document.querySelectorAll("#subtitle-overlays .subtitle-overlay")
+      ].find((candidate) => candidate.dataset.cueId === cueId);
+      return {
+        activeId: document.activeElement?.id || null,
+        inputText: document.querySelector("#cue-text")?.value || "",
+        timelineText: timeline?.textContent || "",
+        overlayText: overlay?.textContent || "",
+        overlayVisible: Boolean(overlay && !overlay.hidden)
+      };
+    `, [cueId]);
+    return (
+      state.activeId === "cue-text"
+      && state.inputText === EDITED_TEXT
+      && state.timelineText === EDITED_TEXT
+      && state.overlayText === EDITED_TEXT
+      && state.overlayVisible
+    ) ? state : false;
+  }, "자막 input 직후 timeline·preview hot reload");
   await waitForStoredProject(
     (project) => project.subtitles.some((cue) => cue.id === cueId && cue.text === EDITED_TEXT),
-    "직접 수정한 자막 텍스트 autosave"
+    "blur 전 직접 수정한 자막 텍스트 autosave"
   );
+  await executeSync("document.querySelector('#cue-text').blur();");
 
   await clickElement("#next-clip");
   await delay(200);
@@ -4581,6 +4655,7 @@ async function main() {
         before: cueHandleNudgeBefore,
         after: cueHandleNudgeAfter
       },
+      cueTextHotReload,
       reorderKeyboardFocus,
       clipGroupMove: clipGroupMoveSmoke,
       rippleRange: {
