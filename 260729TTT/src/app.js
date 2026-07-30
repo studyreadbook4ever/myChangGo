@@ -26,7 +26,7 @@ const EXHIBITS = [
 const EXHIBIT_LABELS = {
   entrance: "축제 전날",
   scarcity: "부족함의 창고",
-  garden: "조합의 정원",
+  garden: "조합 비교표",
   shadow: "보이지 않는 가격표",
   mirror: "데이터의 거울",
   parallel: "평행세계 실험실",
@@ -83,7 +83,7 @@ const GOALS = {
 const AUDIT_ITEMS = [
   {
     id: "shadow",
-    text: "“이 전시의 이산 한계가치는 지금 자원 한 칸이 더 생길 때의 가치예요.”",
+    text: "“이 실험의 이산 한계가치는 지금 자원 한 칸이 더 생길 때의 가치예요.”",
     agentLabel: "understood",
     truth: "understood",
   },
@@ -179,7 +179,7 @@ const QUIZ = [
     ],
     correct: "estimate-range",
     explanation:
-      "추정값 하나는 정답표가 아닙니다. 전시의 0~4점은 원리 설명용일 뿐이며, 실제 연구에서는 범위의 뜻과 계산법을 정해 자료로 계산하고 설계 가정도 밝혀야 합니다.",
+      "추정값 하나는 정답표가 아닙니다. 실험의 0~4점은 원리 설명용일 뿐이며, 실제 연구에서는 범위의 뜻과 계산법을 정해 자료로 계산하고 설계 가정도 밝혀야 합니다.",
   },
   {
     id: "agent",
@@ -300,7 +300,7 @@ function syncCertificateState({ scroll = false } = {}) {
     const result = document.querySelector("#quiz-result");
     if (result) {
       result.className = "quiz-result is-success";
-      result.textContent = `${QUIZ.length} / ${QUIZ.length} + 전시 9곳 체험. 새 상황에 개념을 옮겼습니다. 한 바퀴 이해 완료!`;
+      result.textContent = `${QUIZ.length} / ${QUIZ.length} + 실험 9곳 완료. 새 상황에 개념을 옮겼습니다. 한 바퀴 이해 완료!`;
     }
     if (scroll) {
       certificate.scrollIntoView({
@@ -311,6 +311,7 @@ function syncCertificateState({ scroll = false } = {}) {
   } else {
     delete state.completed.exit;
   }
+  updateProgress();
   return ready;
 }
 
@@ -361,7 +362,7 @@ function trimAllocationToBudget() {
 
 function updateProgress() {
   const completed = EXHIBITS.filter((exhibit) => state.completed[exhibit]).length;
-  document.querySelector("#progress-label").textContent = `${completed} / ${EXHIBITS.length} 관`;
+  document.querySelector("#progress-label").textContent = `${completed} / ${EXHIBITS.length} 단계`;
   document.querySelector("#progress-bar").style.width = `${(completed / EXHIBITS.length) * 100}%`;
 }
 
@@ -394,8 +395,8 @@ function applyExplanationMode() {
     details.open = guided;
   });
   document.querySelector("#visit-duration").textContent = guided
-    ? "약 25분 · 9개 전시 + 출구 검표소 · 정답보다 좋은 질문"
-    : "약 12분 · 9개 전시 + 출구 검표소 · 핵심 체험";
+    ? "약 25분 · 9개 실험 + 전이 검표 · 정답보다 좋은 질문"
+    : "약 12분 · 9개 실험 + 전이 검표 · 핵심 체험";
 }
 
 function renderAllocation() {
@@ -480,7 +481,7 @@ function renderOptimizer() {
       <div class="closed-curtain" aria-hidden="true">
         <span></span><b>결과는 계산 뒤 열립니다</b><span></span>
       </div>`;
-    garden.innerHTML = '<p class="empty-state">계산 버튼을 누르면 조합들이 꽃처럼 펼쳐집니다.</p>';
+    garden.innerHTML = '<p class="empty-state">계산 버튼을 누르면 높은 점수의 조합을 표로 비교합니다.</p>';
     return;
   }
 
@@ -966,7 +967,7 @@ function checkQuiz(event) {
     } else {
       result.className = "quiz-result is-review";
       result.textContent =
-        `${QUIZ.length} / ${QUIZ.length} 이해 완료! 한 바퀴 도장은 아직 ${missing.map((id) => EXHIBIT_LABELS[id]).join(" · ")} 체험 뒤 열립니다.`;
+        `${QUIZ.length} / ${QUIZ.length} 이해 완료! 학습 기록은 아직 ${missing.map((id) => EXHIBIT_LABELS[id]).join(" · ")} 체험 뒤 완성됩니다.`;
       syncCertificateState();
     }
   } else {
@@ -999,7 +1000,7 @@ function docentMessages() {
       short: state.optimizerRun
         ? `현재 목표의 최적안은 ${allocationLabel(optimum.allocations)}, ${formatNumber(optimum.totalValue)}점이야.`
         : "네 예상부터 남기고 모든 조합을 계산해 보자. 틀린 예상도 좋은 관찰 기록이야.",
-      analogy: "정원 길을 전부 걸어 보고, 네가 정한 풍경 점수가 가장 높은 길을 표시하는 셈이야.",
+      analogy: "가능한 조합표를 전부 훑고, 네가 정한 점수가 가장 높은 행을 표시하는 셈이야.",
       deep: `먼저 ${state.budget}칸을 넘는 불가능한 조합을 버리고, 남은 정수 조합의 점수를 하나씩 모두 계산해. 그래서 ${allocationLabel(optimum.allocations)}의 ${formatNumber(optimum.totalValue)}점이 정말 최고인지 검산할 수 있어.`,
     },
     shadow: {
@@ -1044,7 +1045,7 @@ function docentMessages() {
       short: state.quizMastered
         ? "축하해. 축제 밖 대피소 문제에도 같은 생각법을 옮겼어."
         : "새 상황에서 목표·제약·인과·승인을 다시 구분하면 진짜 네 지식이 돼.",
-      analogy: "박물관 지도를 외운 게 아니라 다른 도시에서도 북쪽을 찾을 수 있는지 보는 마지막 문이야.",
+      analogy: "예제를 외운 게 아니라 다른 상황에서도 같은 판단 구조를 복원하는지 보는 마지막 확인이야.",
       deep: "전이는 배운 생각을 처음 보는 문제에 옮겨 쓰는 능력이야. 축제 이름은 잊어도 ‘효과를 추정하고, 제약 안에서 배분하고, 사람이 승인하고, 새 자료로 고친다’는 순서는 남겨 봐.",
     },
   };
@@ -1081,7 +1082,7 @@ function setActiveExhibit(id) {
 }
 
 function resetTour() {
-  const confirmed = window.confirm("관람 선택과 도장을 모두 초기화할까요? 프로젝트 파일은 바뀌지 않습니다.");
+  const confirmed = window.confirm("학습 선택과 완료 기록을 모두 초기화할까요? 프로젝트 파일은 바뀌지 않습니다.");
   if (!confirmed) return;
   localStorage.removeItem(STORAGE_KEY);
   window.location.reload();
@@ -1476,6 +1477,7 @@ function hydrate() {
   updateProgress();
   setDocentDepth(state.docentDepth);
   observeExhibits();
+  document.documentElement.dataset.ready = "true";
 }
 
 bindEvents();

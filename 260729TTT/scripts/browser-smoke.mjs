@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const port = 4279;
 const baseUrl = `http://127.0.0.1:${port}/`;
+const pageUrl = `${baseUrl}lab.html`;
 const chromiumCandidates = [
   process.env.CHROMIUM_PATH,
   "/usr/bin/chromium",
@@ -120,7 +121,7 @@ async function main() {
     env: { ...process.env, PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  await waitForHttp(baseUrl);
+  await waitForHttp(pageUrl);
 
   browser = spawn(
     chromiumPath,
@@ -137,7 +138,7 @@ async function main() {
       "--remote-debugging-port=0",
       `--user-data-dir=${profile}`,
       "--window-size=1440,1000",
-      baseUrl,
+      pageUrl,
     ],
     { stdio: ["ignore", "ignore", "pipe"] },
   );
@@ -162,11 +163,11 @@ async function main() {
     return result.result.value;
   }
 
-  for (let attempt = 0; attempt < 80; attempt += 1) {
-    if ((await evaluate("document.readyState")) === "complete") break;
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if ((await evaluate("document.documentElement.dataset.ready")) === "true") break;
     await wait(50);
   }
-  await wait(150);
+  assert.equal(await evaluate("document.documentElement.dataset.ready"), "true");
 
   const initial = await evaluate(`(() => ({
     title: document.title,
@@ -203,8 +204,8 @@ async function main() {
       .every((url) => url.startsWith("${baseUrl}")),
     noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
   }))()`);
-  assert.equal(initial.title, "선택의 박물관 · 260729 TTT");
-  assert.equal(initial.h1.replace(/\s+/g, " "), "선택의 박물관");
+  assert.equal(initial.title, "계산 실험실 · 하루의 목적함수");
+  assert.equal(initial.h1.replace(/\s+/g, " "), "선택의 계산실");
   assert.equal(initial.quizCount, 8);
   assert.equal(initial.walkthroughCount, 10);
   assert.equal(initial.openWalkthroughCount, 10);
@@ -216,7 +217,7 @@ async function main() {
   assert.equal(initial.summaryFocus.visible, true);
   assert.equal(initial.summaryFocus.outlineOffset, "-4px");
   assert.equal(initial.darkSummaryFocus.visible, true);
-  assert.equal(initial.darkSummaryFocus.outlineColor, "rgb(255, 202, 92)");
+  assert.equal(initial.darkSummaryFocus.outlineColor, "rgb(0, 95, 204)");
   assert.deepEqual(initial.duplicateIds, []);
   assert.equal(initial.localOnly, true);
   assert.equal(initial.noHorizontalOverflow, true);
@@ -275,7 +276,7 @@ async function main() {
     };
   })()`);
   assert.equal(earlyQuiz.certificateHidden, true);
-  assert.match(earlyQuiz.result, /체험 뒤 열립니다/);
+  assert.match(earlyQuiz.result, /체험 뒤 완성됩니다/);
 
   const journey = await evaluate(`(() => {
     const click = (selector) => {
@@ -514,15 +515,15 @@ async function main() {
     completed: { entrance: true, unknown: true }
   }))`);
   await cdp.send("Page.reload", { ignoreCache: true });
-  for (let attempt = 0; attempt < 80; attempt += 1) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     await wait(50);
     try {
-      if ((await evaluate("document.readyState")) === "complete") break;
+      if ((await evaluate("document.documentElement.dataset.ready")) === "true") break;
     } catch {
       // The JavaScript execution context is briefly replaced during reload.
     }
   }
-  await wait(150);
+  assert.equal(await evaluate("document.documentElement.dataset.ready"), "true");
   const recovered = await evaluate(`(() => ({
     monthlyPrice: document.querySelector("#monthly-price").value,
     shadow: document.querySelector("#shadow-value").textContent,

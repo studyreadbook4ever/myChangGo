@@ -1,0 +1,870 @@
+/*
+ * Lab-only editorial layer.
+ *
+ * The original interaction model and selectors remain untouched. This file
+ * deliberately turns the museum staging into a quiet paper-and-ink workbook.
+ */
+
+:root {
+  --ink: #1f2a30;
+  --muted: #5d686d;
+  --paper: #f1eee6;
+  --paper-deep: #e7e2d7;
+  --white: #fffefa;
+  --blue: #263943;
+  --blue-bright: #365d70;
+  --orange: #8d4233;
+  --yellow: #d8b65b;
+  --teal: #416c64;
+  --teal-light: #e2ece8;
+  --line: rgba(31, 42, 48, 0.22);
+  --shadow: none;
+  --radius: 4px;
+  --focus: #005fcc;
+  --topbar-height: 74px;
+}
+
+html {
+  scroll-behavior: auto;
+}
+
+body {
+  background: var(--paper);
+  font-size: 1rem;
+  line-height: 1.72;
+}
+
+body::before,
+.hero-orbit,
+.ticket__barcode,
+.ticket::before,
+.ticket::after,
+.exhibit::after,
+.shadow-gauge__halo {
+  display: none;
+}
+
+body *,
+body *::before,
+body *::after {
+  animation: none !important;
+  box-shadow: none !important;
+  text-shadow: none !important;
+  transition: none !important;
+}
+
+img,
+svg,
+table {
+  max-width: 100%;
+}
+
+/* Header: three explicit columns, including the course return link. */
+
+.topbar {
+  grid-template-columns: auto minmax(220px, 1fr) minmax(170px, 280px);
+  gap: 16px;
+  min-height: var(--topbar-height);
+  padding: 9px clamp(14px, 2.5vw, 36px);
+  border-bottom: 1px solid #172229;
+  background: #26343b;
+  backdrop-filter: none;
+}
+
+#motion-toggle {
+  /* Ambient motion is already removed in this editorial layer. */
+  display: none;
+}
+
+.course-return {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.36);
+  border-radius: 3px;
+  color: #fffefa;
+  font-size: 0.8rem;
+  font-weight: 800;
+  line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.course-return:hover {
+  border-color: #fffefa;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.brand {
+  min-width: 0;
+}
+
+.brand__mark {
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 2px;
+  color: #f1d88f;
+  transform: none;
+}
+
+.brand small {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.progress-track,
+.progress-track__fill {
+  border-radius: 1px;
+}
+
+.progress-track {
+  height: 5px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.progress-track__fill {
+  background: #d9c583;
+}
+
+.icon-button,
+.text-button,
+.primary-cta,
+.primary-button,
+.secondary-button {
+  border-radius: 3px;
+}
+
+.icon-button {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: transparent;
+}
+
+.icon-button:hover,
+.icon-button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Page frame and table-of-contents rail. */
+
+.museum-shell {
+  width: min(1540px, 100%);
+  grid-template-columns: 200px minmax(0, 880px) 250px;
+  gap: clamp(18px, 2.2vw, 34px);
+  padding: 30px clamp(14px, 2.5vw, 36px) 84px;
+}
+
+.route-map {
+  padding: 10px 12px 16px;
+  border-left: 1px solid var(--line);
+}
+
+.route-map li::before {
+  left: -16px;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--paper);
+  border-radius: 1px;
+}
+
+.route-map li:has(a.is-active)::before {
+  background: var(--orange);
+}
+
+.route-map a {
+  min-height: 42px;
+  border-radius: 2px;
+}
+
+.route-map a:hover,
+.route-map a.is-active {
+  background: rgba(255, 254, 250, 0.76);
+}
+
+main,
+.exhibit,
+.optimization-stage > div,
+.chart-card,
+.proposal-card,
+.break-even-controls,
+.cost-balance {
+  min-width: 0;
+}
+
+/* A single editorial surface replaces room-by-room stage scenery. */
+
+.exhibit,
+.exhibit--hero,
+.exhibit--garden,
+.exhibit--dark,
+.exhibit--split,
+.exhibit--cockpit,
+.exhibit--workshop,
+.exhibit--exit {
+  min-height: 0;
+  margin-bottom: 24px;
+  padding: clamp(34px, 5vw, 58px);
+  overflow: clip;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--white);
+  color: var(--ink);
+}
+
+.exhibit--hero {
+  justify-content: flex-start;
+}
+
+h1 {
+  font-size: clamp(2.8rem, 6vw, 4.6rem);
+}
+
+h2 {
+  font-size: clamp(2rem, 4.5vw, 3.6rem);
+}
+
+.exhibit__number,
+.lesson-label,
+.plaque__date {
+  color: var(--orange);
+}
+
+.exhibit--dark .exhibit__one-line,
+.exhibit--dark .lesson-grid p,
+.exhibit--dark .worked-example p,
+.exhibit--dark .teach-back,
+.exhibit--dark .room-bridge span,
+.exhibit--dark .deep-dive p {
+  color: var(--muted);
+}
+
+.exhibit--dark .concept-walkthrough > summary,
+.exhibit--dark .worked-example,
+.exhibit--dark .shadow-console,
+.exhibit--dark .shadow-console__result {
+  color: var(--ink);
+}
+
+.exhibit--dark button:focus-visible,
+.exhibit--dark a:focus-visible,
+.exhibit--dark input:focus-visible,
+.exhibit--dark textarea:focus-visible,
+.exhibit--dark summary:focus-visible,
+.exhibit--dark [tabindex="-1"]:focus-visible {
+  outline-color: var(--focus);
+}
+
+/* Notes, lessons and controls use straight rules rather than props. */
+
+.plaque,
+.ticket,
+.value-badges label span,
+.reading-mode label > span,
+.concept-strip span,
+.allocation-card,
+.scoreboard,
+.deep-dive,
+.concept-walkthrough,
+.lesson-grid article,
+.worked-example,
+.misconception,
+.teach-back,
+.room-bridge,
+.portrait-story,
+.optimization-stage > div,
+.candidate-card,
+.equation-card,
+.shadow-console,
+.shadow-gauge,
+.truth-cards article,
+.question-banner,
+.mirror-controls,
+.chart-card,
+.answer-panel,
+.data-table-details,
+.warning-note,
+.parallel-worlds article,
+.experiment-choice,
+.experiment-cards button,
+.experiment-result,
+.uncertainty-ruler,
+.audit-item,
+.audit-meter,
+.future-cards article,
+.agent-loop li,
+.proposal-card,
+.evidence-list,
+.approval-gates,
+.approval-gates label,
+.decision-log,
+.human-attention,
+.workshop-note,
+.break-even-controls,
+.cost-balance,
+.cost-balance > p,
+.zero-boundaries span,
+.meta-exhibit,
+.price-lab,
+.price-grid label,
+.price-grid input[type="number"],
+.price-result,
+.transfer-case,
+.quiz-question,
+.quiz-options label,
+.quiz-explanation,
+.quiz-result,
+.certificate,
+.final-loop div,
+.sources,
+.docent,
+.docent__message,
+.docent__depth button,
+.noscript-note {
+  border-radius: 3px;
+}
+
+.plaque {
+  border: 1px solid #b9ae98;
+  background: #f4f0e5;
+}
+
+.plaque--hero {
+  transform: none;
+}
+
+.ticket {
+  grid-template-columns: 1fr;
+  border: 1px solid #a99d88;
+  background: #faf8f1;
+}
+
+.instruction-tag,
+.agent-chip,
+.status-chip,
+.proposal-allocation span,
+.metric-badge {
+  border-radius: 2px;
+}
+
+.instruction-tag {
+  background: #eee2bb;
+}
+
+.primary-cta,
+.primary-button {
+  background: var(--blue);
+  color: white;
+}
+
+.primary-cta:hover,
+.primary-button:hover {
+  background: #172a34;
+  transform: none;
+}
+
+.secondary-button {
+  background: #fffefa;
+}
+
+.concept-walkthrough,
+.exhibit--dark .concept-walkthrough {
+  border: 1px solid var(--line);
+  background: #f8f7f2;
+}
+
+.concept-walkthrough > summary::after,
+.exhibit--dark .concept-walkthrough > summary::after {
+  border-radius: 2px;
+  background: var(--blue);
+  color: white;
+}
+
+.concept-walkthrough[open] > summary,
+.exhibit--dark .concept-walkthrough[open] > summary {
+  border-bottom-color: var(--line);
+}
+
+.lesson-grid article,
+.exhibit--dark .lesson-grid article {
+  border-color: var(--line);
+  background: #fffefa;
+}
+
+.lesson-grid h3,
+.exhibit--dark .lesson-grid h3 {
+  color: var(--blue);
+}
+
+.worked-example,
+.exhibit--dark .worked-example {
+  border: 1px solid #c9c2b4;
+  background: #ece9e1;
+  color: var(--ink);
+}
+
+.worked-example > span,
+.worked-example b,
+.worked-example p {
+  color: inherit;
+}
+
+.worked-example li {
+  border-color: #c5beb0;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.worked-example li::before {
+  border-radius: 2px;
+  background: var(--blue);
+  color: white;
+}
+
+.misconception,
+.misconception--dark {
+  border-left-color: var(--orange);
+  background: #f3e8e2;
+}
+
+.misconception b,
+.misconception--dark b {
+  color: #743328;
+}
+
+.misconception p,
+.misconception--dark p {
+  color: #59423e;
+}
+
+.teach-back,
+.exhibit--dark .teach-back {
+  border-color: #6f8c85;
+  background: #edf2ef;
+  color: #294a43;
+}
+
+.room-bridge,
+.room-bridge--dark {
+  border-color: var(--line);
+  background: var(--line);
+}
+
+.room-bridge p,
+.room-bridge--dark p {
+  background: #fffefa;
+}
+
+/* Remove theatrical shapes from result visualizations. */
+
+.closed-curtain span {
+  height: 1px;
+  border-radius: 0;
+  background: var(--line);
+}
+
+.candidate-card,
+.candidate-card.is-best {
+  min-height: 0;
+  border: 1px solid var(--line);
+  background: #fffefa;
+}
+
+.candidate-card.is-best {
+  border-left: 4px solid var(--teal);
+}
+
+.shadow-console {
+  border-color: var(--line);
+  background: #f5f3ed;
+}
+
+.prediction-buttons--dark button {
+  border-color: var(--line);
+  background: #fffefa;
+  color: var(--ink);
+}
+
+.prediction-buttons--dark button:hover,
+.prediction-buttons--dark button.is-selected {
+  border-color: var(--orange);
+  background: #f3e8e2;
+  color: #743328;
+}
+
+.primary-button--light {
+  background: var(--blue);
+  color: white;
+}
+
+.shadow-gauge {
+  width: 210px;
+  height: auto;
+  min-height: 172px;
+  border: 1px solid var(--line);
+  background: #fffefa;
+}
+
+.shadow-gauge small,
+.shadow-gauge > span:not(.shadow-gauge__halo) {
+  color: var(--muted);
+}
+
+.shadow-gauge strong {
+  color: var(--orange);
+}
+
+.truth-cards article {
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--blue);
+  background: #f8f7f2;
+}
+
+.question-banner,
+.warning-note,
+.uncertainty-ruler {
+  background: #f5f0e1;
+}
+
+.chart-card--adjusted {
+  background: #f5f8f6;
+}
+
+.exhibit--split {
+  background: var(--white);
+}
+
+.student-figure,
+.world-divider,
+.audit-meter,
+.certificate__seal,
+.final-loop div,
+.docent__face {
+  border-radius: 3px;
+}
+
+.experiment-choice {
+  border: 1px solid var(--line);
+}
+
+.audit-meter {
+  min-height: 250px;
+  border: 1px solid var(--teal);
+  background: #e7efec;
+}
+
+.future-cards article {
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--blue);
+  background: #f3f5f5;
+}
+
+.agent-loop li:first-child,
+.agent-loop li:last-child {
+  border-radius: 3px;
+}
+
+.proposal-card {
+  border: 1px solid var(--blue);
+}
+
+.agent-chip {
+  background: var(--blue);
+}
+
+.agent-chip i {
+  box-shadow: none;
+}
+
+.human-attention,
+.price-result {
+  background: var(--blue);
+}
+
+.exhibit--workshop {
+  border: 1px solid var(--line);
+  background: var(--white);
+}
+
+.workshop-note {
+  border-color: #b9a66c;
+  background: #f5f0df;
+}
+
+.meta-exhibit {
+  border: 1px solid var(--teal);
+  background: #eef3f1;
+}
+
+.meta-exhibit__stamp {
+  transform: none;
+}
+
+.exhibit--exit {
+  background: var(--white);
+}
+
+.certificate {
+  border: 2px solid #8f8065;
+  background: #fffefa;
+  text-align: left;
+}
+
+.certificate::before {
+  display: none;
+}
+
+.certificate__seal {
+  margin: 0;
+  background: var(--blue);
+}
+
+.final-loop {
+  gap: 8px;
+}
+
+.final-loop div {
+  border: 1px solid var(--line);
+  background: #f1eee6;
+}
+
+.sources {
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--blue);
+  background: #f3f5f5;
+}
+
+/* The docent becomes a restrained margin note, not a character bubble. */
+
+.docent {
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: #faf9f4;
+}
+
+.docent__identity {
+  grid-template-columns: 1fr auto;
+}
+
+.docent__face {
+  display: none;
+}
+
+.docent__message {
+  min-height: 0;
+  border-left: 3px solid var(--blue);
+  background: #ecefea;
+  color: var(--ink);
+}
+
+.docent__depth button {
+  background: #fffefa;
+}
+
+.docent__depth button[aria-pressed="true"] {
+  border-color: var(--blue);
+  background: #e9eeef;
+  color: var(--blue);
+}
+
+.icon-button--round {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+/* Responsive header and single-column workbook. */
+
+@media (max-width: 1320px) {
+  .museum-shell {
+    grid-template-columns: minmax(0, 880px) 250px;
+  }
+}
+
+@media (max-width: 980px) {
+  :root {
+    --topbar-height: 108px;
+  }
+
+  .topbar {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px 10px;
+    padding: 8px 12px;
+  }
+
+  .course-return {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .brand {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .topbar__progress {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+    font-size: 0.8125rem;
+  }
+
+  .topbar__progress .progress-track {
+    display: block;
+  }
+
+  body {
+    padding-bottom: 0;
+  }
+
+  .museum-shell {
+    display: block;
+    max-width: 900px;
+  }
+
+  .docent {
+    position: static;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px 14px;
+    margin: 0 10px 24px;
+    padding: 14px;
+  }
+
+  .docent__identity {
+    grid-column: 1;
+    display: grid;
+    grid-template-columns: auto;
+  }
+
+  .docent__identity > div {
+    display: block;
+  }
+
+  .docent__identity .icon-button {
+    position: static;
+    margin-top: 8px;
+  }
+
+  .docent__message {
+    grid-column: 2;
+    max-height: none;
+    margin: 0;
+    font-size: 0.9375rem;
+  }
+
+  .docent__depth,
+  .docent__truth {
+    grid-column: 1 / -1;
+  }
+
+  .docent__depth {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .docent__depth button,
+  .docent__depth button[aria-pressed="true"] {
+    display: block;
+    min-height: 44px;
+  }
+
+  .docent__truth {
+    display: block;
+  }
+
+  .docent.is-muted {
+    display: block;
+    margin-right: 10px;
+  }
+
+  .docent.is-muted .docent__identity {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 760px) {
+  :root {
+    --topbar-height: 108px;
+    --radius: 3px;
+  }
+
+  .topbar {
+    min-height: var(--topbar-height);
+  }
+
+  .course-return {
+    min-width: 92px;
+    justify-content: center;
+    padding-inline: 8px;
+    font-size: 0.8125rem;
+  }
+
+  .brand {
+    gap: 8px;
+  }
+
+  .brand__mark {
+    width: 36px;
+    height: 36px;
+  }
+
+  .brand strong {
+    font-size: 0.88rem;
+  }
+
+  .museum-shell {
+    padding: 14px 8px 40px;
+  }
+
+  .exhibit {
+    padding: 30px 18px;
+  }
+
+  h1 {
+    font-size: clamp(2.65rem, 13vw, 3.45rem);
+  }
+
+  h2 {
+    font-size: clamp(1.9rem, 8vw, 2.55rem);
+  }
+
+  .museum-thesis {
+    margin-right: 0;
+  }
+
+  .shadow-gauge {
+    margin-inline: auto;
+  }
+
+  .final-loop div:last-child {
+    border-radius: 3px;
+  }
+}
+
+@media (max-width: 420px) {
+  .brand__mark {
+    display: none;
+  }
+
+  .course-return {
+    min-height: 44px;
+  }
+
+  .docent {
+    grid-template-columns: 1fr;
+  }
+
+  .docent__identity,
+  .docent__message {
+    grid-column: 1;
+  }
+}
+
+@media print {
+  .certificate {
+    border: 2px solid #333;
+    text-align: left;
+  }
+}

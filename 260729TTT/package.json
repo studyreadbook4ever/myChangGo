@@ -1,7 +1,7 @@
 {
-  "name": "260729-ttt-museum",
-  "version": "1.0.0",
-  "description": "중학생도 한 바퀴 체험하며 배우는 AI 계량경제학·칸토로비치 웹 박물관",
+  "name": "260729-ttt-daily-economics",
+  "version": "2.0.0",
+  "description": "경제학 입문자를 위한 칸토로비치·선형계획·인과추론·AI 일일 운영경제 공개 교과서",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,9 +9,11 @@
   },
   "scripts": {
     "dev": "node scripts/serve.mjs",
-    "check": "node --check src/model.js && node --check src/app.js && node --check scripts/serve.mjs && node --check scripts/browser-smoke.mjs",
+    "check": "node --check src/model.js && node --check src/course-content.js && node --check src/sources.js && node --check src/course-app.js && node --check src/app.js && node --check scripts/serve.mjs && node --check scripts/course-smoke.mjs && node --check scripts/browser-smoke.mjs",
     "test": "node --test",
-    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:browser:course": "node scripts/course-smoke.mjs",
+    "test:browser:lab": "node scripts/browser-smoke.mjs",
+    "test:browser": "npm run test:browser:course && npm run test:browser:lab",
     "verify": "npm run check && npm test && npm run test:browser"
   }
 }
