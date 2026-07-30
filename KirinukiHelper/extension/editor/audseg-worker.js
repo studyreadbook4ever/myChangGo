@@ -2,6 +2,8 @@
 var AUDSEG_ENGINE_ID = "audseg";
 var AUDSEG_ENGINE_VERSION = "0.1.0";
 var AUDSEG_SAMPLE_RATE_HZ = 16e3;
+var MAX_AUDSEG_CLIP_DURATION_MS = 30 * 60 * 1e3;
+var MAX_AUDSEG_PCM_BYTES = 128 * 1024 * 1024;
 var AUDSEG_PIPELINE_FINGERPRINT = "audseg-browser-v1-0.1.0-frame20-hop10-max4000";
 var DEFAULT_AUDSEG_CONFIG = Object.freeze({
   detector: Object.freeze({

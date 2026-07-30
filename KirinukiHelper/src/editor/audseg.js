@@ -11,6 +11,8 @@ export const AUDSEG_ENGINE_ID = "audseg";
 export const AUDSEG_ENGINE_VERSION = "0.1.0";
 export const AUDSEG_DRAFT_MODEL = "audseg-local";
 export const AUDSEG_SAMPLE_RATE_HZ = 16_000;
+export const MAX_AUDSEG_CLIP_DURATION_MS = 30 * 60 * 1_000;
+export const MAX_AUDSEG_PCM_BYTES = 128 * 1024 * 1024;
 export const AUDSEG_PIPELINE_FINGERPRINT =
   "audseg-browser-v1-0.1.0-frame20-hop10-max4000";
 
@@ -42,6 +44,33 @@ export const DEFAULT_AUDSEG_CONFIG = Object.freeze({
 });
 
 const DBFS_FLOOR = -120;
+
+export function audSegAudioFootprint(durationMs) {
+  const duration = Math.round(Number(durationMs));
+  if (
+    !Number.isFinite(duration)
+    || duration <= 0
+    || duration > MAX_AUDSEG_CLIP_DURATION_MS
+  ) {
+    throw new RangeError(
+      "AudSeg 빈 타이밍은 한 컷당 30분 이하에서 실행할 수 있습니다. 긴 컷은 먼저 여러 컷으로 나눠 주세요."
+    );
+  }
+  const sampleCount = Math.ceil(
+    duration * AUDSEG_SAMPLE_RATE_HZ / 1_000
+  );
+  const floatPcmBytes = sampleCount * Float32Array.BYTES_PER_ELEMENT;
+  if (floatPcmBytes > MAX_AUDSEG_PCM_BYTES) {
+    throw new RangeError(
+      "AudSeg 브라우저 분석용 PCM이 128MiB 안전 상한을 넘습니다. 긴 컷은 먼저 여러 컷으로 나눠 주세요."
+    );
+  }
+  return {
+    durationMs: duration,
+    sampleCount,
+    floatPcmBytes
+  };
+}
 
 function millisecondsToSamples(milliseconds, sampleRateHz, {
   minimum = 0

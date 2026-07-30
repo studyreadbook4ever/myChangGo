@@ -94,6 +94,7 @@ const [packageJson, packageLock] = await Promise.all([
   bytes("package.json").then((value) => JSON.parse(value)),
   bytes("package-lock.json").then((value) => JSON.parse(value))
 ]);
+assert(packageJson.license === "MIT", "KirinukiHelper package license는 MIT여야 합니다.");
 await Promise.all([
   assertAbsent("scripts/create-synthetic-beta.py"),
   assertAbsent("scripts/solar-caption-gateway.mjs"),
@@ -117,6 +118,10 @@ assert(
   "package-lock.json lockfileVersion은 3이어야 합니다."
 );
 assert(
+  packageLock.packages?.[""]?.license === "MIT",
+  "package-lock root license는 MIT여야 합니다."
+);
+assert(
   mediabunnyLock?.resolved
     === "https://registry.npmjs.org/mediabunny/-/mediabunny-1.51.0.tgz",
   "Mediabunny 대응 소스 package URL이 고정값과 다릅니다."
@@ -134,6 +139,8 @@ for (const [packagePath, metadata] of Object.entries(packageLock.packages || {})
 }
 
 const [
+  projectLicense,
+  distributedProjectLicense,
   mediabunnyInstalledLicense,
   mediabunnyDistributedLicense,
   audSegSourceLicense,
@@ -141,6 +148,8 @@ const [
   extensionNotices,
   runtimeNotices
 ] = await Promise.all([
+  bytes("LICENSE"),
+  bytes("LICENSE", extensionRoot),
   bytes("node_modules/mediabunny/LICENSE"),
   bytes("licenses/MEDIABUNNY-MPL-2.0.txt", extensionRoot),
   bytes("LICENSE", siblingAudSegRoot),
@@ -148,6 +157,17 @@ const [
   bytes("THIRD_PARTY_NOTICES.md", extensionRoot),
   bytes("legal/THIRD_PARTY_NOTICES.md")
 ]);
+assert(
+  projectLicense.equals(distributedProjectLicense),
+  "KirinukiHelper MIT 원문과 Extension 배포 사본이 다릅니다."
+);
+assert(
+  projectLicense.toString("utf8").startsWith("MIT License\n")
+    && projectLicense.toString("utf8").includes(
+      "Copyright (c) 2026 studyreadbook4ever"
+    ),
+  "KirinukiHelper MIT 라이선스 원문 또는 저작권 고지가 올바르지 않습니다."
+);
 
 assert(
   mediabunnyInstalledLicense.equals(mediabunnyDistributedLicense),
@@ -182,6 +202,7 @@ for (const font of [PRETENDARD_FONT, PAPERLOGY_FONT]) {
 }
 
 for (const requiredPath of [
+  "LICENSE",
   "THIRD_PARTY_NOTICES.md",
   "licenses/AUDSEG-MIT.txt",
   "licenses/MEDIABUNNY-MPL-2.0.txt",
@@ -235,6 +256,7 @@ for (const model of Object.values(PINNED_MODELS)) {
 
 console.log(JSON.stringify({
   ok: true,
+  projectLicense: "MIT",
   npmPackages: Object.keys(packageLock.packages).length - 1,
   runtimeDependencies: packageJson.dependencies,
   buildDependencies: packageJson.devDependencies,

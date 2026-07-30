@@ -6,7 +6,58 @@
 
 현재 미디어 입력은 사용 권한이 있는 로컬 원본 파일입니다. Extension은 지원 영상 탭의 메타데이터·현재 시각·재생 위치 제어를 연결하지만 치지직이나 YouTube 영상을 다운로드하거나 접근 제한을 우회하지 않습니다. 원본 전체와 최종 렌더는 이 기기에 남습니다. 자막 초벌은 **로컬 Whisper**와 **AudSeg** 중 하나를 고릅니다. Whisper는 이 기기의 loopback companion에서 한국어 글과 타이밍을 만들고, AudSeg는 브라우저 안에서 모델 없이 소리 활동을 찾아 사람이 채울 빈 타이밍만 만듭니다. 두 방식 모두 인터넷 자막 서비스나 API 키를 사용하지 않습니다.
 
-## 설치
+## Linux 빠른 설치
+
+다른 Linux PC에서 저장소를 내려받은 뒤 `KirinukiHelper` 폴더에서 다음 하나를
+실행합니다.
+
+```bash
+./setup.sh
+```
+
+GitHub 소스 ZIP처럼 실행 권한이 보존되지 않은 파일을 받았다면
+`bash setup.sh`로 같은 절차를 시작할 수 있습니다. 설정이 성공하면 도우미가
+두 셸 파일의 사용자 실행 권한을 복원합니다. 설정이 의존성 안내에서 멈췄다면
+필요한 도구를 설치한 뒤 다시 `bash setup.sh`를 실행하세요.
+
+대화형 도우미가 환경을 진단하고, npm 의존성 설치·Extension 빌드·정적 검증을
+순서대로 수행합니다. 자막 방식은 모델이나 서비스가 필요 없는 **AudSeg**와
+로컬 **Whisper** 중에서 고를 수 있습니다. Whisper를 고른 경우에만
+`whisper.cpp`와 검증된 모델을 설치합니다. 셸 도우미는 `sudo`나 `curl | sh`를
+자동 실행하지 않으며, 시스템 도구가 빠졌다면 Debian/Ubuntu·Fedora·Arch용
+설치 예시를 모두 보여 준 뒤 멈춥니다.
+
+설치 뒤에는 URL을 넘겨 전용 Chromium 프로필과 Extension을 한 번에 엽니다.
+이 자동 경로는 **Chromium 120 이상**용입니다. 일반 Google Chrome은 최신
+버전에서 unpacked Extension 자동 로드 플래그를 허용하지 않으므로, Chrome을
+쓸 때는 아래 수동 설치 절차로 `extension` 폴더를 불러오세요.
+
+```bash
+./kirinuki.sh start "https://chzzk.naver.com/video/..."
+./kirinuki.sh start "https://www.youtube.com/watch?v=..."
+```
+
+명령 없이 `./kirinuki.sh`만 실행하면 설치·실행·상태·진단·종료를 고르는 한글
+메뉴가 열립니다.
+
+```text
+./kirinuki.sh setup    # 설치 또는 자막 방식 다시 선택
+./kirinuki.sh doctor   # 읽기 전용 환경 진단
+./kirinuki.sh start    # 전용 Chromium 실행, URL은 선택
+./kirinuki.sh status   # 도우미와 로컬 Whisper 상태
+./kirinuki.sh stop     # 로컬 Whisper만 정상 종료
+./kirinuki.sh help
+```
+
+Chromium은 XDG 사용자 데이터 경로의 Kirinuki 전용 프로필을 사용합니다. 기존
+브라우저 프로필과 편집 프로젝트를 초기화하거나 브라우저를 강제 종료하지
+않습니다. 저장소나 `extension` 폴더의 절대 경로를 옮기면 Extension ID와
+Whisper 허용 Origin이 달라질 수 있으므로 새 위치에서 `./setup.sh`를 다시
+실행하세요.
+
+### 수동 설치
+
+셸 도우미 없이 설치하려면:
 
 1. Node.js 20.9 이상에서 `npm ci --ignore-scripts && npm run build`를 실행합니다.
 2. Chrome 또는 Chromium 120 이상에서 `chrome://extensions`를 엽니다.
@@ -24,11 +75,11 @@ npm run caption-stack:setup
 npm run caption-stack:start
 ```
 
-`setup`은 고정 revision과 SHA-256의 whisper.cpp·다국어 모델·Silero VAD를 사용자 데이터 폴더에 설치하고 제3자 고지문도 함께 둡니다. 옵션 없이 실행하면 기본 `draft` 프로필의 다국어 `tiny-q5_1` 모델을 준비합니다. API 키는 받거나 저장하지 않습니다. 실행 중 setup을 다시 하면 검증 성공 뒤 서비스에 새 profile·Origin을 자동 적용합니다. 다음 작업부터는 `npm run caption-stack:start`만 실행하면 됩니다. `auto`, `light(base-q5_1)`, `quality(medium-q5_0)`는 Tiny보다 더 무거운 모델을 명시적으로 선택할 때 사용합니다. 상세 운영법과 개발 불변조건은 [AGENTS.md](AGENTS.md)에 있습니다.
+`setup`은 고정 revision과 SHA-256의 whisper.cpp·다국어 모델·Silero VAD를 사용자 데이터 폴더에 설치하고 제3자 고지문도 함께 둡니다. 옵션 없이 실행하면 기본 `draft` 프로필의 다국어 `tiny-q5_1` 모델을 준비합니다. API 키는 받거나 저장하지 않습니다. `./kirinuki.sh setup`은 실행 중인 관리형 foreground 서비스를 안전하게 중지·재설정·복원하고, active systemd-user 서비스는 저수준 setup이 재시작합니다. 저수준 `caption-stack:setup`을 직접 쓰는 중 foreground가 실행 중이면 자동으로 덮어쓰지 않고 `caption-stack:stop → setup → start` 순서를 안내하며 멈춥니다. 다음 작업부터는 `npm run caption-stack:start`만 실행하면 됩니다. `auto`, `light(base-q5_1)`, `quality(medium-q5_0)`는 Tiny보다 더 무거운 모델을 명시적으로 선택할 때 사용합니다. 상세 운영법과 개발 불변조건은 [AGENTS.md](AGENTS.md)에 있습니다.
 
 `extension` 폴더의 절대 경로를 옮기면 압축해제 확장의 ID가 달라집니다. 새 폴더를 `chrome://extensions`에서 다시 불러온 뒤 Whisper를 계속 쓰려면, 기존에 쓰던 profile과 backend를 명시해 `caption-stack:setup`을 한 번 다시 실행하세요. AudSeg는 경로 변경과 관계없이 companion 설치가 필요 없습니다.
 
-### 전용 Chromium 프로필로 실행하기 (선택)
+### 전용 Chromium 프로필을 직접 실행하기
 
 기존 브라우저 프로필과 분리하고 싶다면 저장소 최상위에서 다음처럼 실행할 수 있습니다.
 
@@ -40,7 +91,7 @@ chromium \
   --no-default-browser-check
 ```
 
-Extension 소스를 수정한 뒤에는 `chrome://extensions`에서 다시 로드하면 됩니다. 평상시 실행에는 원격 디버깅 포트를 열 필요가 없습니다.
+Extension 소스를 수정한 뒤에는 `chrome://extensions`에서 다시 로드하면 됩니다. 이 명령행 자동 로드는 Chromium용이며, 일반 Google Chrome에서는 위 수동 설치 절차를 사용합니다. 평상시 실행에는 원격 디버깅 포트를 열 필요가 없습니다.
 
 ## 통합 편집 흐름
 
@@ -89,7 +140,7 @@ AudSeg 경로는 별도의 모델·서버·키 없이 같은 16kHz PCM을 브라
 
 `kr-vtuber-clean-v1`의 자동 본문 자막은 **배경 없는 한 줄·아래 중앙 고정**(`x=0.5`, `y=0.84`, `placement=bottom`)입니다. 동시 화자가 별도 타임라인 레인을 사용해도 화면 위치를 위로 자동으로 쌓지 않습니다. 한글·한자·이모지는 1, 공백은 0.35, 라틴 문자는 0.55처럼 계산한 한국어 폭 단위를 기준으로 한 줄 20을 상한으로 사용합니다. 표시 시간은 650ms 이상을 목표로 하며 최대 4초, 읽기 속도는 초당 16폭 단위 이하를 목표로 합니다. 문장 끝의 `.`은 제거하지만 `?`, `!`, `…`, `~`는 유지합니다. 기본 화자는 흰색, 구분 가능한 다른 화자는 안정적인 고유 색을 사용합니다. 사람이 만든 자막, 사람이 고친 AI 자막과 강조용 추가 레인은 덮어쓰지 않습니다. 사용자가 **AI 자막 전체를 기본 위치로 정렬**을 명시적으로 누른 경우에만 적용 직전 임시저장 뒤 기존 AI origin 자막의 위치 전체를 초기화하며, 글·시각·색과 직접 만든 자막은 유지합니다.
 
-한 번의 실행은 활성 컷 최대 16개, 새 AI cue 최대 10,000개로 제한합니다. 실행 전 활성 컷 수·총 길이와 선택 방식이 표시됩니다. 취소하면 오디오 추출을 시작하지 않습니다. 컷 하나가 끝날 때마다 결과와 체크포인트를 저장하므로 중간 실패·취소·탭 종료 뒤 같은 범위·선택 방식·실행 지문·품질 하네스 지문으로 다시 누르면 완료 컷을 건너뛰고 실패 지점부터 재개합니다. 필요한 지문이 없거나 달라진 예전 체크포인트, 새 전체 실행과 다른 원본 연결의 체크포인트는 재사용하지 않습니다.
+Whisper는 한 번에 활성 컷 최대 16개, 두 방식은 한 번의 실행에서 새 AI cue 최대 10,000개로 제한합니다. AudSeg는 활성 컷 개수 상한 없이 프로젝트의 모든 활성 컷을 한 컷씩 순차 처리합니다. 실행 전 활성 컷 수·총 길이와 선택 방식이 표시됩니다. AudSeg는 컷 하나당 30분·16kHz mono Float32 PCM 128MiB 안전 상한을 적용하며 Whisper endpoint나 session 상태를 읽지 않습니다. 취소하면 아직 시작하지 않은 컷은 처리하지 않습니다. 컷 하나가 끝날 때마다 결과와 체크포인트를 저장하며, AudSeg는 16개를 넘는 프로젝트에서도 완료한 모든 컷의 체크포인트를 보존합니다. 따라서 중간 실패·취소·탭 종료 뒤 같은 범위·선택 방식·실행 지문·품질 하네스 지문으로 다시 누르면 완료 컷을 건너뛰고 실패 지점부터 재개합니다. 필요한 지문이 없거나 달라진 예전 체크포인트, 새 전체 실행과 다른 원본 연결의 체크포인트는 재사용하지 않습니다.
 
 로컬 하네스가 공백·종결 마침표, 길이·표시 시간과 하단 위치를 안전하게 고친 경우에는 **자동 정리 경고**로 알려 줍니다. Whisper의 STT 대비 발화 누락·추가 가능성, segment↔word anchor coverage 저하, 해결되지 않은 읽기 속도·너비·짧은 표시 시간은 cue 자체의 **품질 검수 필요** 사유로 저장되어 노란 검수 상태로 보입니다. 구조 계약을 로컬 복구 뒤에도 위반하면 원래 STT 경계를 조용히 움직이거나 일반 완료본으로 저장하지 않고 격리합니다. AudSeg cue는 텍스트를 만들지 않으므로 항상 사람 검수 대상입니다.
 
@@ -269,6 +320,16 @@ Codex가 프로젝트 폴더의 `AGENTS.md`를 지속 지침으로 읽는 구조
 
 Node.js 20.9 이상에서 편집기 번들, Extension 정적 검증과 단위 테스트를 실행합니다.
 
+편집기 코드를 자주 고칠 때는 개발 전용 안전 핫 리로드를 사용할 수 있습니다.
+
+```bash
+npm run dev:editor
+```
+
+runner가 준비된 뒤 현재 편집기 URL의 쿼리에 `dev=1`을 붙여 한 번만 새로고침합니다(기존 `?project=…`가 있으면 `&dev=1`). CSS 변경은 영상 연결·재생 위치를 유지한 채 stylesheet만 교체합니다. 편집기 JavaScript·AudSeg Worker 변경은 입력 중인 값을 먼저 반영하고 CURRENT를 IndexedDB에 저장한 뒤 다시 읽은 지문까지 같을 때만 `session=resume`으로 같은 프로젝트를 다시 엽니다. AI·내보내기·드래그·복구 작업 중이거나 같은 프로젝트 탭이 둘 이상이거나 재시작용 원본 파일 핸들이 없으면 자동 재로드를 보류합니다. 원본 페이지 bridge와 manifest/service worker 변경은 좌표 작업을 보호하기 위해 원본 탭이나 Extension 전체를 자동 재로드하지 않고 안내만 표시합니다. 편집기·사이드패널·service worker가 함께 읽는 공용 모듈 변경도 혼합 버전 실행을 막기 위해 Extension 변경으로 분류해 자동 전체 재로드 없이 안내합니다.
+
+이 개발용 JavaScript 재로드가 보존하는 범위는 저장된 **CURRENT 프로젝트**입니다. 실행 취소·다시 실행 스택, 선택한 타임라인 범위와 확대 상태 같은 탭 메모리는 초기화됩니다. 일반 사용자가 자막 글·색·크기·위치를 직접 고칠 때는 이 runner나 페이지 새로고침이 필요하지 않으며, 입력 즉시 미리보기·타임라인에 반영되고 IndexedDB 저장이 시작됩니다. 릴리스 검사·패키징 전에는 runner를 종료해야 합니다. runner·validator·패키저는 같은 OS 커널 mutex를 원자적으로 점유하므로 동시에 실행되지 않으며, 프로세스가 강제 종료돼도 mutex는 운영체제가 해제합니다. `npm run package`는 전체 `check:full` 시작부터 ZIP·체크섬 완료까지 그 mutex를 계속 보유합니다. 핫 리로드 브라우저 smoke는 실제 unpacked Extension이 아니라 임시 복사본의 marker만 조작합니다. `.dev-editor.lock`은 현재 소유자 진단용 메타데이터라 종료 뒤 남을 수 있지만 Git·배포 ZIP에서는 제외됩니다. 비정상 종료로 남은 stale reload marker와 구형 임시 lock은 validator가 mutex를 점유한 상태에서 정리합니다.
+
 ```bash
 npm run check
 ```
@@ -281,7 +342,7 @@ npm run check:full
 
 기본 테스트는 `whisper-tiny`가 loopback companion만 사용하고 `audseg-local`이 네트워크 없이 결정적인 타이밍 초안을 만드는 계약을 검증합니다. 실제 API 자격증명은 필요하지 않습니다.
 
-릴리스 ZIP은 전체 검증 후 정확한 파일 allowlist만 묶고, SHA-256을 기록한 다음 ZIP을 다시 풀어 Chrome에 실제 로드합니다. 시스템 `zip`과 `unzip`이 필요합니다.
+릴리스 ZIP은 하나의 배타적 release lease 안에서 전체 검증 후 정확한 파일 allowlist만 묶고, SHA-256을 기록한 다음 ZIP을 다시 풀어 Chrome에 실제 로드합니다. 시스템 `zip`과 `unzip`이 필요합니다.
 
 ```bash
 npm run package
@@ -302,3 +363,12 @@ npm run check:policy-links
 마지막 로컬 검증 환경은 Arch Linux, Node.js 26.4.0, npm 11.18.0, Chromium/ChromeDriver 150.0.7871.46, FFmpeg/ffprobe 8.1.2입니다. 선언한 Node 20.9·Chrome 120 하한은 빌드 target과 API 기준이며 동일 버전 CI 매트릭스에서 직접 실행한 결과는 아닙니다.
 
 제3자 코드와 라이선스·소스 위치는 [Third-party notices](legal/THIRD_PARTY_NOTICES.md)에 기록합니다. 합성 미디어, 실제 음성 샘플, 자격증명과 실제 서비스 응답은 저장소에 포함하지 않습니다.
+
+## 라이선스
+
+KirinukiHelper가 직접 작성한 코드는 [MIT License](LICENSE)로 공개합니다.
+배포물에 포함되는 Mediabunny는 MPL-2.0, Pretendard와 Paperlogy는
+OFL-1.1이며, AudSeg·whisper.cpp·OpenAI Whisper 모델·Silero VAD는 각각의
+MIT 고지를 유지합니다. 이 제3자 구성요소는 KirinukiHelper의 MIT 라이선스로
+재허가되지 않습니다. 정확한 버전·소스·해시와 배포 의무는
+[Third-party notices](legal/THIRD_PARTY_NOTICES.md)를 확인하세요.

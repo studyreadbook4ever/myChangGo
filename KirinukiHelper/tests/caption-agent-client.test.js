@@ -24,6 +24,7 @@ import {
   LOCAL_WHISPER_CAPTION_MODEL,
   captionAgentAudioFootprint,
   captionAgentResumePlan,
+  captionAgentRunClipLimit,
   captionAgentRunEstimate,
   captionAgentRuntimeIdentity,
   captionAgentSessionEndpoint,
@@ -236,6 +237,35 @@ test("과거 설정은 안전한 Whisper 기본값으로 이관하고 새 설정
   assert.equal(JSON.stringify(writes).includes("must-not-survive"), false);
 });
 
+test("AudSeg 설정 저장은 사용하지 않는 malformed Whisper endpoint에 막히지 않는다", async () => {
+  const writes = [];
+  const storage = {
+    async set(value) {
+      writes.push(value);
+    },
+    async remove() {}
+  };
+  const saved = await saveCaptionAgentSettings({
+    endpoint: "not-a-loopback-url",
+    model: LOCAL_AUDSEG_CAPTION_MODEL,
+    obsoleteSecret: "must-not-survive"
+  }, storage);
+  assert.deepEqual(saved, {
+    endpoint: DEFAULT_CAPTION_AGENT_SETTINGS.endpoint,
+    model: LOCAL_AUDSEG_CAPTION_MODEL
+  });
+  assert.deepEqual(writes, [{
+    [CAPTION_AGENT_SETTINGS_KEY]: saved
+  }]);
+  await assert.rejects(
+    saveCaptionAgentSettings({
+      endpoint: "not-a-loopback-url",
+      model: LOCAL_WHISPER_CAPTION_MODEL
+    }, storage),
+    /올바른 URL/u
+  );
+});
+
 test("Whisper와 AudSeg runtime identity를 서로 다른 로컬 pipeline으로 고정한다", () => {
   const whisper = captionAgentRuntimeIdentity(localCapability(), {
     model: LOCAL_WHISPER_CAPTION_MODEL
@@ -289,6 +319,49 @@ test("실행 예상량은 companion 요청과 브라우저 초벌을 구분한�
     totalDurationMs: 5_000,
     companionRequests: 0,
     browserDrafts: 2
+  });
+});
+
+test("AudSeg는 21개 활성 컷을 보존해 재개하고 Whisper만 16개로 제한한다", () => {
+  const clips = Array.from({ length: 21 }, (_, index) => clip({
+    id: `clip-${index + 1}`,
+    sourceStartMs: index * 2_000,
+    sourceEndMs: index * 2_000 + 1_000
+  }));
+  assert.equal(captionAgentRunClipLimit(LOCAL_AUDSEG_CAPTION_MODEL), null);
+  assert.equal(captionAgentRunClipLimit(LOCAL_WHISPER_CAPTION_MODEL), 16);
+  assert.equal(captionAgentRunEstimate(clips, {
+    model: LOCAL_AUDSEG_CAPTION_MODEL
+  }).clipCount, 21);
+
+  let checkpoints = [];
+  for (const target of clips) {
+    checkpoints = upsertCaptionAgentCheckpoint(
+      checkpoints,
+      createCaptionAgentCheckpoint(
+        target,
+        LOCAL_AUDSEG_CAPTION_MODEL,
+        {
+          editorialContextFingerprint: "audseg-no-editorial-context-v1",
+          pipelineFingerprint: AUDSEG_PIPELINE_FINGERPRINT
+        }
+      ),
+      { maximum: clips.length }
+    );
+  }
+  assert.equal(checkpoints.length, 21);
+  assert.deepEqual(captionAgentResumePlan(
+    clips,
+    checkpoints,
+    LOCAL_AUDSEG_CAPTION_MODEL,
+    {
+      resume: true,
+      editorialContextFingerprint: "audseg-no-editorial-context-v1",
+      pipelineFingerprint: AUDSEG_PIPELINE_FINGERPRINT
+    }
+  ), {
+    clips: [],
+    skippedClipIds: clips.map((target) => target.id)
   });
 });
 

@@ -33883,6 +33883,8 @@ async function pruneImageAssetBlobs(projectId, keepAssetIds = []) {
 var AUDSEG_ENGINE_VERSION = "0.1.0";
 var AUDSEG_DRAFT_MODEL = "audseg-local";
 var AUDSEG_SAMPLE_RATE_HZ = 16e3;
+var MAX_AUDSEG_CLIP_DURATION_MS = 30 * 60 * 1e3;
+var MAX_AUDSEG_PCM_BYTES = 128 * 1024 * 1024;
 var AUDSEG_PIPELINE_FINGERPRINT = "audseg-browser-v1-0.1.0-frame20-hop10-max4000";
 var DEFAULT_AUDSEG_CONFIG = Object.freeze({
   detector: Object.freeze({
@@ -33910,6 +33912,28 @@ var DEFAULT_AUDSEG_CONFIG = Object.freeze({
     splitSearchMs: 2e3
   })
 });
+function audSegAudioFootprint(durationMs) {
+  const duration = Math.round(Number(durationMs));
+  if (!Number.isFinite(duration) || duration <= 0 || duration > MAX_AUDSEG_CLIP_DURATION_MS) {
+    throw new RangeError(
+      "AudSeg \uBE48 \uD0C0\uC774\uBC0D\uC740 \uD55C \uCEF7\uB2F9 30\uBD84 \uC774\uD558\uC5D0\uC11C \uC2E4\uD589\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uAE34 \uCEF7\uC740 \uBA3C\uC800 \uC5EC\uB7EC \uCEF7\uC73C\uB85C \uB098\uB220 \uC8FC\uC138\uC694."
+    );
+  }
+  const sampleCount = Math.ceil(
+    duration * AUDSEG_SAMPLE_RATE_HZ / 1e3
+  );
+  const floatPcmBytes = sampleCount * Float32Array.BYTES_PER_ELEMENT;
+  if (floatPcmBytes > MAX_AUDSEG_PCM_BYTES) {
+    throw new RangeError(
+      "AudSeg \uBE0C\uB77C\uC6B0\uC800 \uBD84\uC11D\uC6A9 PCM\uC774 128MiB \uC548\uC804 \uC0C1\uD55C\uC744 \uB118\uC2B5\uB2C8\uB2E4. \uAE34 \uCEF7\uC740 \uBA3C\uC800 \uC5EC\uB7EC \uCEF7\uC73C\uB85C \uB098\uB220 \uC8FC\uC138\uC694."
+    );
+  }
+  return {
+    durationMs: duration,
+    sampleCount,
+    floatPcmBytes
+  };
+}
 function segmentAudSegPcmInWorker(samples, {
   sampleRateHz = AUDSEG_SAMPLE_RATE_HZ,
   signal,
@@ -34548,6 +34572,15 @@ var ALLOWED_CAPTION_MODELS = /* @__PURE__ */ new Set([
 ]);
 var LEGACY_CAPTION_PIPELINE_FINGERPRINT = "legacy-caption-pipeline-v0";
 var REQUIRED_CAPTION_PIPELINE_FINGERPRINT = "current-caption-pipeline-required-v1";
+function captionAgentRunClipLimit(model) {
+  if (model === LOCAL_AUDSEG_CAPTION_MODEL) {
+    return null;
+  }
+  if (model === LOCAL_WHISPER_CAPTION_MODEL) {
+    return MAX_CAPTION_AGENT_CLIPS_PER_RUN;
+  }
+  throw new Error("\uC120\uD0DD\uD55C \uC790\uB9C9 \uCD08\uBC8C \uBAA8\uB378\uC774 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+}
 var AUTOMATIC_CAPTION_PLACEMENT = "bottom";
 var AUTOMATIC_CAPTION_Y = 0.84;
 function finiteNumber2(value, fallback = 0) {
@@ -34644,9 +34677,14 @@ async function loadCaptionAgentSettings(storageArea = chrome.storage.local) {
   return normalized;
 }
 async function saveCaptionAgentSettings(settings, storageArea = chrome.storage.local) {
-  const normalized = normalizeCaptionAgentSettings({
+  const requestedModel = ALLOWED_CAPTION_MODELS.has(settings?.model) ? settings.model : DEFAULT_CAPTION_AGENT_SETTINGS.model;
+  const normalized = requestedModel === LOCAL_AUDSEG_CAPTION_MODEL ? normalizeCaptionAgentSettings({
     ...settings,
-    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint)
+    model: requestedModel
+  }) : normalizeCaptionAgentSettings({
+    ...settings,
+    endpoint: normalizeCaptionAgentEndpoint(settings?.endpoint),
+    model: requestedModel
   });
   await storageArea.set({ [CAPTION_AGENT_SETTINGS_KEY]: normalized });
   await storageArea.remove([
@@ -35594,6 +35632,67 @@ async function requestCaptionAgentWithSessionRetry({
   }
 }
 
+// src/editor/dev-reload.js
+var DEV_RELOAD_SCHEMA = "chzzk-kirinuki-dev-reload/v1";
+var DEV_RELOAD_KINDS = /* @__PURE__ */ new Set([
+  "initial",
+  "style",
+  "editor",
+  "content",
+  "extension"
+]);
+function normalizeDevReloadMarker(value) {
+  if (!value || value.schema !== DEV_RELOAD_SCHEMA || typeof value.revision !== "string" || !value.revision.trim() || !DEV_RELOAD_KINDS.has(value.kind) || !Array.isArray(value.changedFiles) || !value.changedFiles.every((entry) => typeof entry === "string") || !Number.isInteger(value.pid) || value.pid <= 0 || !Number.isFinite(Date.parse(value.createdAt))) {
+    return null;
+  }
+  return {
+    schema: DEV_RELOAD_SCHEMA,
+    revision: value.revision.trim(),
+    kind: value.kind,
+    changedFiles: [...new Set(value.changedFiles)].sort(),
+    pid: value.pid,
+    createdAt: new Date(value.createdAt).toISOString()
+  };
+}
+function devReloadResumeUrl(currentHref, projectId) {
+  const id = String(projectId || "").trim();
+  if (!id) {
+    throw new TypeError("\uB2E4\uC2DC \uC5F4 \uAC1C\uBC1C \uD504\uB85C\uC81D\uD2B8 ID\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  const url2 = new URL(currentHref);
+  const developmentReloadEnabled = url2.searchParams.get("dev") === "1";
+  url2.search = "";
+  url2.searchParams.set("project", id);
+  url2.searchParams.set("session", "resume");
+  if (developmentReloadEnabled) {
+    url2.searchParams.set("dev", "1");
+  }
+  return url2.href;
+}
+function devReloadStyleUrl(currentHref, revision) {
+  const normalizedRevision = String(revision || "").trim();
+  if (!normalizedRevision) {
+    throw new TypeError("CSS \uAD50\uCCB4 revision\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  const url2 = new URL(currentHref);
+  url2.searchParams.set("dev-reload", normalizedRevision);
+  return url2.href;
+}
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) {
+    return value.map(canonicalJsonValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().filter((key) => value[key] !== void 0).map((key) => [key, canonicalJsonValue(value[key])])
+    );
+  }
+  return value;
+}
+function devReloadProjectFingerprint(value) {
+  return JSON.stringify(canonicalJsonValue(value));
+}
+
 // src/editor/preview-transition.js
 var PREVIEW_BOUNDARY_TOLERANCE_MS = 20;
 function nextEnabledPreviewClip(clips, activeClipId2) {
@@ -35829,6 +35928,7 @@ var timelineSnapEnabled = true;
 var saveDispatchPending = false;
 var pendingSaveSnapshot = null;
 var projectSaveSequence = 0;
+var projectSaveOperations = /* @__PURE__ */ new Set();
 var imageAssetPruneTimer = null;
 var toastTimer = null;
 var activeClipId = null;
@@ -35872,6 +35972,11 @@ var localDraftAutosaveAnchorAtMs = 0;
 var focusBeforeLocalDraftDialog = null;
 var captionAgentSettings = { ...DEFAULT_CAPTION_AGENT_SETTINGS };
 var captionAgentRuntime = null;
+var devReloadPollTimer = null;
+var devReloadProcessing = false;
+var devReloadObserverActive = false;
+var devReloadMissingCount = 0;
+var devReloadNotice = "";
 var imageAssetObjectUrls = /* @__PURE__ */ new Map();
 var clipGroupSelection = /* @__PURE__ */ new Set();
 var EXPORT_LOCK_NAME = "chzzk-kirinuki-export";
@@ -35888,6 +35993,10 @@ var PREVIEW_AUDIO_CLOCK_INTERVAL_MS = 10;
 var PREVIEW_PRELOAD_TIMEOUT_MS = 12e3;
 var LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1e3;
 var LOCAL_DRAFT_BUSY_RETRY_MS = 30 * 1e3;
+var DEV_RELOAD_POLL_INTERVAL_MS = 900;
+var DEV_RELOAD_FETCH_FAILURE_LIMIT = 3;
+var DEV_RELOAD_LAST_REVISION_KEY = "kirinuki:dev-reload:last-revision";
+var DEV_RELOAD_EXPECTED_PROJECT_KEY = "kirinuki:dev-reload:expected-project";
 var ALLOWED_IMAGE_ASSET_TYPES = /* @__PURE__ */ new Set([
   "image/png",
   "image/jpeg",
@@ -35966,6 +36075,11 @@ function startProjectSnapshotSave(snapshot) {
     scheduleImageAssetBlobPrune();
     return savedProject;
   });
+  projectSaveOperations.add(operation);
+  operation.then(
+    () => projectSaveOperations.delete(operation),
+    () => projectSaveOperations.delete(operation)
+  );
   void operation.catch((error) => {
     if (sequence === projectSaveSequence) {
       showToast(`\uD504\uB85C\uC81D\uD2B8 \uC800\uC7A5 \uC2E4\uD328: ${error.message}`, "error", 0);
@@ -36003,6 +36117,11 @@ function flushSave() {
   const snapshot = cloneProject(project);
   discardPendingProjectSave();
   return startProjectSnapshotSave(snapshot);
+}
+async function waitForProjectSaves() {
+  while (projectSaveOperations.size > 0) {
+    await Promise.allSettled([...projectSaveOperations]);
+  }
 }
 var localDraftDateFormatter = new Intl.DateTimeFormat("ko-KR", {
   year: "numeric",
@@ -36250,11 +36369,325 @@ async function countSameProjectEditorTabs() {
       return false;
     }
     try {
-      return new URL(tab.url).searchParams.get("project") === project.id;
+      const tabProjectId = new URL(tab.url).searchParams.get("project");
+      return !tabProjectId || tabProjectId === project.id;
     } catch {
       return false;
     }
   }).length;
+}
+function devReloadEnabled() {
+  return new URLSearchParams(location.search).get("dev") === "1";
+}
+function devReloadSessionValue(key) {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function setDevReloadSessionValue(key, value) {
+  sessionStorage.setItem(key, value);
+}
+function removeDevReloadSessionValue(key) {
+  try {
+    sessionStorage.removeItem(key);
+  } catch {
+  }
+}
+function announceDevReload(message, type = "info", timeout = 5e3) {
+  const notice = `${type}:${message}`;
+  if (notice === devReloadNotice) {
+    return;
+  }
+  devReloadNotice = notice;
+  showToast(message, type, timeout);
+}
+async function readDevReloadMarker() {
+  try {
+    const markerUrl = new URL(chrome.runtime.getURL("dev-reload.json"));
+    markerUrl.searchParams.set("cache", `${Date.now()}-${Math.random()}`);
+    const response = await fetch(markerUrl, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return normalizeDevReloadMarker(await response.json());
+  } catch {
+    return null;
+  }
+}
+function devReloadBusyReason() {
+  if (activeJobController || exportRequestPending || projectMutationLockCount > 0 || pointerEditActive || rangeHandleDragActive || previewBoundaryTransitioning || localDraftOperationActive || automaticLocalDraftOperation || !elements.job_dialog.hidden || elements.local_draft_dialog.open) {
+    return "\uC9C4\uD589 \uC911\uC778 \uD3B8\uC9D1\xB7\uC800\uC7A5\xB7\uB0B4\uBCF4\uB0B4\uAE30 \uC791\uC5C5";
+  }
+  if (mediaFile && (project?.mediaAsset?.fileHandleStored !== true || !mediaHandle)) {
+    return "\uC7AC\uC2DC\uC791\uC6A9 \uC6D0\uBCF8 \uD30C\uC77C \uD578\uB4E4\uC774 \uC5C6\uB294 \uD604\uC7AC \uC138\uC158";
+  }
+  return "";
+}
+async function saveAndVerifyDevReloadProject() {
+  if (!project?.id) {
+    throw new Error("\uC800\uC7A5\uD560 CURRENT \uD504\uB85C\uC81D\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.");
+  }
+  const snapshot = cloneProject(project);
+  discardPendingProjectSave();
+  await startProjectSnapshotSave(snapshot);
+  await waitForProjectSaves();
+  const stored = await loadProject(snapshot.id);
+  const expectedFingerprint = devReloadProjectFingerprint(snapshot);
+  const storedFingerprint = devReloadProjectFingerprint(stored);
+  const currentFingerprint = devReloadProjectFingerprint(project);
+  if (!stored || storedFingerprint !== expectedFingerprint || currentFingerprint !== expectedFingerprint) {
+    throw new Error(
+      "CURRENT \uC800\uC7A5\uC744 \uB2E4\uC2DC \uC77D\uC740 \uACB0\uACFC\uAC00 \uB2EC\uB77C \uC790\uB3D9 \uC7AC\uB85C\uB4DC\uB97C \uC911\uB2E8\uD588\uC2B5\uB2C8\uB2E4."
+    );
+  }
+  return {
+    projectId: snapshot.id,
+    fingerprint: storedFingerprint
+  };
+}
+function verifyExpectedDevReloadProject(candidateProject) {
+  if (!devReloadEnabled()) {
+    return false;
+  }
+  const raw = devReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+  if (!raw) {
+    return false;
+  }
+  let expected;
+  try {
+    expected = JSON.parse(raw);
+  } catch {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    return false;
+  }
+  if (expected?.projectId !== candidateProject?.id || typeof expected?.fingerprint !== "string") {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    return false;
+  }
+  const actualFingerprint = devReloadProjectFingerprint(candidateProject);
+  if (actualFingerprint !== expected.fingerprint) {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    throw new Error(
+      "\uD56B \uB9AC\uB85C\uB4DC \uC9C1\uC804 CURRENT\uC640 \uB2E4\uC2DC \uBD88\uB7EC\uC628 \uD504\uB85C\uC81D\uD2B8\uAC00 \uB2E4\uB985\uB2C8\uB2E4. \uC790\uB3D9 \uC800\uC7A5\uBCF8\uC744 \uB36E\uC5B4\uC4F0\uC9C0 \uC54A\uC558\uC73C\uB2C8 \uC800\uC7A5 \uBAA9\uB85D\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694."
+    );
+  }
+  removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+  return true;
+}
+async function replaceDevReloadStylesheet(revision) {
+  const current = document.querySelector(
+    'link[rel~="stylesheet"][href*="editor/editor.css"]'
+  );
+  if (!current) {
+    throw new Error("\uAD50\uCCB4\uD560 \uD3B8\uC9D1\uAE30 stylesheet\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
+  }
+  const replacement = current.cloneNode();
+  replacement.href = devReloadStyleUrl(current.href, revision);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      replacement.remove();
+      reject(new Error("\uC0C8 CSS\uB97C 5\uCD08 \uC548\uC5D0 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."));
+    }, 5e3);
+    replacement.addEventListener("load", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+    replacement.addEventListener("error", () => {
+      clearTimeout(timer);
+      replacement.remove();
+      reject(new Error("\uC0C8 CSS \uD30C\uC77C\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."));
+    }, { once: true });
+    current.after(replacement);
+  });
+  current.remove();
+}
+async function hardReloadEditorFromMarker(marker) {
+  const busyReason = devReloadBusyReason();
+  if (busyReason) {
+    announceDevReload(
+      `\uCF54\uB4DC \uBCC0\uACBD\uC744 \uAC10\uC9C0\uD588\uC9C0\uB9CC ${busyReason} \uB54C\uBB38\uC5D0 \uC790\uB3D9 \uC7AC\uB85C\uB4DC\uB97C \uAE30\uB2E4\uB9BD\uB2C8\uB2E4.`,
+      "info",
+      0
+    );
+    return false;
+  }
+  if (await countSameProjectEditorTabs() > 1) {
+    announceDevReload(
+      "\uAC19\uC740 \uD504\uB85C\uC81D\uD2B8 \uD3B8\uC9D1\uAE30 \uD0ED\uC774 \uB458 \uC774\uC0C1\uC774\uB77C \uC790\uB3D9 \uC7AC\uB85C\uB4DC\uB97C \uBCF4\uB958\uD588\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uD0ED\uC744 \uB2EB\uC544 \uC8FC\uC138\uC694.",
+      "error",
+      0
+    );
+    return false;
+  }
+  const busyReasonAfterTabQuery = devReloadBusyReason();
+  if (busyReasonAfterTabQuery) {
+    announceDevReload(
+      `\uD0ED \uD655\uC778 \uC911 ${busyReasonAfterTabQuery}\uC774 \uC2DC\uC791\uB418\uC5B4 \uC790\uB3D9 \uC7AC\uB85C\uB4DC\uB97C \uAE30\uB2E4\uB9BD\uB2C8\uB2E4.`,
+      "info",
+      0
+    );
+    return false;
+  }
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement) {
+    activeElement.blur();
+  }
+  elements.preview_video.pause();
+  standbyPreviewVideo?.pause();
+  await Promise.resolve();
+  const previousInert = document.body.inert;
+  let navigationStarted = false;
+  document.body.inert = true;
+  lockProjectMutations();
+  try {
+    const verified = await saveAndVerifyDevReloadProject();
+    if (pendingCaptureSeed) {
+      throw new Error(
+        "\uC800\uC7A5 \uD655\uC778 \uC911 \uC6D0\uBCF8 \uD0ED\uC758 \uC0C8 \uC120\uD0DD \uAD6C\uAC04\uC774 \uB3C4\uCC29\uD574 \uBA3C\uC800 \uBC18\uC601\uD569\uB2C8\uB2E4."
+      );
+    }
+    setDevReloadSessionValue(
+      DEV_RELOAD_EXPECTED_PROJECT_KEY,
+      JSON.stringify({
+        projectId: verified.projectId,
+        fingerprint: verified.fingerprint,
+        revision: marker.revision
+      })
+    );
+    setDevReloadSessionValue(
+      DEV_RELOAD_LAST_REVISION_KEY,
+      marker.revision
+    );
+    const resumeUrl = devReloadResumeUrl(location.href, verified.projectId);
+    history.replaceState(null, "", resumeUrl);
+    location.reload();
+    navigationStarted = true;
+    return true;
+  } catch (error) {
+    removeDevReloadSessionValue(DEV_RELOAD_EXPECTED_PROJECT_KEY);
+    announceDevReload(
+      `\uC790\uB3D9 \uC7AC\uB85C\uB4DC\uB97C \uC548\uC804\uD558\uAC8C \uC911\uB2E8\uD588\uC2B5\uB2C8\uB2E4: ${error.message}`,
+      "error",
+      0
+    );
+    return false;
+  } finally {
+    if (!navigationStarted) {
+      unlockProjectMutations();
+      document.body.inert = previousInert;
+    }
+  }
+}
+async function applyDevReloadMarker(marker) {
+  const lastRevision = devReloadSessionValue(
+    DEV_RELOAD_LAST_REVISION_KEY
+  );
+  if (!lastRevision) {
+    setDevReloadSessionValue(
+      DEV_RELOAD_LAST_REVISION_KEY,
+      marker.revision
+    );
+    announceDevReload(
+      "\uAC1C\uBC1C\uC6A9 \uC548\uC804 \uD56B \uB9AC\uB85C\uB4DC\uAC00 \uC5F0\uACB0\uB410\uC2B5\uB2C8\uB2E4.",
+      "success"
+    );
+    return;
+  }
+  if (lastRevision === marker.revision) {
+    return;
+  }
+  if (marker.kind === "initial") {
+    await hardReloadEditorFromMarker({
+      ...marker,
+      kind: "editor"
+    });
+    return;
+  }
+  if (marker.kind === "style") {
+    await replaceDevReloadStylesheet(marker.revision);
+    setDevReloadSessionValue(
+      DEV_RELOAD_LAST_REVISION_KEY,
+      marker.revision
+    );
+    devReloadNotice = "";
+    announceDevReload(
+      "CSS \uBCC0\uACBD\uC744 \uC601\uC0C1\xB7\uC7AC\uC0DD \uC704\uCE58 \uADF8\uB300\uB85C \uBC18\uC601\uD588\uC2B5\uB2C8\uB2E4.",
+      "success"
+    );
+    return;
+  }
+  if (marker.kind === "editor") {
+    await hardReloadEditorFromMarker(marker);
+    return;
+  }
+  if (marker.kind === "extension") {
+    await flushSave();
+    await waitForProjectSaves();
+  }
+  setDevReloadSessionValue(
+    DEV_RELOAD_LAST_REVISION_KEY,
+    marker.revision
+  );
+  announceDevReload(
+    marker.kind === "content" ? "\uC6D0\uBCF8 \uD398\uC774\uC9C0 bridge \uBCC0\uACBD\uC744 \uBE4C\uB4DC\uD588\uC2B5\uB2C8\uB2E4. \uC88C\uD45C \uC791\uC5C5 \uBCF4\uD638\uB97C \uC704\uD574 \uC6D0\uBCF8 \uD0ED\uC740 \uC790\uB3D9 \uC0C8\uB85C\uACE0\uCE68\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4." : "\uD655\uC7A5 \uC124\uC815 \uBCC0\uACBD\uC744 \uBE4C\uB4DC\uD558\uACE0 CURRENT\uB97C \uC720\uC9C0\uD588\uC2B5\uB2C8\uB2E4. chrome://extensions\uC5D0\uC11C \uD655\uC7A5\uC744 \uB2E4\uC2DC \uB85C\uB4DC\uD574 \uC8FC\uC138\uC694.",
+    "info",
+    0
+  );
+}
+function scheduleDevReloadPoll(delayMs = DEV_RELOAD_POLL_INTERVAL_MS) {
+  clearTimeout(devReloadPollTimer);
+  devReloadPollTimer = setTimeout(() => {
+    devReloadPollTimer = null;
+    void pollDevReloadMarker();
+  }, delayMs);
+}
+async function pollDevReloadMarker() {
+  if (!devReloadEnabled() || !devReloadObserverActive || devReloadProcessing) {
+    return;
+  }
+  devReloadProcessing = true;
+  try {
+    const marker = await readDevReloadMarker();
+    if (!marker) {
+      devReloadMissingCount += 1;
+      if (devReloadMissingCount >= DEV_RELOAD_FETCH_FAILURE_LIMIT) {
+        devReloadObserverActive = false;
+        announceDevReload(
+          "\uAC1C\uBC1C\uC6A9 marker\uAC00 \uC5C6\uC5B4 \uC548\uC804 \uD56B \uB9AC\uB85C\uB4DC \uAC10\uC2DC\uB97C \uC885\uB8CC\uD588\uC2B5\uB2C8\uB2E4.",
+          "info"
+        );
+        return;
+      }
+    } else {
+      devReloadMissingCount = 0;
+      await applyDevReloadMarker(marker);
+    }
+  } catch (error) {
+    announceDevReload(
+      `\uD56B \uB9AC\uB85C\uB4DC \uBCC0\uACBD\uC744 \uC801\uC6A9\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4: ${error.message}`,
+      "error",
+      0
+    );
+  } finally {
+    devReloadProcessing = false;
+  }
+  if (devReloadObserverActive) {
+    scheduleDevReloadPoll();
+  }
+}
+function startDevReloadObserver() {
+  if (!devReloadEnabled()) {
+    return;
+  }
+  devReloadObserverActive = true;
+  scheduleDevReloadPoll(0);
+}
+function stopDevReloadObserver() {
+  devReloadObserverActive = false;
+  clearTimeout(devReloadPollTimer);
+  devReloadPollTimer = null;
 }
 async function restoreSelectedLocalDraft() {
   const selectedId = elements.local_draft_list.querySelector(
@@ -39298,10 +39731,18 @@ async function attachMediaFile(file, { fileHandleStored = false } = {}) {
   }
 }
 function readCaptionAgentConfig() {
+  const model = elements.caption_model.value;
+  if (model === AUDSEG_DRAFT_MODEL) {
+    return {
+      endpoint: captionAgentSettings.endpoint,
+      model,
+      token: ""
+    };
+  }
   return {
     endpoint: normalizeCaptionAgentEndpoint(elements.caption_agent_endpoint.value),
     token: elements.caption_agent_token.value,
-    model: elements.caption_model.value
+    model
   };
 }
 function captionAgentSelectionStillCurrent(config) {
@@ -39533,13 +39974,16 @@ async function generateCaptions() {
   const allEnabledClips = project.clips.filter(
     (clip) => clip.enabled !== false
   );
+  const selectedModel = elements.caption_model.value;
+  const audsegMode = selectedModel === AUDSEG_DRAFT_MODEL;
+  const clipLimit = captionAgentRunClipLimit(selectedModel);
   if (allEnabledClips.length === 0) {
     showToast("\uC120\uD0DD\uD55C \uAD6C\uAC04\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.", "error");
     return;
   }
-  if (allEnabledClips.length > MAX_CAPTION_AGENT_CLIPS_PER_RUN) {
+  if (clipLimit != null && allEnabledClips.length > clipLimit) {
     showToast(
-      `\uD55C \uBC88\uC5D0 \uC790\uB9C9\uC744 \uB9CC\uB4E4 \uC218 \uC788\uB294 \uD65C\uC131 \uCEF7\uC740 \uCD5C\uB300 ${MAX_CAPTION_AGENT_CLIPS_PER_RUN}\uAC1C\uC785\uB2C8\uB2E4.`,
+      `\uD55C \uBC88\uC5D0 Whisper \uC790\uB9C9 \uCD08\uC548\uC744 \uB9CC\uB4E4 \uC218 \uC788\uB294 \uD65C\uC131 \uCEF7\uC740 \uCD5C\uB300 ${clipLimit}\uAC1C\uC785\uB2C8\uB2E4. \uCEF7\uC744 ${clipLimit}\uAC1C \uC774\uD558 \uBB36\uC74C\uC73C\uB85C \uB098\uB220 \uC2E4\uD589\uD574 \uC8FC\uC138\uC694.`,
       "error",
       0
     );
@@ -39548,8 +39992,19 @@ async function generateCaptions() {
   if (activeJobController || projectMutationLockCount > 0) {
     return;
   }
-  const selectedModel = elements.caption_model.value;
-  const audsegMode = selectedModel === AUDSEG_DRAFT_MODEL;
+  try {
+    for (const clip of allEnabledClips) {
+      const durationMs = clipDurationMs(clip);
+      if (audsegMode) {
+        audSegAudioFootprint(durationMs);
+      } else {
+        captionAgentAudioFootprint(durationMs);
+      }
+    }
+  } catch (error) {
+    showToast(error.message, "error", 0);
+    return;
+  }
   const returnFocus = document.activeElement;
   const controller = new AbortController();
   activeJobController = controller;
@@ -39670,7 +40125,6 @@ async function generateCaptions() {
       const clip = clips[index];
       const base = index / clips.length;
       const span = 1 / clips.length;
-      captionAgentAudioFootprint(clipDurationMs(clip));
       setAiProgress(
         base,
         `${index + 1}/${clips.length} \xB7 \uC120\uD0DD \uAD6C\uAC04\uC758 \uC74C\uC131\uC744 \uC900\uBE44\uD558\uB294 \uC911`
@@ -39791,7 +40245,10 @@ async function generateCaptions() {
               requestId: result.requestId,
               editorialContextFingerprint: trustedContextFingerprint,
               pipelineFingerprint: runtime.fingerprint
-            })
+            }),
+            {
+              maximum: audsegMode ? allEnabledClips.length : MAX_CAPTION_AGENT_CLIPS_PER_RUN
+            }
           ),
           status: "running",
           progress: Math.min(0.99, (index + 1) / clips.length),
@@ -41298,9 +41755,11 @@ async function initialize() {
   } = await loadSeed();
   const storedProject = normalizeEditorProject(await loadProject(projectId));
   let seedMergeError = null;
+  let devReloadRestored = false;
   if (storedProject) {
     if (resumeSavedSession) {
       project = storedProject;
+      devReloadRestored = verifyExpectedDevReloadProject(project);
     } else {
       try {
         project = mergeCaptureIntoEditorProject(storedProject, captureState);
@@ -41364,6 +41823,14 @@ async function initialize() {
   if (openRecoveryDrafts) {
     await openLocalDraftDialog();
   }
+  if (devReloadRestored) {
+    showToast(
+      "\uD56B \uB9AC\uB85C\uB4DC \uC9C1\uC804 CURRENT\uB97C \uD655\uC778\uD558\uACE0 \uAC19\uC740 \uD504\uB85C\uC81D\uD2B8\uB97C \uB2E4\uC2DC \uC5F4\uC5C8\uC2B5\uB2C8\uB2E4.",
+      "success",
+      5e3
+    );
+  }
+  startDevReloadObserver();
 }
 function applyCaptureSeedUpdate(captureState) {
   try {
@@ -41545,6 +42012,7 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 window.addEventListener("beforeunload", () => {
+  stopDevReloadObserver();
   stopLocalDraftAutosave();
   stopPreviewPlaybackClock();
   stopPreviewAudioClock({ sync: false });
@@ -41557,6 +42025,7 @@ window.addEventListener("beforeunload", () => {
   cancelActiveJob();
 });
 window.addEventListener("pagehide", () => {
+  stopDevReloadObserver();
   stopLocalDraftAutosave();
   void flushSave();
 });
@@ -41585,6 +42054,9 @@ window.addEventListener("pageshow", () => {
     scheduleLocalDraftAutosave(
       Math.max(0, LOCAL_DRAFT_AUTOSAVE_INTERVAL_MS - elapsed)
     );
+  }
+  if (project && devReloadEnabled() && !devReloadObserverActive) {
+    startDevReloadObserver();
   }
 });
 void initialize().catch((error) => {

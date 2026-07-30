@@ -28,8 +28,13 @@ import {
   systemdStopCommands
 } from "../scripts/local-caption-stack-core.mjs";
 import {
+  commandLineRunsExactCaptionCli,
+  foregroundPidRecordVersion,
+  isSystemdRunningState,
   managedChildEnvironment,
   helpText,
+  parseProcStartTime,
+  waitForManagedShutdown,
   withoutCaptionSecrets
 } from "../scripts/local-caption-stack.mjs";
 
@@ -65,6 +70,83 @@ test("CLI의 Node 최소 버전은 package 계약인 20.9.0을 정확히 지킨�
   assert.equal(supportedNodeVersion("20.10.0"), true);
   assert.equal(supportedNodeVersion("21.0.0"), true);
   assert.equal(supportedNodeVersion("invalid"), false);
+});
+
+test("Linux foreground identity는 proc start tick과 systemd active-like 상태를 정확히 읽는다", () => {
+  const fieldsFromState = [
+    "S",
+    ...Array.from({ length: 18 }, () => "0"),
+    "987654",
+    "0"
+  ];
+  assert.equal(
+    parseProcStartTime(`123 (node worker) ${fieldsFromState.join(" ")}`),
+    "987654"
+  );
+  assert.equal(parseProcStartTime("invalid"), null);
+  for (const state of [
+    "active",
+    "activating",
+    "reloading",
+    "deactivating"
+  ]) {
+    assert.equal(isSystemdRunningState(state), true);
+  }
+  assert.equal(isSystemdRunningState("inactive"), false);
+  assert.equal(isSystemdRunningState("failed"), false);
+
+  const expectedCliPath = path.join(
+    packageRoot,
+    "scripts",
+    "local-caption-stack.mjs"
+  );
+  const legacy = {
+    pid: 123,
+    startedAt: "2026-07-30T00:00:00.000Z",
+    command: "start"
+  };
+  assert.equal(foregroundPidRecordVersion(legacy), "legacy");
+  assert.equal(foregroundPidRecordVersion({
+    ...legacy,
+    schema: "unknown"
+  }), null);
+  assert.equal(commandLineRunsExactCaptionCli({
+    commandLine:
+      `/usr/bin/node\u0000${expectedCliPath}\u0000start\u0000--foreground\u0000`,
+    processCwd: packageRoot,
+    expectedCliPath
+  }), true);
+  assert.equal(commandLineRunsExactCaptionCli({
+    commandLine:
+      "/usr/bin/node\u0000/opt/foreign-clone/scripts/local-caption-stack.mjs\u0000start\u0000",
+    processCwd: "/opt/foreign-clone",
+    expectedCliPath
+  }), false);
+});
+
+test("관리형 종료 확인은 service·identity·입증된 포트가 모두 내려갈 때만 끝난다", async () => {
+  let inspection = 0;
+  await waitForManagedShutdown({
+    isSystemdActive: () => inspection < 1,
+    isForegroundActive: () => inspection < 2,
+    isManagedGatewayActive: () => inspection < 3,
+    isManagedSttPortListening: () => inspection < 4,
+    isManagedGatewayPortListening: () => {
+      inspection += 1;
+      return inspection < 5;
+    },
+    timeoutMs: 100,
+    pollIntervalMs: 1
+  });
+  assert.equal(inspection, 5);
+  await assert.rejects(
+    waitForManagedShutdown({
+      isManagedGatewayPortListening: () => true,
+      timeoutMs: 5,
+      pollIntervalMs: 1
+    }),
+    /관리형 gateway 포트/u
+  );
 });
 
 test("모든 child 환경은 API 비밀을 제거하고 loopback proxy 우회를 강제한다", () => {
@@ -388,6 +470,9 @@ test("CLI source는 gateway를 오케스트레이션하되 키를 env·argv에 �
   assert.match(source, /KIRINUKI_AUTO_PAIR:\s*"1"/u);
   assert.match(source, /KIRINUKI_STT_MODE:\s*"local-whispercpp"/u);
   assert.match(source, /randomBytes\(24\).*toString\("hex"\)/u);
+  assert.match(source, /open\(paths\.pidPath,\s*"wx"/u);
+  assert.match(source, /removePidFileIfOwned\(paths,\s*pidRecord\)/u);
+  assert.doesNotMatch(source, /writeAtomic\(\s*paths\.pidPath/u);
   assert.match(source, /receivedBytes > artifact\.size/u);
   assert.doesNotMatch(source, /API_KEY\s*:/u);
   assert.doesNotMatch(source, /KIRINUKI_AGENT_TOKEN\s*:/u);

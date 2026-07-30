@@ -1,0 +1,392 @@
+{
+  "schema": "audseg.browser-python-golden/v1",
+  "sample_rate_hz": 16000,
+  "config": {
+    "detector": {
+      "frame_ms": 20,
+      "hop_ms": 10,
+      "noise_percentile": 0.2,
+      "noise_ceiling_dbfs": -45,
+      "minimum_on_dbfs": -65,
+      "minimum_off_dbfs": -68,
+      "on_margin_db": 10,
+      "off_margin_db": 6,
+      "peak_guard_db": 6,
+      "hysteresis_db": 4,
+      "fixed_threshold_dbfs": null,
+      "onset_ms": 40,
+      "release_ms": 250,
+      "min_region_ms": 120,
+      "merge_gap_ms": 100,
+      "pad_start_ms": 40,
+      "pad_end_ms": 80
+    },
+    "cues": {
+      "max_duration_ms": 4000,
+      "min_split_duration_ms": 500,
+      "split_search_ms": 2000
+    }
+  },
+  "cases": [
+    {
+      "id": "silence",
+      "chunks": [
+        {
+          "kind": "constant",
+          "sample_count": 16000,
+          "value": 0
+        }
+      ],
+      "expected": {
+        "total_samples": 16000,
+        "activity_regions": [],
+        "segments": [],
+        "warnings": [
+          "no_activity_detected"
+        ]
+      }
+    },
+    {
+      "id": "click_rejected_by_onset_debounce",
+      "chunks": [
+        {
+          "kind": "constant",
+          "sample_count": 3200,
+          "value": 0
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 160,
+          "amplitude": 0.5
+        },
+        {
+          "kind": "constant",
+          "sample_count": 6400,
+          "value": 0
+        }
+      ],
+      "expected": {
+        "total_samples": 9760,
+        "activity_regions": [],
+        "segments": [],
+        "warnings": [
+          "no_activity_detected"
+        ]
+      }
+    },
+    {
+      "id": "short_pause_remains_one_region",
+      "chunks": [
+        {
+          "kind": "constant",
+          "sample_count": 3200,
+          "value": 0
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 9600,
+          "amplitude": 0.5
+        },
+        {
+          "kind": "constant",
+          "sample_count": 1600,
+          "value": 0
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 9600,
+          "amplitude": 0.5
+        },
+        {
+          "kind": "constant",
+          "sample_count": 6400,
+          "value": 0
+        }
+      ],
+      "expected": {
+        "total_samples": 30400,
+        "activity_regions": [
+          [
+            2400,
+            25440,
+            "silence"
+          ]
+        ],
+        "segments": [
+          [
+            2400,
+            25440,
+            0,
+            false,
+            null
+          ]
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "id": "long_pause_splits_regions",
+      "chunks": [
+        {
+          "kind": "constant",
+          "sample_count": 3200,
+          "value": 0
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 9600,
+          "amplitude": 0.5
+        },
+        {
+          "kind": "constant",
+          "sample_count": 6400,
+          "value": 0
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 9600,
+          "amplitude": 0.5
+        },
+        {
+          "kind": "constant",
+          "sample_count": 6400,
+          "value": 0
+        }
+      ],
+      "expected": {
+        "total_samples": 35200,
+        "activity_regions": [
+          [
+            2400,
+            14240,
+            "silence"
+          ],
+          [
+            18400,
+            30240,
+            "silence"
+          ]
+        ],
+        "segments": [
+          [
+            2400,
+            14240,
+            0,
+            false,
+            null
+          ],
+          [
+            18400,
+            30240,
+            1,
+            false,
+            null
+          ]
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "id": "dc_offset_is_silence",
+      "chunks": [
+        {
+          "kind": "constant",
+          "sample_count": 16000,
+          "value": 0.4
+        }
+      ],
+      "expected": {
+        "total_samples": 16000,
+        "activity_regions": [],
+        "segments": [],
+        "warnings": [
+          "no_activity_detected"
+        ]
+      }
+    },
+    {
+      "id": "active_region_clamps_at_eof",
+      "chunks": [
+        {
+          "kind": "constant",
+          "sample_count": 3200,
+          "value": 0
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 6400,
+          "amplitude": 0.5
+        }
+      ],
+      "expected": {
+        "total_samples": 9600,
+        "activity_regions": [
+          [
+            2400,
+            9600,
+            "eof"
+          ]
+        ],
+        "segments": [
+          [
+            2400,
+            9600,
+            0,
+            false,
+            null
+          ]
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "id": "stop_threshold_boundary_then_digital_floor",
+      "chunks": [
+        {
+          "kind": "constant",
+          "sample_count": 3200,
+          "value": 0
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 6400,
+          "amplitude": 0.5
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 3200,
+          "amplitude": 0.0003981072
+        },
+        {
+          "kind": "constant",
+          "sample_count": 6400,
+          "value": 0
+        }
+      ],
+      "expected": {
+        "total_samples": 19200,
+        "activity_regions": [
+          [
+            2400,
+            14080,
+            "silence"
+          ]
+        ],
+        "segments": [
+          [
+            2400,
+            14080,
+            0,
+            false,
+            null
+          ]
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "id": "long_activity_hard_splits_at_four_seconds_with_tail",
+      "chunks": [
+        {
+          "kind": "alternating",
+          "sample_count": 147200,
+          "amplitude": 0.5
+        }
+      ],
+      "expected": {
+        "total_samples": 147200,
+        "activity_regions": [
+          [
+            0,
+            147200,
+            "eof"
+          ]
+        ],
+        "segments": [
+          [
+            0,
+            64000,
+            0,
+            true,
+            "hard_limit"
+          ],
+          [
+            64000,
+            128000,
+            0,
+            true,
+            "hard_limit"
+          ],
+          [
+            128000,
+            147200,
+            0,
+            true,
+            "hard_limit"
+          ]
+        ],
+        "warnings": [
+          "nearly_continuous_activity",
+          "noise_floor_capped"
+        ]
+      }
+    },
+    {
+      "id": "quiet_valley_split_preserves_nontrivial_tail",
+      "chunks": [
+        {
+          "kind": "alternating",
+          "sample_count": 51200,
+          "amplitude": 0.5
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 3200,
+          "amplitude": 0.05
+        },
+        {
+          "kind": "alternating",
+          "sample_count": 92800,
+          "amplitude": 0.5
+        }
+      ],
+      "expected": {
+        "total_samples": 147200,
+        "activity_regions": [
+          [
+            0,
+            147200,
+            "eof"
+          ]
+        ],
+        "segments": [
+          [
+            0,
+            54080,
+            0,
+            true,
+            "quiet_valley"
+          ],
+          [
+            54080,
+            118080,
+            0,
+            true,
+            "hard_limit"
+          ],
+          [
+            118080,
+            147200,
+            0,
+            true,
+            "hard_limit"
+          ]
+        ],
+        "warnings": [
+          "nearly_continuous_activity",
+          "noise_floor_capped"
+        ]
+      }
+    }
+  ]
+}

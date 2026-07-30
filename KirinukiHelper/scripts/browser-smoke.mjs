@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, cp, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -7,28 +7,46 @@ import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import {
+  acquireDevRunnerLock,
+  failClosedOnDevRunnerOwnerLoss,
+  releaseDevRunnerLock
+} from "./dev-runner-lock.mjs";
+
 const root = fileURLToPath(new URL("..", import.meta.url));
 const EXPECT_PACKAGE_ORIGIN_REJECTION_FLAG = "--expect-package-origin-rejection";
+const DEV_RELOAD_SMOKE_FLAG = "--dev-reload";
 const browserSmokeArgs = process.argv.slice(2);
 const expectPackageOriginRejection = browserSmokeArgs.includes(
   EXPECT_PACKAGE_ORIGIN_REJECTION_FLAG
 );
+const testDevReload = browserSmokeArgs.includes(DEV_RELOAD_SMOKE_FLAG);
 const extensionRootArgs = browserSmokeArgs.filter(
-  (argument) => argument !== EXPECT_PACKAGE_ORIGIN_REJECTION_FLAG
+  (argument) => (
+    argument !== EXPECT_PACKAGE_ORIGIN_REJECTION_FLAG
+    && argument !== DEV_RELOAD_SMOKE_FLAG
+  )
 );
 if (extensionRootArgs.length > 1) {
   throw new Error(
-    `사용법: node scripts/browser-smoke.mjs [extension-root] [${EXPECT_PACKAGE_ORIGIN_REJECTION_FLAG}]`
+    "사용법: node scripts/browser-smoke.mjs [extension-root] "
+    + `[${EXPECT_PACKAGE_ORIGIN_REJECTION_FLAG}] [${DEV_RELOAD_SMOKE_FLAG}]`
   );
 }
-const extensionRoot = path.resolve(extensionRootArgs[0] || path.join(root, "extension"));
+const sourceExtensionRoot = path.resolve(
+  extensionRootArgs[0] || path.join(root, "extension")
+);
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "chzzk-kirinuki-browser-smoke-"));
 const profileRoot = path.join(tempRoot, "chromium-profile");
+let extensionRoot = sourceExtensionRoot;
+let devReloadMarkerPath = path.join(extensionRoot, "dev-reload.json");
 
 let driver = null;
 let sessionId = "";
 let cleanupPromise = null;
 let driverOutput = "";
+let ownsDevReloadMarker = false;
+let devReloadLockLease = null;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -46,6 +64,17 @@ function isExpectedPackageOriginRejection(entry) {
       "http://127.0.0.1:4319/v1/session - Failed to load resource:"
     )
     && String(entry.message).includes("status of 403")
+  );
+}
+
+function isExpectedLocalCaptionOffline(entry) {
+  return (
+    entry?.level === "SEVERE"
+    && entry?.source === "network"
+    && String(entry?.message || "").startsWith(
+      "http://127.0.0.1:4319/v1/session - Failed to load resource:"
+    )
+    && String(entry.message).includes("net::ERR_CONNECTION_REFUSED")
   );
 }
 
@@ -234,6 +263,20 @@ async function cleanup() {
       sessionId = "";
     }
     await terminateDriver();
+    if (ownsDevReloadMarker) {
+      try {
+        const marker = JSON.parse(await readFile(devReloadMarkerPath, "utf8"));
+        if (marker?.pid === process.pid) {
+          await unlink(devReloadMarkerPath);
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+          console.warn(`개발 marker 정리 실패: ${error.message}`);
+        }
+      }
+      ownsDevReloadMarker = false;
+    }
+    await releaseDevRunnerLock(devReloadLockLease);
     await rm(tempRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 });
   })();
   return cleanupPromise;
@@ -248,9 +291,38 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 async function main() {
+  assert(
+    !(expectPackageOriginRejection && testDevReload),
+    "ZIP origin 거절 smoke와 개발 핫 리로드 smoke는 동시에 실행할 수 없습니다."
+  );
+  if (testDevReload) {
+    devReloadLockLease = await acquireDevRunnerLock(
+      path.join(root, ".dev-editor.lock"),
+      {
+        role: "validate",
+        inheritedToken: process.env.KIRINUKI_RELEASE_LOCK_TOKEN,
+        onOwnerLost: failClosedOnDevRunnerOwnerLoss("browser-smoke")
+      }
+    );
+    extensionRoot = path.join(tempRoot, "extension-under-test");
+    await cp(sourceExtensionRoot, extensionRoot, {
+      recursive: true,
+      filter: (sourcePath) => {
+        const relativePath = path.relative(
+          sourceExtensionRoot,
+          sourcePath
+        ).split(path.sep).join("/");
+        return (
+          relativePath !== "dev-reload.json"
+          && !/^dev-reload\.json\..+\.tmp$/u.test(relativePath)
+        );
+      }
+    });
+    devReloadMarkerPath = path.join(extensionRoot, "dev-reload.json");
+  }
   if (expectPackageOriginRejection) {
     assert(
-      extensionRoot !== path.join(root, "extension"),
+      sourceExtensionRoot !== path.join(root, "extension"),
       `${EXPECT_PACKAGE_ORIGIN_REJECTION_FLAG}는 ZIP에서 푼 임시 확장 검사에만 사용할 수 있습니다.`
     );
   }
@@ -266,6 +338,20 @@ async function main() {
     "editor/editor.js"
   ]) {
     await access(path.join(extensionRoot, requiredPath));
+  }
+  const writeDevReloadMarker = async (revision, kind, changedFiles) => {
+    await writeFile(devReloadMarkerPath, `${JSON.stringify({
+      schema: "chzzk-kirinuki-dev-reload/v1",
+      revision,
+      kind,
+      changedFiles,
+      pid: process.pid,
+      createdAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+    ownsDevReloadMarker = true;
+  };
+  if (testDevReload) {
+    await writeDevReloadMarker("browser-smoke-initial", "initial", []);
   }
 
   const [chromedriver, chromium, port] = await Promise.all([
@@ -314,7 +400,10 @@ async function main() {
   const extensionId = new URL(extensionTarget.url).host;
   assert(extensionId, "service worker target에서 extension ID를 찾지 못했습니다.");
 
-  const editorUrl = `chrome-extension://${extensionId}/editor.html`;
+  const editorUrl = (
+    `chrome-extension://${extensionId}/editor.html`
+    + (testDevReload ? "?dev=1" : "")
+  );
   await webdriver(baseUrl, "POST", `/session/${sessionId}/url`, { url: editorUrl });
   const editor = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/sync`, {
     script: `
@@ -409,6 +498,85 @@ async function main() {
   assert(editor.advancedOpen === false, "Whisper companion 세부설정은 기본으로 접혀 있어야 합니다.");
   assert(editor.endpointInAdvanced === true, "companion 주소가 세부설정 밖에 노출되어 있습니다.");
   assert(editor.missingIds.length === 0, `editor 핵심 DOM 누락: ${editor.missingIds.join(", ")}`);
+
+  let devReload = null;
+  if (testDevReload) {
+    const waitForEditorState = async (label, predicate) => {
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        try {
+          const state = await webdriver(
+            baseUrl,
+            "POST",
+            `/session/${sessionId}/execute/sync`,
+            {
+              script: `
+                const stylesheet = document.querySelector(
+                  'link[rel~="stylesheet"][href*="editor/editor.css"]'
+                );
+                return {
+                  readyState: document.readyState,
+                  href: location.href,
+                  stylesheet: stylesheet?.href || "",
+                  lastRevision: sessionStorage.getItem(
+                    "kirinuki:dev-reload:last-revision"
+                  ),
+                  expectedProject: sessionStorage.getItem(
+                    "kirinuki:dev-reload:expected-project"
+                  ),
+                  inert: document.body.inert
+                };
+              `,
+              args: []
+            }
+          );
+          if (predicate(state)) {
+            return state;
+          }
+        } catch {
+          // A hard reload may briefly replace the execution context.
+        }
+        await delay(100);
+      }
+      throw new Error(`${label}을 8초 안에 확인하지 못했습니다.`);
+    };
+
+    const connected = await waitForEditorState(
+      "개발 marker 초기 연결",
+      (state) => state.lastRevision === "browser-smoke-initial"
+    );
+    await writeDevReloadMarker(
+      "browser-smoke-style",
+      "style",
+      ["extension/editor/editor.css"]
+    );
+    const styleReloaded = await waitForEditorState(
+      "CSS 상태 보존 교체",
+      (state) => (
+        state.lastRevision === "browser-smoke-style"
+        && new URL(state.stylesheet).searchParams.get("dev-reload")
+          === "browser-smoke-style"
+        && state.inert === false
+      )
+    );
+    await writeDevReloadMarker(
+      "browser-smoke-editor",
+      "editor",
+      ["src/editor/main.js"]
+    );
+    const editorReloaded = await waitForEditorState(
+      "CURRENT 검증 뒤 편집기 재로드",
+      (state) => (
+        state.readyState === "complete"
+        && state.lastRevision === "browser-smoke-editor"
+        && new URL(state.href).searchParams.get("session") === "resume"
+        && new URL(state.href).searchParams.get("dev") === "1"
+        && Boolean(new URL(state.href).searchParams.get("project"))
+        && state.expectedProject === null
+        && state.inert === false
+      )
+    );
+    devReload = { connected, styleReloaded, editorReloaded };
+  }
 
   const audsegModeUi = await webdriver(baseUrl, "POST", `/session/${sessionId}/execute/sync`, {
     script: `
@@ -582,13 +750,22 @@ async function main() {
   const expectedPackageOriginRejections = expectPackageOriginRejection
     ? severeLogs.filter(isExpectedPackageOriginRejection)
     : [];
-  const unexpectedSevereLogs = expectPackageOriginRejection
-    ? severeLogs.filter((entry) => !isExpectedPackageOriginRejection(entry))
-    : severeLogs;
+  const expectedLocalCaptionOffline = severeLogs.filter(
+    isExpectedLocalCaptionOffline
+  );
+  const unexpectedSevereLogs = severeLogs.filter((entry) => (
+    !isExpectedPackageOriginRejection(entry)
+    && !isExpectedLocalCaptionOffline(entry)
+  ));
   assert(
     expectedPackageOriginRejections.length <= 1,
     "ZIP smoke 중 startup session 403이 두 번 이상 발생했습니다. 자동 pairing 재시도를 확인하세요.\n"
       + JSON.stringify(expectedPackageOriginRejections, null, 2)
+  );
+  assert(
+    expectedLocalCaptionOffline.length <= (testDevReload ? 2 : 1),
+    "로컬 Whisper startup offline probe가 예상보다 많이 반복됐습니다.\n"
+      + JSON.stringify(expectedLocalCaptionOffline, null, 2)
   );
   assert(
     unexpectedSevereLogs.length === 0,
@@ -602,10 +779,12 @@ async function main() {
     extensionId,
     serviceWorker: extensionTarget.url,
     editor,
+    devReload,
     runtime,
     sidepanel,
     sourceLayout,
     browserSevereLogs: unexpectedSevereLogs.length,
+    expectedLocalCaptionOffline: expectedLocalCaptionOffline.length,
     expectedPackageOriginRejections: expectedPackageOriginRejections.length
   }, null, 2));
 }

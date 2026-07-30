@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "치지직·YouTube 키리누키 스튜디오",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "치지직·YouTube 선택 구간을 컷 편집하고 에셋·음성·로컬 Whisper 자막 또는 AudSeg 빈 타이밍을 검수·렌더합니다.",
   "minimum_chrome_version": "120",
   "permissions": [

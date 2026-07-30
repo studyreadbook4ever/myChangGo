@@ -13,6 +13,7 @@ import {
   mkdir,
   open,
   readFile,
+  readlink,
   rename,
   rm,
   stat
@@ -56,6 +57,8 @@ const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const cliPath = fileURLToPath(import.meta.url);
 const gatewayPath = path.join(packageRoot, "scripts", "caption-gateway.mjs");
 const STARTUP_TIMEOUT_MS = 4 * 60 * 1_000;
+const SHUTDOWN_TIMEOUT_MS = 25_000;
+const FOREGROUND_PID_SCHEMA = "kirinuki-caption-foreground/v2";
 const CAPTION_REQUEST_SCHEMA =
   "chzzk-kirinuki-caption-request/v1";
 const CAPTION_HEALTH_SCHEMA =
@@ -101,6 +104,7 @@ profile:
 systemd-user가 없다면:
   npm run caption-stack -- start --foreground
   종료는 같은 터미널에서 Ctrl+C
+  실행 중 설정 변경은 caption-stack:stop → setup → start 순서로 적용
 `.trim();
 }
 
@@ -215,6 +219,12 @@ function systemdServiceState(env = withoutCaptionSecrets()) {
     }
   );
   return String(result.stdout || "").trim() || "inactive";
+}
+
+export function isSystemdRunningState(state) {
+  return ["active", "activating", "reloading", "deactivating"].includes(
+    String(state || "")
+  );
 }
 
 async function readInstalledConfig(paths, { required = false } = {}) {
@@ -663,6 +673,14 @@ async function setupCommand(options) {
       throw new Error(`${requiredTool}가 필요합니다. 설치 후 setup을 다시 실행하세요.`);
     }
   }
+  if (
+    !isSystemdRunningState(systemdServiceState())
+    && await verifiedForegroundPid(paths)
+  ) {
+    throw new Error(
+      "실행 중인 foreground Whisper가 있습니다. ./kirinuki.sh setup을 사용하거나 caption-stack:stop → setup → start 순서로 다시 실행하세요."
+    );
+  }
   await mkdir(paths.modelsRoot, { recursive: true, mode: 0o700 });
   await downloadVerifiedArtifact(
     PINNED_WHISPER_CPP.archive,
@@ -693,7 +711,9 @@ async function setupCommand(options) {
   );
 
   if (systemdUserAvailable()) {
-    const restartActiveService = systemdServiceState() === "active";
+    const restartActiveService = isSystemdRunningState(
+      systemdServiceState()
+    );
     const unit = renderSystemdUserUnit({
       nodePath: process.execPath,
       cliPath,
@@ -890,6 +910,49 @@ async function waitForManagedGateway(config, {
   );
 }
 
+export async function waitForManagedShutdown({
+  isSystemdActive = () => false,
+  isForegroundActive = () => false,
+  isManagedGatewayActive = () => false,
+  isManagedSttPortListening = () => false,
+  isManagedGatewayPortListening = () => false,
+  timeoutMs = SHUTDOWN_TIMEOUT_MS,
+  pollIntervalMs = 250
+} = {}) {
+  const startedAt = Date.now();
+  let remaining = [];
+  do {
+    const [
+      systemdActive,
+      foregroundActive,
+      managedGatewayActive,
+      managedSttPortListening,
+      managedGatewayPortListening
+    ] =
+      await Promise.all([
+        isSystemdActive(),
+        isForegroundActive(),
+        isManagedGatewayActive(),
+        isManagedSttPortListening(),
+        isManagedGatewayPortListening()
+      ]);
+    remaining = [
+      systemdActive ? "systemd-user 서비스" : null,
+      foregroundActive ? "foreground 프로세스" : null,
+      managedGatewayActive ? "관리형 gateway" : null,
+      managedSttPortListening ? "관리형 STT 포트" : null,
+      managedGatewayPortListening ? "관리형 gateway 포트" : null
+    ].filter(Boolean);
+    if (remaining.length === 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  } while (Date.now() - startedAt < timeoutMs);
+  throw new Error(
+    `로컬 자막 스택이 ${timeoutMs}ms 안에 완전히 중지되지 않았습니다: ${remaining.join(", ")}`
+  );
+}
+
 async function stopChild(child, signal = "SIGTERM") {
   if (!child || child.exitCode !== null || child.signalCode) {
     return;
@@ -908,16 +971,172 @@ async function stopChild(child, signal = "SIGTERM") {
   }
 }
 
-async function writePidFile(paths) {
-  await writeAtomic(
-    paths.pidPath,
-    `${JSON.stringify({
-      pid: process.pid,
-      startedAt: new Date().toISOString(),
-      command: "start"
-    })}\n`,
-    0o600
+export function parseProcStartTime(statText) {
+  const value = String(statText || "");
+  const commandEnd = value.lastIndexOf(") ");
+  if (commandEnd < 0) {
+    return null;
+  }
+  const fieldsFromState = value
+    .slice(commandEnd + 2)
+    .trim()
+    .split(/\s+/u);
+  const startTime = fieldsFromState[19];
+  return /^\d+$/u.test(String(startTime || "")) ? startTime : null;
+}
+
+async function readProcStartTime(pid) {
+  try {
+    return parseProcStartTime(
+      await readFile(`/proc/${pid}/stat`, "utf8")
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function readBootId() {
+  try {
+    return (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+  } catch {
+    return "";
+  }
+}
+
+function samePidRecord(left, right) {
+  return Boolean(
+    left
+    && right
+    && left.schema === FOREGROUND_PID_SCHEMA
+    && right.schema === FOREGROUND_PID_SCHEMA
+    && left.pid === right.pid
+    && left.procStartTime === right.procStartTime
+    && left.bootId === right.bootId
+    && left.cliPath === right.cliPath
   );
+}
+
+export function foregroundPidRecordVersion(record) {
+  const baseValid = Boolean(
+    Number.isInteger(Number(record?.pid))
+    && Number(record.pid) >= 2
+    && record?.command === "start"
+    && typeof record?.startedAt === "string"
+  );
+  if (!baseValid) {
+    return null;
+  }
+  if (
+    record.schema === FOREGROUND_PID_SCHEMA
+    && typeof record.procStartTime === "string"
+    && typeof record.bootId === "string"
+    && record.cliPath === path.resolve(cliPath)
+  ) {
+    return "v2";
+  }
+  if (
+    record.schema === undefined
+    && record.procStartTime === undefined
+    && record.bootId === undefined
+    && record.cliPath === undefined
+  ) {
+    return "legacy";
+  }
+  return null;
+}
+
+export function commandLineRunsExactCaptionCli({
+  commandLine,
+  processCwd,
+  expectedCliPath = cliPath
+}) {
+  const args = String(commandLine || "")
+    .split("\u0000")
+    .filter(Boolean);
+  const expected = path.resolve(expectedCliPath);
+  const scriptIndex = args.findIndex((argument, index) => {
+    if (index === 0 || argument.startsWith("-")) {
+      return false;
+    }
+    const absolute = path.isAbsolute(argument)
+      ? path.resolve(argument)
+      : path.resolve(processCwd, argument);
+    return absolute === expected;
+  });
+  return Boolean(
+    scriptIndex >= 0
+    && args.slice(scriptIndex + 1).includes("start")
+  );
+}
+
+async function currentPidRecord() {
+  const [procStartTime, bootId] = await Promise.all([
+    readProcStartTime(process.pid),
+    readBootId()
+  ]);
+  if (!procStartTime || !bootId) {
+    throw new Error("현재 foreground 프로세스의 Linux 시작 시각을 확인하지 못했습니다.");
+  }
+  return {
+    schema: FOREGROUND_PID_SCHEMA,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    command: "start",
+    procStartTime,
+    bootId,
+    cliPath: path.resolve(cliPath)
+  };
+}
+
+async function writePidFile(paths) {
+  await mkdir(path.dirname(paths.pidPath), {
+    recursive: true,
+    mode: 0o700
+  });
+  const record = await currentPidRecord();
+  let handle;
+  let created = false;
+  try {
+    handle = await open(paths.pidPath, "wx", 0o600);
+    created = true;
+    await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    return record;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error?.code !== "EEXIST") {
+      if (created) {
+        await rm(paths.pidPath, { force: true }).catch(() => {});
+      }
+      throw error;
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const existingPid = await verifiedForegroundPid(paths);
+      if (existingPid) {
+        throw new Error(
+          `로컬 자막 스택이 이미 실행 중입니다 (PID ${existingPid}).`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(
+      "foreground PID 파일이 남아 있지만 현재 관리 프로세스로 검증되지 않았습니다. "
+      + `실행 중인 이전 foreground가 없는지 확인한 뒤 ${paths.pidPath}만 수동으로 정리하세요.`
+    );
+  }
+}
+
+async function removePidFileIfOwned(paths, record) {
+  try {
+    const current = JSON.parse(await readFile(paths.pidPath, "utf8"));
+    if (samePidRecord(current, record)) {
+      await rm(paths.pidPath, { force: true });
+    }
+  } catch {
+    // A missing or replaced claim belongs to nobody this process may remove.
+  }
 }
 
 async function runStack(config) {
@@ -925,32 +1144,14 @@ async function runStack(config) {
     throw new Error("127.0.0.1 이외 주소로는 로컬 자막 스택을 실행할 수 없습니다.");
   }
   const paths = stackPaths();
-  const existingPid = await verifiedForegroundPid(paths);
-  if (existingPid && existingPid !== process.pid) {
-    throw new Error(`로컬 자막 스택이 이미 실행 중입니다 (PID ${existingPid}).`);
-  }
-  if (await probePort(config.sttPort) || await probePort(config.gatewayPort)) {
-    throw new Error(
-      `127.0.0.1:${config.sttPort} 또는 ${config.gatewayPort} 포트가 이미 사용 중입니다.`
-    );
-  }
   const binaryPath = await locateWhisperBinary(config);
   if (!binaryPath) {
     throw new Error("whisper-server가 없습니다. setup을 다시 실행하세요.");
   }
   const privateRequestPath =
     `/kirinuki-${randomBytes(24).toString("hex")}`;
-  await writePidFile(paths);
-  const whisper = spawn(
-    binaryPath,
-    buildWhisperServerArgs(config, {
-      requestPath: privateRequestPath
-    }),
-    {
-      env: managedChildEnvironment(),
-      stdio: "inherit"
-    }
-  );
+  const pidRecord = await writePidFile(paths);
+  let whisper = null;
   let gateway = null;
   let stopping = false;
   const shutdown = async () => {
@@ -962,7 +1163,7 @@ async function runStack(config) {
       stopChild(gateway),
       stopChild(whisper)
     ]);
-    await rm(paths.pidPath, { force: true }).catch(() => {});
+    await removePidFileIfOwned(paths, pidRecord);
   };
   const signalPromise = new Promise((resolve) => {
     const onSignal = (signal) => {
@@ -973,6 +1174,21 @@ async function runStack(config) {
   });
 
   try {
+    if (await probePort(config.sttPort) || await probePort(config.gatewayPort)) {
+      throw new Error(
+        `127.0.0.1:${config.sttPort} 또는 ${config.gatewayPort} 포트가 이미 사용 중입니다.`
+      );
+    }
+    whisper = spawn(
+      binaryPath,
+      buildWhisperServerArgs(config, {
+        requestPath: privateRequestPath
+      }),
+      {
+        env: managedChildEnvironment(),
+        stdio: "inherit"
+      }
+    );
     await waitForPort(config.sttPort, { child: whisper });
     const base = managedChildEnvironment();
     gateway = spawn(process.execPath, [gatewayPath], {
@@ -1070,6 +1286,7 @@ async function statusCommand(options) {
   const config = await readInstalledConfig(paths);
   const systemd = systemdUserAvailable();
   const serviceState = systemdServiceState();
+  const foregroundPid = await verifiedForegroundPid(paths);
   const originMatchesCurrentPath = installOriginMatches(paths, config);
   const [sttListening, gatewayListening] = config
     ? await Promise.all([
@@ -1083,6 +1300,8 @@ async function statusCommand(options) {
     && gatewayListening
     && await probeManagedGateway(config)
   );
+  const systemdManaged = isSystemdRunningState(serviceState);
+  const managedForeground = Boolean(!systemdManaged && foregroundPid);
   const status = {
     configured: Boolean(config),
     originMatchesCurrentPath,
@@ -1091,6 +1310,12 @@ async function statusCommand(options) {
     backend: config?.backend || null,
     systemdUser: systemd,
     service: serviceState,
+    runtime: {
+      manager: systemdManaged
+        ? "systemd"
+        : managedForeground ? "foreground" : null,
+      managedForeground
+    },
     endpoints: {
       stt: managedGateway && sttListening,
       gateway: managedGateway,
@@ -1137,18 +1362,31 @@ async function verifiedForegroundPid(paths) {
     return null;
   }
   const pid = Number(record?.pid);
-  if (!Number.isInteger(pid) || pid < 2 || process.platform !== "linux") {
+  const recordVersion = foregroundPidRecordVersion(record);
+  if (!recordVersion || process.platform !== "linux") {
     return null;
   }
   let commandLine;
+  let processCwd;
   try {
     commandLine = await readFile(`/proc/${pid}/cmdline`, "utf8");
+    processCwd = await readlink(`/proc/${pid}/cwd`);
   } catch {
     return null;
   }
+  if (!commandLineRunsExactCaptionCli({ commandLine, processCwd })) {
+    return null;
+  }
+  if (recordVersion === "legacy") {
+    return pid;
+  }
+  const [procStartTime, bootId] = await Promise.all([
+    readProcStartTime(pid),
+    readBootId()
+  ]);
   if (
-    !commandLine.includes(path.basename(cliPath))
-    || !commandLine.split("\u0000").includes("start")
+    procStartTime !== record.procStartTime
+    || bootId !== record.bootId
   ) {
     return null;
   }
@@ -1157,27 +1395,76 @@ async function verifiedForegroundPid(paths) {
 
 async function stopCommand() {
   const paths = stackPaths();
-  let stopped = false;
-  if (systemdUserAvailable()) {
-    const active = systemdServiceState() === "active";
-    if (active) {
-      try {
-        runSystemdCommands(systemdStopCommands(), withoutCaptionSecrets());
-        stopped = true;
-      } catch {
-        // A separately started foreground process is still checked below.
-      }
+  const config = await readInstalledConfig(paths).catch(() => null);
+  const managedGatewayBeforeStop = Boolean(
+    config
+    && installOriginMatches(paths, config)
+    && await probeManagedGateway(config)
+  );
+  let stopRequested = false;
+  let systemdStopError = null;
+  const systemdManaged = (
+    systemdUserAvailable()
+    && isSystemdRunningState(systemdServiceState())
+  );
+  if (systemdManaged) {
+    stopRequested = true;
+    try {
+      runSystemdCommands(systemdStopCommands(), withoutCaptionSecrets());
+    } catch (error) {
+      systemdStopError = error;
     }
   }
-  const foregroundPid = await verifiedForegroundPid(paths);
+  const foregroundPid = systemdManaged
+    ? null
+    : await verifiedForegroundPid(paths);
   if (foregroundPid) {
-    process.kill(foregroundPid, "SIGTERM");
-    stopped = true;
+    try {
+      process.kill(foregroundPid, "SIGTERM");
+    } catch (error) {
+      if (error?.code !== "ESRCH") {
+        throw error;
+      }
+    }
+    stopRequested = true;
   }
-  if (!stopped) {
+  if (!stopRequested) {
     output("실행 중인 로컬 자막 스택을 찾지 못했습니다.");
     return;
   }
+  await waitForManagedShutdown({
+    isSystemdActive: () => (
+      systemdManaged && isSystemdRunningState(systemdServiceState())
+    ),
+    isForegroundActive: async () => (
+      foregroundPid
+        ? await verifiedForegroundPid(paths) === foregroundPid
+        : false
+    ),
+    isManagedGatewayActive: async () => Boolean(
+      config
+      && installOriginMatches(paths, config)
+      && await probeManagedGateway(config)
+    ),
+    isManagedSttPortListening: async () => Boolean(
+      managedGatewayBeforeStop
+      && config
+      && await probePort(config.sttPort)
+    ),
+    isManagedGatewayPortListening: async () => Boolean(
+      managedGatewayBeforeStop
+      && config
+      && await probePort(config.gatewayPort)
+    )
+  }).catch((error) => {
+    if (systemdStopError) {
+      throw new AggregateError(
+        [systemdStopError, error],
+        "systemd-user 서비스 중지 명령과 종료 확인이 모두 실패했습니다."
+      );
+    }
+    throw error;
+  });
   output("로컬 자막 스택 중지 완료 · 서비스는 API 키를 보관하지 않았습니다.");
 }
 
