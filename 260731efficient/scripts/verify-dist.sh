@@ -215,7 +215,8 @@ for required in \
 done
 
 project_license_name='unlic''ense|licen[cs]e([._-].*)?|copying([._-].*)?'
-if find "$documents" -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' |
+if find "$documents" -path "$documents/rust" -prune -o \
+    \( -type f -o -type l \) -printf '%f\n' |
     grep -Eiq "$project_license_name"; then
     echo "release verification failed: archive contains a project license file" >&2
     exit 1

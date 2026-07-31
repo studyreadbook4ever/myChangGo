@@ -34,10 +34,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 project_license_name='unlic''ense|licen[cs]e([._-].*)?|copying([._-].*)?'
-if find . -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' |
+if find . \
+    \( -path './.git' -o -path './target' -o -path './dist' \) -prune -o \
+    \( -type f -o -type l \) -printf '%f\n' |
     grep -Eix "$project_license_name" >"$scan_output"; then
     sed -n '1,200p' "$scan_output" >&2
-    echo "rights verification failed: root project license file is present" >&2
+    echo "rights verification failed: project license file is present" >&2
     exit 1
 else
     grep_status=$?
@@ -49,6 +51,7 @@ fi
 
 spdx_marker='SPDX-License-Identi''fier:'
 old_grant='Unlic''ense'
+common_grant='permission is hereby gr''anted|licensed under the apache licen''se|gnu (affero )?general public licen''se|mozilla public licen''se|redistribution and use in source and binary fo''rms'
 if grep -r -n -F --exclude-dir=.git --exclude-dir=target --exclude-dir=dist \
     -- "$spdx_marker" . >"$scan_output"; then
     sed -n '1,200p' "$scan_output" >&2
@@ -73,9 +76,21 @@ else
         exit 1
     fi
 fi
+if grep -r -n -E -i --exclude-dir=.git --exclude-dir=target --exclude-dir=dist \
+    -- "$common_grant" . >"$scan_output"; then
+    sed -n '1,200p' "$scan_output" >&2
+    echo "rights verification failed: common project license grant is present" >&2
+    exit 1
+else
+    grep_status=$?
+    if [ "$grep_status" -ne 1 ]; then
+        echo "rights verification failed: cannot scan common license grants" >&2
+        exit 1
+    fi
+fi
 
 package_list=$(cargo +stable package --locked --allow-dirty --list)
-printf '%s\n' "$package_list" >"$scan_output"
+printf '%s\n' "$package_list" | sed 's#.*/##' >"$scan_output"
 if grep -Eix "$project_license_name" "$scan_output" >/dev/null; then
     echo "rights verification failed: Cargo package contains a project license file" >&2
     exit 1
@@ -87,4 +102,4 @@ else
     fi
 fi
 
-printf '%s\n' 'verified absence of a project license grant'
+printf '%s\n' 'verified absence of project license metadata and conventional declarations'
