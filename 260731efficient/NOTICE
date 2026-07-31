@@ -1,0 +1,14 @@
+idlepilot notices
+
+This notice only records the boundary around third-party material. Third-party
+components in binary distributions retain their own copyright and license
+terms, including the Rust standard library, glibc, libgcc, the ELF loader, and
+other toolchain and operating-system components.
+
+The idlepilot source distribution contains no bundled third-party source code
+and the Rust package declares no third-party Cargo dependencies. See
+THIRD_PARTY.md for the release-time dependency statement. Binary distributions
+must also carry the exact Rust standard-library notice bundle identified there,
+under share/doc/idlepilot/rust/. The release SPDX SBOM separately records the
+statically linked Rust library and every dynamically linked system-library name
+reported by the exact ELF.
