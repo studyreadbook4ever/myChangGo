@@ -58,6 +58,7 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { command -> handler.post(command) }
     private val passwordCells = arrayOfNulls<TextView>(ENTRY_COUNT)
+    private val idCells = arrayOfNulls<EditText>(ENTRY_COUNT)
     private val editableCells = Array(EDITABLE_COLUMN_COUNT) { arrayOfNulls<EditText>(ENTRY_COUNT) }
     private val lastCheckedCells = arrayOfNulls<TextView>(ENTRY_COUNT)
     private val hideTasks = mutableMapOf<Int, Runnable>()
@@ -565,19 +566,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun idCell(enterpriseId: String, row: Int): View {
+    private fun idCell(enterpriseId: String, row: Int): EditText {
         val storedId = cellPrefs.getString(idKey(enterpriseId, row), "").orEmpty()
         val locked = cellPrefs.getBoolean(idLockedKey(enterpriseId, row), false) && storedId.isNotBlank()
-        if (locked) {
-            return baseTextCell().apply {
-                text = storedId
-                setTextColor(COLOR_TEXT)
-                typeface = Typeface.DEFAULT_BOLD
-                background = rounded(COLOR_RESET, COLOR_BORDER, 8)
-                contentDescription = "${slotName(row)} locked id"
-            }
-        }
-
         return NoCopyEditText(this).apply {
             setSingleLine(true)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -611,10 +602,19 @@ class MainActivity : Activity() {
                     false
                 }
             }
+            if (locked) {
+                showLockedIdCell(this, row)
+            } else {
+                contentDescription = "${slotName(row)} editable id"
+            }
+            idCells[row] = this
         }
     }
 
     private fun lockIdIfReady(cell: EditText, enterpriseId: String, row: Int) {
+        if (!cell.isEnabled) {
+            return
+        }
         val value = cell.text?.toString()?.trim().orEmpty()
         if (value.isBlank()) {
             return
@@ -624,13 +624,30 @@ class MainActivity : Activity() {
             .putBoolean(idLockedKey(enterpriseId, row), true)
             .apply()
         cell.setText(value)
+        showLockedIdCell(cell, row)
+        cell.clearFocus()
+        Toast.makeText(this, "ID 고정됨", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showLockedIdCell(cell: EditText, row: Int) {
         cell.isEnabled = false
         cell.alpha = 1f
-        cell.clearFocus()
         cell.setTextColor(COLOR_TEXT)
         cell.typeface = Typeface.DEFAULT_BOLD
         cell.background = rounded(COLOR_RESET, COLOR_BORDER, 8)
-        Toast.makeText(this, "ID 고정됨", Toast.LENGTH_SHORT).show()
+        cell.contentDescription = "${slotName(row)} locked id"
+    }
+
+    private fun clearIdCell(row: Int) {
+        idCells[row]?.apply {
+            setText("")
+            isEnabled = true
+            alpha = 1f
+            typeface = Typeface.DEFAULT
+            background = rounded(COLOR_PANEL, COLOR_BORDER, 8)
+            contentDescription = "${slotName(row)} editable id"
+            clearFocus()
+        }
     }
 
     private fun lastCheckedCell(enterpriseId: String, row: Int): TextView {
@@ -804,6 +821,7 @@ class MainActivity : Activity() {
             .remove(idLockedKey(enterpriseId, row))
             .remove(lastCheckedKey(enterpriseId, row))
             .apply()
+        clearIdCell(row)
         lastCheckedCells[row]?.text = "Never"
     }
 
