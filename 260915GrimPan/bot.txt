@@ -1,0 +1,93 @@
+GrimPan bot guide — 2026-09-15
+
+이 파일은 이 앱의 안내 문서입니다. bot.txt 자동 발견을 보장하는 웹 표준이 아닙니다.
+Schemas: ./tools.json
+Workflow: https://raw.githubusercontent.com/studyreadbook4ever/myChangGo/main/260915GrimPan/SKILL.md
+Implementation: ./webmcp.js
+
+Native WebMCP (document.modelContext, Chrome 155 compatible argument form):
+
+const tools = await document.modelContext.getTools();
+const read = tools.find(tool => tool.name === 'board_read');
+const result = await document.modelContext.executeTool(read, { limit: 10 });
+const state = JSON.parse(result);
+
+Pass a JavaScript object as input; do not JSON.stringify the arguments.
+Native execution returns a JSON string containing {ok:true,...} or
+{ok:false,error:{code,message}}. Check ok before claiming success.
+Tools belong to the open page. Cross-origin discovery is not enabled by this app.
+Browser support alone is insufficient if policy prevents registration.
+
+Manual same-page JavaScript, also available without native WebMCP:
+
+await window.grimpan.call('board_read', { limit: 10 });
+await window.grimpan.call('agent_pen', { down: false });
+await window.grimpan.call('agent_move', { x: 100, y: 100 });
+await window.grimpan.call('agent_pen', { down: true, color: '#6366f1', width: 4 });
+await window.grimpan.call('agent_move', { dx: 120, dy: 0 });
+await window.grimpan.call('agent_pen', { down: false });
+
+Manual calls return the result object directly. This is not an AI model.
+The UI demonstration is a fixed script, not an autonomous AI agent.
+
+Tools:
+board_read    Read state, object summaries, selected/requested details and lineage.
+board_select  Replace selection by existing IDs; [] clears it.
+board_edit    commands:[...] as one undoable transaction; see schema for variants.
+agent_move    Absolute x,y OR relative dx,dy; never mix both forms.
+agent_turn    angle is absolute degrees, 0 right, 90 down.
+agent_pen     down:boolean, optional color:#RRGGBB and width:integer 1..100.
+board_view    x,y are screen translation; zoom is 0.1..4.
+board_history action:'undo' or 'redo'; shared human/agent history.
+board_share   Generate a snapshot URL; does not send it to anybody.
+board_fork    selectionOnly?:boolean, title?:string; makes an editable local copy.
+board_identity nickname:string; choose a display name for the current tab only.
+board_react   emoji:'👍'|'❤️'|'✨'|'💡'|'👏'|'❓'; no author override.
+board_quote   url:string, dx?:integer, dy?:integer; merge a snapshot into this board.
+
+There are 13 tools. board_identity is not login or authentication. Nickname state
+is kept only in tab memory, never Web Storage or cookies. Reloading starts with
+no selected nickname. board_react returns NICKNAME_REQUIRED until a name is chosen.
+Names already attached to saved reactions remain public document data and travel
+in snapshot URLs. Counts are local board reactions, not online users.
+
+await window.grimpan.call('board_identity', { nickname: '보라' });
+await window.grimpan.call('board_react', { emoji: '💡' });
+
+Drawing coordinates: integer -100000..100000, positive x right, positive y down.
+Path points: absolute [x,y] pairs, at most 2000 per create/update command.
+Batch: at most 50 commands. IDs: letters, digits, underscore or hyphen, 1..100 chars.
+board_edit also accepts metadata (title and/or author) and clear (all objects).
+Object strokeWidth may be 0 for no outline; agent pen width must be 1..100.
+Object types: path, rect, ellipse, line, text, note, bubble.
+Notes and bubbles take x,y,text and optional style/size; default size is 220x140.
+Story commands: frame_add{frame:{title,description?,x,y,width,height,id?}},
+frame_update{id,changes}, frame_delete{id}. Frame sizes must be positive.
+Native and manual calls run the same validation and the same editor commands.
+
+board_read defaults: offset=0, limit=20, pointOffset=0, pointLimit=200.
+At most 50 summaries and 10 detailed objects are returned. Path details share a
+500-point response budget. Use ids:[oneId], pointOffset, pointLimit to page points.
+Text previews are bounded; full imported text can require the app's file export.
+board_read includes sessionNickname, grouped reaction counts/display names, and
+paged frames (frameOffset=0, frameLimit=10, maximum30). Use frameId for a full
+frame description instead of its 300-character preview.
+
+Shared links contain read-only snapshots in the URL fragment. Later edits do not
+change previously shared links. Fork before editing a read-only snapshot. Forking
+does not provide real-time synchronization or cryptographic authorship proof.
+Long snapshots can exceed URL limits; use the app's project file export when needed.
+Even selection forks bundle the FULL original drawing and its reactions as source
+material. The source payload is not cropped to selected objects. board_quote locally
+decodes a URL fragment, adds its drawing and frames to the current editable board,
+and preserves its full original. One undo reverses the merge; no URL fetch occurs.
+
+Cancellation is observed before/after a call and passed to async app callbacks.
+Already completed edits are not automatically rolled back; use shared undo history.
+Tool annotations are descriptive hints, not access-control guarantees.
+DOCUMENT_BUSY means a document is loading or switching. Retry after the app is
+ready; a busy response contains no editable or readable temporary document.
+board_read includes up to ten sources, beginning with the directly quoted source.
+
+API reference checked 2026-09-15:
+https://developer.chrome.com/docs/ai/webmcp/imperative-api

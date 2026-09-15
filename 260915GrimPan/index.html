@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#7660df">
+  <meta name="description" content="사람과 에이전트가 함께 그리는 보드. 그림을 링크로 나누고, 원본을 인용해 새로운 그림으로 이어가세요.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'">
+  <title>Grimpan — 함께 그리고, 이어 그리기</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./social.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-pen" viewBox="0 0 24 24"><path d="m15 4 5 5M4 20l5-1L20 8a2 2 0 0 0-5-5L4 14zM4 20l1-5"/></symbol>
+    <symbol id="i-select" viewBox="0 0 24 24"><path d="m5 3 14 10-7 1-3 7z"/></symbol>
+    <symbol id="i-hand" viewBox="0 0 24 24"><path d="M8 12V6a2 2 0 0 1 4 0v5-7a2 2 0 0 1 4 0v7-4a2 2 0 0 1 4 0v8c0 5-3 7-7 7-3 0-4-1-6-4l-3-5a2 2 0 0 1 3-2l3 3"/></symbol>
+    <symbol id="i-rect" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></symbol>
+    <symbol id="i-ellipse" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></symbol>
+    <symbol id="i-line" viewBox="0 0 24 24"><path d="m5 19 14-14M13 5h6v6"/></symbol>
+    <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 7V4h16v3M12 4v16M8 20h8"/></symbol>
+    <symbol id="i-erase" viewBox="0 0 24 24"><path d="m3 14 10-11 8 7-10 11H9zM8 9l8 7M12 21h9"/></symbol>
+    <symbol id="i-undo" viewBox="0 0 24 24"><path d="M8 5 3 10l5 5M3 10h11a6 6 0 0 1 0 12" transform="translate(0 -3)"/></symbol>
+    <symbol id="i-redo" viewBox="0 0 24 24"><path d="m16 5 5 5-5 5m5-5H10a6 6 0 0 0 0 12" transform="translate(0 -3)"/></symbol>
+    <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6" cy="4" r="2"/><circle cx="18" cy="4" r="2"/><circle cx="6" cy="20" r="2"/><path d="M6 6v12m12-12v3c0 5-12 1-12 6"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M5 13H3v8h18v-8h-2"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="14" rx="5"/><path d="M12 3v4M1 13h3m16 0h3m-14-8h6M8 13h1m6 0h1M9 17h6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v13m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m9 15 6-6m-5-3 2-2a6 6 0 0 1 8 8l-2 2M6 10l-2 2a6 6 0 0 0 8 8l2-2"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+    <symbol id="i-fit" viewBox="0 0 24 24"><path d="M3 9V3h6m6 0h6v6m0 6v6h-6m-6 0H3v-6"/></symbol>
+  </defs></svg>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Grimpan 첫 화면"><span class="brand-mark"><svg><use href="#i-pen"/></svg></span><span>grimpan<span class="brand-dot">.</span></span></a>
+    <span class="header-divider"></span>
+    <div class="document-heading"><input id="board-title" aria-label="보드 제목" maxlength="120" value="새로운 그림"><span id="save-status" class="save-status">준비 중</span></div>
+    <div class="header-actions"><button id="new-board" class="button quiet"><svg><use href="#i-plus"/></svg><span>새 보드</span></button><button id="open-library" class="button quiet"><svg><use href="#i-grid"/></svg><span>내 보드</span></button><button id="fork-board" class="button soft"><svg><use href="#i-fork"/></svg><span>포크하기</span></button><button id="share-board" class="button primary"><svg><use href="#i-share"/></svg><span>공유하기</span></button></div>
+  </header>
+  <div id="source-banner" class="source-banner" hidden><span><strong>공유된 원본을 보고 있어요.</strong> 포크하면 내 보드에서 자유롭게 이어 그릴 수 있어요.</span><button id="fork-source" class="button small primary">인용해 이어 그리기 ↗</button></div>
+  <main class="workspace">
+    <aside class="tools-rail" aria-label="그리기 도구">
+      <div class="tool-group" id="drawing-tools">
+        <button class="tool active" data-tool="select" aria-label="선택 (V)" title="선택 V" aria-pressed="true"><svg><use href="#i-select"/></svg><kbd>V</kbd></button>
+        <button class="tool" data-tool="pen" aria-label="펜 (B)" title="펜 B" aria-pressed="false"><svg><use href="#i-pen"/></svg><kbd>B</kbd></button>
+        <button class="tool" data-tool="rect" aria-label="사각형 (R)" title="사각형 R" aria-pressed="false"><svg><use href="#i-rect"/></svg><kbd>R</kbd></button>
+        <button class="tool" data-tool="ellipse" aria-label="원 (O)" title="원 O" aria-pressed="false"><svg><use href="#i-ellipse"/></svg><kbd>O</kbd></button>
+        <button class="tool" data-tool="line" aria-label="연결선 (L)" title="연결선 L" aria-pressed="false"><svg><use href="#i-line"/></svg><kbd>L</kbd></button>
+        <button class="tool" data-tool="text" aria-label="텍스트 (T)" title="텍스트 T" aria-pressed="false"><svg><use href="#i-text"/></svg><kbd>T</kbd></button>
+        <button class="tool" data-tool="note" aria-label="메모 카드 (N)" title="메모 카드 N" aria-pressed="false"><svg><use href="#i-rect"/></svg><kbd>N</kbd></button>
+        <button class="tool" data-tool="bubble" aria-label="말풍선" title="말풍선" aria-pressed="false"><svg viewBox="0 0 24 24"><path d="M4 4h16v12H9l-5 5z"/></svg></button>
+        <button class="tool" data-tool="eraser" aria-label="객체 지우개 (E)" title="객체 지우개 E" aria-pressed="false"><svg><use href="#i-erase"/></svg><kbd>E</kbd></button>
+      </div>
+      <div class="tool-group"><button class="tool" data-tool="hand" aria-label="화면 이동 (H)" title="화면 이동 H" aria-pressed="false"><svg><use href="#i-hand"/></svg><kbd>H</kbd></button><button id="undo" class="tool" aria-label="실행 취소" title="실행 취소 Ctrl+Z" disabled><svg><use href="#i-undo"/></svg></button><button id="redo" class="tool" aria-label="다시 실행" title="다시 실행 Ctrl+Shift+Z" disabled><svg><use href="#i-redo"/></svg></button></div>
+      <button id="help-open" class="help-button" aria-label="사용법">?</button>
+    </aside>
+    <section id="canvas-area" class="canvas-area" aria-label="그림 작업 공간">
+      <div class="canvas-breadcrumb"><span class="live-dot"></span><span id="document-mode">MY CANVAS</span><span class="crumb-slash">/</span><span id="object-count">0개의 오브젝트</span></div>
+      <svg id="board" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="편집 가능한 드로잉 보드" tabindex="0"><g id="world"><g id="objects"></g><g id="preview"></g><g id="selection"></g><g id="agent-cursor"></g></g></svg>
+      <div class="canvas-caption"><span id="tool-hint">드래그로 이동 · Shift로 여러 개 선택 · Space로 화면 이동</span></div>
+      <div class="zoom-control"><button id="zoom-out" aria-label="축소">−</button><button id="zoom-value" title="100%로 보기">100%</button><button id="zoom-in" aria-label="확대">+</button><span></span><button id="fit-view" aria-label="그림 전체 보기" title="전체 보기"><svg><use href="#i-fit"/></svg></button></div>
+      <div id="selection-toolbar" class="selection-toolbar" hidden><span id="selection-count"></span><button id="duplicate-selection">복제</button><button id="quote-selection" title="선택한 객체를 새 보드로 가져옵니다. 원본 전체도 출처에 포함됩니다.">선택 인용</button><button id="delete-selection" aria-label="선택 삭제"><svg><use href="#i-trash"/></svg></button></div>
+    </section>
+    <aside class="side-panel" aria-label="보드 설정과 에이전트">
+      <div class="panel-tabs" role="tablist"><button id="tab-draw" role="tab" data-panel="draw" aria-selected="true">꾸미기</button><button id="tab-agent" role="tab" data-panel="agent" aria-selected="false">에이전트 <span class="tiny-dot"></span></button><button id="tab-source" role="tab" data-panel="source" aria-selected="false">출처</button></div>
+      <section id="panel-draw" class="panel-body" role="tabpanel" aria-labelledby="tab-draw">
+        <div class="section-label">MAKE YOUR MARK</div><h1>작은 생각부터<br>자유롭게 그려요.</h1><p class="muted intro-copy">혼자 시작한 그림도,<br>누군가의 다음 그림이 될 수 있어요.</p>
+        <div class="field-heading"><label for="stroke-color">선 색상</label><span id="color-value">#7160D8</span></div>
+        <div id="palette" class="palette"></div><div class="custom-color"><input id="stroke-color" type="color" value="#7160d8" aria-label="사용자 지정 선 색상"><span>내 색상 고르기</span></div>
+        <div class="field-heading"><label for="stroke-width">선 두께</label><output id="width-value">3 px</output></div><input id="stroke-width" class="range" type="range" min="1" max="24" value="3">
+        <div class="fill-setting"><label><input type="checkbox" id="fill-enabled"> 도형 채우기</label><input type="color" id="fill-color" value="#e9e3ff" aria-label="도형 채움 색상"></div>
+        <div class="field-heading"><label for="font-size">글자 크기</label><output id="font-value">24 px</output></div><input id="font-size" class="range" type="range" min="12" max="80" value="24">
+        <div class="panel-separator"></div><label class="small-label" for="author">내 이름 / 닉네임</label><input id="author" class="text-input" placeholder="이 그림을 그린 사람" maxlength="80" value="나">
+        <div class="note-card"><span class="note-icon">↗</span><strong>그림으로 대화를 이어가요</strong><p>링크로 공유하면 상대가 원본을 인용해 새 그림을 만들 수 있어요.</p><button id="share-tip">공유 링크 만들기 →</button></div>
+        <button id="export-open" class="button quiet full"><svg><use href="#i-download"/></svg>파일로 저장 / 가져오기</button>
+      </section>
+      <section id="panel-agent" class="panel-body" role="tabpanel" aria-labelledby="tab-agent" hidden>
+        <div class="section-label">A LITTLE CO-CREATOR</div><h2>같은 보드 위의<br>작은 에이전트.</h2><p class="muted">위치를 읽고, 움직이고, 선을 그려요.<br>사람과 같은 편집 엔진을 사용해요.</p>
+        <div id="webmcp-status" class="connection-status">도구 연결 확인 중</div>
+        <div class="agent-position"><span class="bot-avatar"><svg><use href="#i-bot"/></svg></span><div><strong>보라</strong><span id="agent-position">x 0 · y 0</span></div><button id="follow-agent" title="에이전트 위치로 이동">따라가기 ↗</button></div>
+        <div class="agent-pad"><button data-agent-step="0,-40" aria-label="에이전트 위로 이동">↑</button><div><button data-agent-step="-40,0" aria-label="에이전트 왼쪽 이동">←</button><button id="agent-pen-toggle" aria-pressed="false" title="에이전트 펜 켜기/끄기"><svg><use href="#i-pen"/></svg></button><button data-agent-step="40,0" aria-label="에이전트 오른쪽 이동">→</button></div><button data-agent-step="0,40" aria-label="에이전트 아래로 이동">↓</button></div>
+        <div class="field-heading"><strong>움직임 실험</strong><span>로컬 데모</span></div><p class="small muted">미리 작성한 명령을 재생해요. 외부 AI 없이도 실행 흐름을 볼 수 있어요.</p>
+        <div class="demo-buttons"><button id="demo-star"><span>✧</span> 별 그리기</button><button id="demo-garden"><span>❋</span> 정원 산책</button></div><button id="stop-agent" class="button stop full" disabled>■ 움직임 멈추기</button>
+        <div class="field-heading"><strong>활동 기록</strong><button id="clear-log" class="text-button">비우기</button></div><ol id="activity-log" class="activity-log" aria-live="polite"></ol>
+        <details class="agent-details"><summary>외부 에이전트 연결</summary><p>Chrome 155의 WebMCP 실험 기능을 켠 브라우저에서 이 탭의 도구를 발견하고 실행하세요. AI 모델은 별도로 연결합니다.</p><a href="https://raw.githubusercontent.com/studyreadbook4ever/myChangGo/main/260915GrimPan/SKILL.md" target="_blank" rel="noopener">사용 가이드 ↗</a><a href="./tools.json" target="_blank" rel="noopener">도구 규격 ↗</a></details>
+      </section>
+      <section id="panel-source" class="panel-body" role="tabpanel" aria-labelledby="tab-source" hidden>
+        <div class="section-label">EVERY IDEA HAS A STORY</div><h2>그림의 출처를<br>함께 이어가요.</h2><p class="muted">인용 원본은 보드 데이터에 담겨요.<br>원본을 열고 다시 포크할 수 있어요.</p><div id="source-list" class="source-list"></div><div class="note-card"><strong>원본은 그대로, 새로운 해석은 자유롭게.</strong><p>포크는 새로운 보드를 만듭니다. 출처 이름은 작성자가 적은 정보이며 계정 인증을 의미하지 않아요.</p></div><button id="fork-from-panel" class="button soft full"><svg><use href="#i-fork"/></svg>이 보드 포크하기</button>
+      </section>
+      <footer class="panel-footer"><span>LOCAL FIRST · OPEN CANVAS</span><span>✳</span></footer>
+    </aside>
+  </main>
+  <dialog id="share-dialog"><form method="dialog" class="dialog-top"><span class="section-label">PASS IT ON</span><button class="dialog-close" aria-label="닫기">×</button></form><h2>그림을 건네보세요.</h2><p class="muted">지금의 그림과 인용 원본 전체를 담은 링크예요.<br>받은 사람은 원본을 보고, 포크해서 이어 그릴 수 있어요.</p><label class="small-label" for="share-url">편집 가능한 스냅샷 링크</label><textarea id="share-url" rows="3" readonly></textarea><p id="share-detail" class="small muted"></p><div class="dialog-actions"><button id="copy-link" class="button primary"><svg><use href="#i-link"/></svg>링크 복사</button><button id="save-project" class="button soft">프로젝트 파일 저장</button></div><p class="dialog-footnote">수정한 내용은 새 링크로 다시 공유하세요. 공동 서버 없이 그림을 주고받는 방식입니다.</p></dialog>
+  <dialog id="files-dialog"><form method="dialog" class="dialog-top"><span class="section-label">KEEP YOUR WORK</span><button class="dialog-close" aria-label="닫기">×</button></form><h2>저장하고, 다시 열고.</h2><div class="file-buttons"><button id="download-json" class="file-button"><strong>프로젝트 저장 ↗</strong><span>그림·반응·장면·인용 원본을 담은 .grimpan.json</span></button><button id="download-png" class="file-button"><strong>PNG 이미지 저장 ↗</strong><span>지금의 그림을 한 장의 이미지로</span></button><button id="download-svg" class="file-button"><strong>SVG 벡터 저장 ↗</strong><span>크기를 바꿔도 선명한 벡터 이미지</span></button><button id="import-project" class="file-button"><strong>프로젝트 파일 열기 ↗</strong><span>받은 .grimpan.json을 원본으로 열기</span></button></div><label class="small-label" for="import-url">공유 링크로 열기</label><textarea id="import-url" rows="2" placeholder="공유받은 Grimpan 링크를 붙여넣으세요"></textarea><div class="quote-actions"><button id="open-shared-url" class="button soft">원본 열기</button><button id="quote-shared-url" class="button primary">현재 보드에 인용</button></div><p class="quote-caption">현재 보드에 인용하면 받은 그림을 붙여넣고, 전체 원본을 출처로 보관해요.</p><input id="project-file" type="file" accept="application/json,.json" hidden></dialog>
+  <dialog id="library-dialog" class="wide-dialog"><form method="dialog" class="dialog-top"><span class="section-label">YOUR LITTLE COLLECTION</span><button class="dialog-close" aria-label="닫기">×</button></form><h2>내 브라우저의 보드</h2><p class="muted">작업은 이 기기에 자동 저장돼요. 다른 사람에게는 링크나 프로젝트 파일을 건네주세요.</p><div id="library-list" class="library-list"></div></dialog>
+  <dialog id="text-dialog"><form id="text-form"><div class="dialog-top"><span class="section-label">SAY IT WITH WORDS</span><button type="button" class="dialog-close" id="text-cancel" aria-label="닫기">×</button></div><h2>생각을 적어보세요.</h2><textarea id="text-content" rows="4" maxlength="4000" aria-label="보드에 쓸 텍스트" placeholder="여기에 이야기를 적어주세요"></textarea><button type="submit" class="button primary full">보드에 넣기</button></form></dialog>
+  <dialog id="help-dialog"><form method="dialog" class="dialog-top"><span class="section-label">A CANVAS TO SHARE</span><button class="dialog-close" aria-label="닫기">×</button></form><h2>그리고, 인용하고, 이어가기.</h2><ol class="help-steps"><li><strong>그리기</strong><p>펜·도형·텍스트로 생각을 남기세요. 선택 도구로 객체를 옮기고 색을 바꿀 수 있어요.</p></li><li><strong>함께 실험하기</strong><p>에이전트 탭의 보라를 움직여보세요. 외부 에이전트는 WebMCP 도구로 같은 보드를 편집할 수 있어요.</p></li><li><strong>공유 → 포크</strong><p>공유 링크는 그 순간의 원본입니다. 받은 그림을 포크하거나 일부를 선택 인용하면 출처가 남아요.</p></li></ol><p class="small muted">V 선택 · B 펜 · R 사각형 · O 원 · L 선 · T 글자 · E 객체 지우개 · Space 화면 이동 · Ctrl/⌘ Z 실행 취소 · Delete 선택 삭제</p><a href="https://github.com/studyreadbook4ever/myChangGo/blob/main/260915GrimPan/README.md" target="_blank" rel="noopener">자세한 사용법 ↗</a></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <noscript><div class="noscript">Grimpan은 JavaScript가 필요합니다. 브라우저에서 JavaScript를 켜주세요.</div></noscript>
+</body>
+</html>
