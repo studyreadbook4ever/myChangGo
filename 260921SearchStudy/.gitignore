@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+*.py[cod]
+*.log
+.DS_Store
+# 학습된 예제 checkpoint(.pt)는 수업 결과의 일부로 함께 보관한다.

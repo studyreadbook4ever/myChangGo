@@ -1,0 +1,343 @@
+{
+  "python": "3.12.13",
+  "torch": "2.14.0+cpu",
+  "seeds": {
+    "global": 42,
+    "mlm_initialization": 41,
+    "mlm_corruption": 45,
+    "mlm_diagnostic": 44,
+    "retrieval_projection": 17
+  },
+  "vocabulary_size": 242,
+  "bpe_merges": 100,
+  "encoder_config": {
+    "vocab_size": 242,
+    "max_len": 96,
+    "d_model": 48,
+    "n_heads": 4,
+    "n_layers": 2,
+    "d_ff": 96,
+    "dropout": 0.0
+  },
+  "retrieval_training": {
+    "steps": 300,
+    "learning_rate": 0.003,
+    "temperature": 0.1
+  },
+  "data": {
+    "documents": 12,
+    "train": 48,
+    "validation": 24,
+    "test": 24
+  },
+  "mlm_diagnostic_before": {
+    "loss": 5.48988151550293,
+    "accuracy": 0.0,
+    "count": 93
+  },
+  "mlm_diagnostic_after": {
+    "loss": 2.83868145942688,
+    "accuracy": 0.2795698940753937,
+    "count": 93
+  },
+  "retrieval_validation_before": {
+    "Recall@1": 0.2916666567325592,
+    "Recall@3": 0.7083333134651184,
+    "MRR": 0.5256944298744202
+  },
+  "retrieval_validation_after": {
+    "Recall@1": 1.0,
+    "Recall@3": 1.0,
+    "MRR": 1.0
+  },
+  "mean_validation_after": {
+    "Recall@1": 0.75,
+    "Recall@3": 1.0,
+    "MRR": 0.875
+  },
+  "frozen_validation_after": {
+    "Recall@1": 0.9583333134651184,
+    "Recall@3": 1.0,
+    "MRR": 0.9791666865348816
+  },
+  "retrieval_test": {
+    "Recall@1": 1.0,
+    "Recall@3": 1.0,
+    "MRR": 1.0
+  },
+  "mean_test": {
+    "Recall@1": 0.75,
+    "Recall@3": 1.0,
+    "MRR": 0.875
+  },
+  "embedding_gradient": {
+    "autograd": -0.39435844447731827,
+    "finite_difference": -0.3943584457877236
+  },
+  "padding_error": 4.470348358154297e-08,
+  "frozen_table_change": 0.0,
+  "order_diagnostics": [
+    [
+      "0 / 1",
+      1.3215012550354004,
+      1.1003803734865869e-07,
+      0.0
+    ],
+    [
+      "2 / 3",
+      1.386762261390686,
+      1.7255374018532166e-07,
+      0.0
+    ],
+    [
+      "4 / 5",
+      1.3197317123413086,
+      1.1504001662387964e-07,
+      0.0
+    ]
+  ],
+  "test_predictions": [
+    {
+      "query": "고양이 가 쥐 를 뒤쫓다 설명",
+      "target": 0,
+      "rank": 1,
+      "top3": [
+        0,
+        5,
+        1
+      ]
+    },
+    {
+      "query": "고양이 가 쥐 를 추격 하다 장면 설명",
+      "target": 0,
+      "rank": 1,
+      "top3": [
+        0,
+        5,
+        1
+      ]
+    },
+    {
+      "query": "쥐 가 고양이 를 뒤쫓다 설명",
+      "target": 1,
+      "rank": 1,
+      "top3": [
+        1,
+        7,
+        0
+      ]
+    },
+    {
+      "query": "쥐 가 고양이 를 추격 하다 장면 설명",
+      "target": 1,
+      "rank": 1,
+      "top3": [
+        1,
+        8,
+        0
+      ]
+    },
+    {
+      "query": "개 가 토끼 를 도와주다 설명",
+      "target": 2,
+      "rank": 1,
+      "top3": [
+        2,
+        4,
+        6
+      ]
+    },
+    {
+      "query": "개 가 토끼 를 지원 하다 장면 설명",
+      "target": 2,
+      "rank": 1,
+      "top3": [
+        2,
+        4,
+        6
+      ]
+    },
+    {
+      "query": "토끼 가 개 를 도와주다 설명",
+      "target": 3,
+      "rank": 1,
+      "top3": [
+        3,
+        5,
+        7
+      ]
+    },
+    {
+      "query": "토끼 가 개 를 지원 하다 장면 설명",
+      "target": 3,
+      "rank": 1,
+      "top3": [
+        3,
+        5,
+        6
+      ]
+    },
+    {
+      "query": "교사 가 제자 를 지도 하다 설명",
+      "target": 4,
+      "rank": 1,
+      "top3": [
+        4,
+        2,
+        11
+      ]
+    },
+    {
+      "query": "교사 가 제자 를 교육 하다 장면 설명",
+      "target": 4,
+      "rank": 1,
+      "top3": [
+        4,
+        2,
+        11
+      ]
+    },
+    {
+      "query": "제자 가 교사 를 지도 하다 설명",
+      "target": 5,
+      "rank": 1,
+      "top3": [
+        5,
+        9,
+        3
+      ]
+    },
+    {
+      "query": "제자 가 교사 를 교육 하다 장면 설명",
+      "target": 5,
+      "rank": 1,
+      "top3": [
+        5,
+        0,
+        3
+      ]
+    },
+    {
+      "query": "로그인 암호 다시 설정 절차",
+      "target": 6,
+      "rank": 1,
+      "top3": [
+        6,
+        9,
+        10
+      ]
+    },
+    {
+      "query": "잊어버린 계정 비밀번호 재설정",
+      "target": 6,
+      "rank": 1,
+      "top3": [
+        6,
+        3,
+        11
+      ]
+    },
+    {
+      "query": "환불 입금 까지 며칠 걸리나",
+      "target": 7,
+      "rank": 1,
+      "top3": [
+        7,
+        8,
+        1
+      ]
+    },
+    {
+      "query": "돈 돌려받기 완료 뒤 언제 오나",
+      "target": 7,
+      "rank": 1,
+      "top3": [
+        7,
+        9,
+        11
+      ]
+    },
+    {
+      "query": "배송 물건 이동 경로 조회",
+      "target": 8,
+      "rank": 1,
+      "top3": [
+        8,
+        6,
+        5
+      ]
+    },
+    {
+      "query": "주문 택배 현재 어디 왔나",
+      "target": 8,
+      "rank": 1,
+      "top3": [
+        8,
+        7,
+        1
+      ]
+    },
+    {
+      "query": "신용카드 결제 실패 어떻게 고치나",
+      "target": 9,
+      "rank": 1,
+      "top3": [
+        9,
+        7,
+        5
+      ]
+    },
+    {
+      "query": "카드 승인 오류 대처",
+      "target": 9,
+      "rank": 1,
+      "top3": [
+        9,
+        10,
+        11
+      ]
+    },
+    {
+      "query": "병원 방문 예약 없애기 방법",
+      "target": 10,
+      "rank": 1,
+      "top3": [
+        10,
+        11,
+        9
+      ]
+    },
+    {
+      "query": "의사 만남 약속 취소 절차",
+      "target": 10,
+      "rank": 1,
+      "top3": [
+        10,
+        8,
+        1
+      ]
+    },
+    {
+      "query": "냥이 사료 어떤 것 고르나",
+      "target": 11,
+      "rank": 1,
+      "top3": [
+        11,
+        7,
+        1
+      ]
+    },
+    {
+      "query": "고양이 먹이 선택 안내",
+      "target": 11,
+      "rank": 1,
+      "top3": [
+        11,
+        3,
+        6
+      ]
+    }
+  ],
+  "elapsed_seconds": 8.260217779999948,
+  "evaluation_scope": "Synthetic queries against a known corpus; not a natural-language benchmark."
+}

@@ -1,0 +1,61 @@
+{
+  "python": "3.12.13",
+  "executable": "/home/baemo_pc/260821/dense-retrieval-lab/.venv/bin/python",
+  "torch": "2.14.0+cpu",
+  "executed_notebook_cells": 13,
+  "verified": [
+    "lookup equals one-hot multiplication",
+    "repeated IDs accumulate row gradients",
+    "CE score gradient matches (p-y)/temperature",
+    "embedding gradient matches finite differences",
+    "PAD and unused rows stay unchanged",
+    "pooling ignores added padding",
+    "mean is order-invariant",
+    "Transformer without positions is order-invariant",
+    "checkpoint roundtrip preserves vectors",
+    "query and OOV paths produce finite scores",
+    "empty, reserved and overlength queries rejected",
+    "frozen token table stays exactly unchanged"
+  ],
+  "metrics": {
+    "mean": {
+      "before": {
+        "recall@1": 0.4166666567325592,
+        "recall@3": 0.75,
+        "mrr": 0.6156249642372131
+      },
+      "after": {
+        "recall@1": 0.75,
+        "recall@3": 1.0,
+        "mrr": 0.875
+      },
+      "token_table_change_norm": 2.2289109230041504
+    },
+    "transformer": {
+      "before": {
+        "recall@1": 0.4166666567325592,
+        "recall@3": 0.6666666865348816,
+        "mrr": 0.599355161190033
+      },
+      "after": {
+        "recall@1": 1.0,
+        "recall@3": 1.0,
+        "mrr": 1.0
+      },
+      "token_table_change_norm": 1.871293306350708
+    },
+    "transformer_frozen": {
+      "before": {
+        "recall@1": 0.4166666567325592,
+        "recall@3": 0.6666666865348816,
+        "mrr": 0.599355161190033
+      },
+      "after": {
+        "recall@1": 1.0,
+        "recall@3": 1.0,
+        "mrr": 1.0
+      },
+      "token_table_change_norm": 0.0
+    }
+  }
+}

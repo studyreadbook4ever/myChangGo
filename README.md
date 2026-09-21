@@ -2,6 +2,7 @@
 
 + 언젠가 eff0rtchung.kr 도메인 연거도 거기에 이것저것 웹코딩한거도 여기에 넣어줘야하는디.. 
 
+- [260921SearchStudy](260921SearchStudy/): BPE 토크나이저부터 BERT형 encoder, MLM, 문장 벡터와 Dense Retrieval 학습까지 직접 구현하는 Jupyter 실습 교재. 설치·사용법과 실행 결과 포함
 - [260711vtuber](260711vtuber/): 치지직·YouTube 컷 편집과 AudSeg 빈 자막 타이밍을 한 화면에서 다루는 Chrome Extension. 자체 작성 코드는 `UNLICENSED`이고 제3자 구성요소는 별도 고지하며, Linux에서는 `cd 260711vtuber && ./setup.sh`로 시작
 - [AudSeg](AudSeg/): 모델 없이 오디오 활동 구간을 검출하는 MIT 라이선스 Python 라이브러리
 - [260722](260722/): 떠오른 생각을 다시 볼 시간과 함께 잠깐 맡겨두는 로컬 전용 오프라인 앱, `잠깐 맡김소`

@@ -1,0 +1,28 @@
+{
+  "executed_code_cells": 72,
+  "markdown_cells": 79,
+  "execution_directory_contained_course_sources": false,
+  "all_cells_executed": true,
+  "cell_errors": 0,
+  "forbidden_imports_found": false,
+  "saved_model_verification": {
+    "restored_vectors_exact": true,
+    "top_document_id": 1,
+    "separate_process": true,
+    "reserved_inputs_rejected": true,
+    "nondefault_max_length": true
+  },
+  "html": "Dense_Retrieval_From_Scratch.html",
+  "sources": {
+    "course/00_opening.md": "ad529e4a84d211209a327df26f2d3bbc7e0973e063a9372735442e7c3b0c55b9",
+    "course/01_tokenizer.md": "460b660a165fcf2e52e6e8b1691cb24173e6b823e57a201fd3fb7924f8751008",
+    "course/02_encoder.md": "e6a983205fc26ba4ef34dfc78061cdc8ff707cb5b224cdaf81a77213e305906e",
+    "course/03_mlm.md": "6259c647a2377917f52d61c57d19af2dcd2aa10488ab03a1fece2963663ffa29",
+    "course/04_sentence_vectors.md": "14f50ab937358be6a5d9a00dd77b3b7ddb2a395f61a0d28d94e006d1046e4d3f",
+    "course/05_retrieval.md": "147720fa24e16495a5b043814e36b2ed906aa4ba5effa57c1b08f8f372173d23",
+    "course/06_search_and_checks.md": "2b7d559ee8df82fb7d21bb461100a88a9cb1b5cbce112ba337acc8f44fc03040",
+    "course/07_exercises.md": "48368acbbb61380c68847bdb3dfa50f883d6ffe7d688b061bb0ef6733166e82c"
+  },
+  "notebook_sha256": "783499f1e9b413c3ccc07918bfd16420ddc68254e0b88184f26c0caf38756132",
+  "verification_seconds": 14.61858004899932
+}
