@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+test-results/
+playwright-report/
+artifacts/
+.DS_Store
+downloads/*.apk
+downloads/*.sha256
+docs/*.mp4

@@ -1,0 +1,36 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "dev.drivemate.demo"
+    compileSdk 35
+    buildToolsVersion "34.0.0"
+
+    defaultConfig {
+        applicationId "dev.drivemate.demo"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0-demo"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    lint {
+        abortOnError true
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // Stable SDK-35-compatible asset loading, with no server or file:// access.
+    implementation "androidx.webkit:webkit:1.12.1"
+}
