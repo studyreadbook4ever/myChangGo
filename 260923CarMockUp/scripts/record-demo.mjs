@@ -25,21 +25,24 @@ await page.getByRole("button", { name: "캘린더", exact: true }).first().click
 await page.screenshot({ path: "docs/calendar.png", fullPage: true });
 await page.waitForTimeout(4000);
 await page.getByRole("button", { name: "드라이브", exact: true }).click();
-await page.getByRole("button", { name: "발표 모드", exact: true }).click();
-await page.screenshot({ path: "docs/presentation.png", fullPage: true });
-await page.waitForTimeout(2500);
-await page.getByRole("button", { name: "전체 시연", exact: true }).click();
+await page.waitForTimeout(1800);
+await page.getByRole("button", { name: "주행 시작", exact: true }).click();
+await page.waitForTimeout(900);
+await page.screenshot({ path: "docs/presentation.png" });
 await page
-  .getByRole("button", { name: "이번 주행 기록 보기", exact: true })
-  .waitFor({ timeout: 55000 });
-await page.waitForTimeout(2500);
+  .getByRole("button", { name: "우회 경로로 변경", exact: true })
+  .waitFor({ timeout: 45000 });
+await page.waitForTimeout(3500);
 await page
-  .getByRole("button", { name: "이번 주행 기록 보기", exact: true })
+  .getByRole("button", { name: "우회 경로로 변경", exact: true })
   .click();
-await page.waitForTimeout(3500);
-await page.getByRole("button", { name: "발표 모드 종료", exact: true }).click();
-await page.getByRole("button", { name: "내 차량", exact: true }).click();
-await page.waitForTimeout(3500);
+await page
+  .getByRole("button", { name: "주행 마치기", exact: true })
+  .waitFor({ timeout: 60000 });
+await page.waitForTimeout(2500);
+await page.getByRole("button", { name: "주행 마치기", exact: true }).click();
+await page.getByRole("button", { name: "주행 기록", exact: true }).click();
+await page.waitForTimeout(2500);
 const video = page.video();
 await context.close();
 await rename(await video.path(), "artifacts/DriveMate-demo.webm");
@@ -52,6 +55,9 @@ const phone = await browser.newPage({
 await phone.goto(process.env.DEMO_URL || "http://127.0.0.1:4173");
 await phone.evaluate(() => document.fonts.ready);
 await phone.screenshot({ path: "docs/mobile.png", fullPage: true });
+await phone.getByRole("button", { name: "주행 시작", exact: true }).click();
+await phone.waitForTimeout(700);
+await phone.screenshot({ path: "docs/mobile-navigation.png" });
 await browser.close();
 const result = spawnSync(
   "ffmpeg",
@@ -78,4 +84,4 @@ if (result.error || result.status !== 0)
   throw new Error(
     "Video conversion failed. Install ffmpeg; the original WebM is in artifacts/.",
   );
-console.log("Saved docs/DriveMate-demo.mp4 and four presentation screenshots.");
+console.log("Saved docs/DriveMate-demo.mp4 and navigation screenshots.");

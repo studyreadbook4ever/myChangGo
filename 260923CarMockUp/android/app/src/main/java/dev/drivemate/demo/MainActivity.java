@@ -2,14 +2,19 @@ package dev.drivemate.demo;
 
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -27,6 +32,7 @@ public final class MainActivity extends Activity {
     private static final String ASSET_HOST = "appassets.androidplatform.net";
     private static final String START_URL = "https://" + ASSET_HOST + "/index.html";
     private WebView webView;
+    private boolean navigationActive;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,12 +78,22 @@ public final class MainActivity extends Activity {
         settings.setBuiltInZoomControls(false);
         settings.setDisplayZoomControls(false);
         webView.setWebChromeClient(new WebChromeClient());
+        // The only native bridge is a boolean presentation setting. External pages,
+        // frames and requests cannot load; file/content access stays disabled.
+        webView.addJavascriptInterface(new NavigationBridge(), "DriveMateNative");
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
 
         WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
                 .addPathHandler("/", new WebViewAssetLoader.AssetsPathHandler(this))
                 .build();
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                // A reloaded page starts on the dashboard, never with stale hidden bars.
+                navigationActive = false;
+                applyNavigationMode();
+            }
+
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 if (isLocalAsset(request.getUrl())) {
@@ -96,6 +112,8 @@ public final class MainActivity extends Activity {
 
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                navigationActive = false;
+                applyNavigationMode();
                 ((ViewGroup) view.getParent()).removeView(view);
                 view.destroy();
                 webView = null;
@@ -111,6 +129,54 @@ public final class MainActivity extends Activity {
 
     private boolean isLocalAsset(Uri uri) {
         return "https".equals(uri.getScheme()) && ASSET_HOST.equals(uri.getHost());
+    }
+
+    /** Called only by the app's bundled frontend; no privileged device APIs exposed. */
+    public final class NavigationBridge {
+        @JavascriptInterface
+        public void setNavigationActive(boolean active) {
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || webView == null) return;
+                String currentUrl = webView.getUrl();
+                if (currentUrl == null || !isLocalAsset(Uri.parse(currentUrl))) return;
+                navigationActive = active;
+                applyNavigationMode();
+            });
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void applyNavigationMode() {
+        View decor = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller == null) return;
+            controller.setSystemBarsBehavior(
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            if (navigationActive) controller.hide(WindowInsets.Type.systemBars());
+            else controller.show(WindowInsets.Type.systemBars());
+        } else {
+            int immersiveFlags = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+            int currentFlags = decor.getSystemUiVisibility();
+            decor.setSystemUiVisibility(navigationActive
+                    ? currentFlags | immersiveFlags : currentFlags & ~immersiveFlags);
+        }
+        decor.requestApplyInsets();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyNavigationMode();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && navigationActive) applyNavigationMode();
     }
 
     @Override
@@ -147,11 +213,13 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         if (webView != null) webView.onResume();
+        applyNavigationMode();
     }
 
     @Override
     protected void onDestroy() {
         if (webView != null) {
+            webView.removeJavascriptInterface("DriveMateNative");
             ((ViewGroup) webView.getParent()).removeView(webView);
             webView.destroy();
             webView = null;

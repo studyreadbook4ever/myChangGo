@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import "./CityMap.css";
 
 type Destination = "office" | "cafe" | "service" | "home";
@@ -10,6 +10,11 @@ export interface CityMapProps {
   destination: Destination;
   parking: boolean;
   onPlaceSelect?: (id: Destination) => void;
+  navigationMode?: boolean;
+  followVehicle?: boolean;
+  alternate?: boolean;
+  showControls?: boolean;
+  cameraAnchorY?: number;
 }
 
 // Presentation distances describe this deliberately schematic, fictional city.
@@ -65,7 +70,8 @@ const ROUTES: Record<Destination, { normal: Point[]; rerouted: Point[] }> = {
     ],
     rerouted: [
       [325, 445],
-      [325, 740],
+      [125, 445],
+      [125, 740],
       [710, 740],
       [710, 595],
     ],
@@ -146,7 +152,8 @@ const ROAD_PATHS = [
   "M 1350 -30 V 840",
   "M 950 300 H 1900",
   "M 950 595 H 1900",
-];
+].map(path => path.replace(/-30 V 840|185 V 840/g, "-1200 V 2000"));
+ROAD_PATHS.push(...[-800, 800].flatMap(offset => [185, 300, 445, 595, 740].map(y => `M -900 ${y + offset} H 1900`)));
 
 function pointsToPath(points: Point[]) {
   return points
@@ -205,7 +212,71 @@ export function getCarPosition(
   );
 }
 
-function Building({
+export interface NavigationInstruction {
+  direction: "left" | "right" | "straight" | "arrive";
+  distanceMeters: number;
+  /** Road the vehicle is currently on. */
+  road: string;
+  /** Road entered after the indicated turn. */
+  nextRoad?: string;
+}
+
+function roadName(from: Point, to: Point) {
+  if (from[0] === to[0]) {
+    return ({ 125: "주거단지길", 325: "중앙대로", 510: "가든로", 710: "강변로" } as Record<number, string>)[from[0]] ?? "메이트로";
+  }
+  return ({ 185: "스튜디오길", 300: "센트럴로", 445: "그린웨이", 535: "리버파크길", 595: "메이트로", 740: "남부순환로" } as Record<number, string>)[from[1]] ?? "메이트로";
+}
+
+/** Turn distances share the car's 30% approach / 70% branch progress mapping. */
+export function getNavigationInstruction(
+  destination: Destination,
+  progress: number,
+  alternate: boolean,
+): NavigationInstruction {
+  const branch = ROUTES[destination][alternate ? "rerouted" : "normal"];
+  const vertices: { point: Point; progress: number }[] = [{ point: COMMON[0], progress: 0 }];
+  for (const [points, start, span] of [[COMMON, 0, 0.3], [branch, 0.3, 0.7]] as const) {
+    const lengths = points.slice(1).map((point, index) => Math.hypot(point[0] - points[index][0], point[1] - points[index][1]));
+    const length = lengths.reduce((total, segment) => total + segment, 0);
+    let passed = 0;
+    lengths.forEach((segment, index) => {
+      passed += segment;
+      vertices.push({ point: points[index + 1], progress: start + passed / length * span });
+    });
+  }
+  // The common/branch boundary can lie halfway along one straight road.
+  const turns = vertices.filter((vertex, index) => {
+    if (index === 0 || index === vertices.length - 1) return true;
+    const previous = vertices[index - 1].point;
+    const next = vertices[index + 1].point;
+    const inX = vertex.point[0] - previous[0];
+    const inY = vertex.point[1] - previous[1];
+    const outX = next[0] - vertex.point[0];
+    const outY = next[1] - vertex.point[1];
+    return inX * outY - inY * outX !== 0 || inX * outX + inY * outY < 0;
+  });
+  const value = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0));
+  const targetIndex = turns.findIndex((vertex, index) => index > 0 && vertex.progress >= value - 1e-8);
+  const index = targetIndex < 0 ? turns.length - 1 : targetIndex;
+  const current = turns[index - 1].point;
+  const target = turns[index].point;
+  const road = roadName(current, target);
+  const routeMeters = ROUTE_DISTANCES[destination][alternate ? "rerouted" : "normal"] * 1000;
+  const rawDistance = Math.max(0, (turns[index].progress - value) * routeMeters);
+  const distanceMeters = Math.round(rawDistance);
+  if (index === turns.length - 1) return { direction: "arrive", distanceMeters, road };
+  const after = turns[index + 1].point;
+  const cross = (target[0] - current[0]) * (after[1] - target[1]) - (target[1] - current[1]) * (after[0] - target[0]);
+  return {
+    direction: distanceMeters > 900 ? "straight" : cross < 0 ? "left" : "right",
+    distanceMeters,
+    road,
+    nextRoad: roadName(target, after),
+  };
+}
+
+const Building = memo(function Building({
   x,
   y,
   w,
@@ -272,7 +343,7 @@ function Building({
       )}
     </g>
   );
-}
+});
 
 const BUILDINGS = (() => {
   const buildings: {
@@ -327,6 +398,10 @@ const BUILDINGS = (() => {
     ].forEach(([y, height]) => {
       blocks.push([x, y, x === -48 || x === 1065 ? 52 : 145, height]);
     });
+  });
+  const neighborhood = [...blocks];
+  [-800, 800].forEach(offset => {
+    neighborhood.forEach(([x, y, width, height]) => blocks.push([x, y + offset, width, height]));
   });
   blocks.forEach(([bx, by, bw, bh], block) => {
     const cols = bw > 100 ? 3 : bw > 55 ? 2 : 1;
@@ -396,106 +471,11 @@ function PlaceIcon({ id }: { id: Destination }) {
   );
 }
 
-export default function CityMap({
-  stage,
-  progress,
-  destination,
-  parking,
-  onPlaceSelect,
-}: CityMapProps) {
-  const uid = useId().replace(/:/g, "");
-  const container = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ width: 1000, height: 800 });
-  const [zoom, setZoom] = useState(1);
-  useEffect(() => {
-    const observer = new ResizeObserver((entries) => {
-      const { width, height } = entries[0].contentRect;
-      if (width > 0 && height > 0) setSize({ width, height });
-    });
-    if (container.current) observer.observe(container.current);
-    return () => observer.disconnect();
-  }, []);
-  const viewWidth = Math.max(1000, (800 * size.width) / size.height);
-  const compactMap = size.width < 500;
-  const markerScale = compactMap ? 1.6 : 1.35;
-  const hasRerouted = stage === "rerouted" || stage === "arrived";
-  const activeRoute = ROUTES[destination][hasRerouted ? "rerouted" : "normal"];
-  const car = getCarPosition(
-    destination,
-    stage === "ready" ? 0 : progress,
-    hasRerouted,
-  );
-  const fullPath = pointsToPath([...COMMON, ...activeRoute.slice(1)]);
-  const alternatePath = pointsToPath(ROUTES[destination].rerouted);
-  const traveled =
-    progress <= 0.3
-      ? pointsToPath(car.traversed)
-      : pointsToPath([...COMMON, ...car.traversed.slice(1)]);
-  const destinationPlace = PLACES.find((place) => place.id === destination)!;
-  const trafficSegment = ROUTES[destination].normal.slice(0, 2);
-  const traffic = locate(trafficSegment, 0.57);
-
-  return (
-    <div ref={container} className={`city-map city-map--${stage}`}>
-      <svg
-        className="city-map-svg"
-        viewBox={`${(1000 - viewWidth) / 2} 0 ${viewWidth} 800`}
-        preserveAspectRatio="xMidYMid slice"
-        role="group"
-        aria-label="메이트 시티 가상 지도. 우리 집, 오피스, 카페와 정비소를 선택할 수 있습니다."
-      >
-        <title>DriveMate · 메이트 시티</title>
-        <desc>
-          약 5km의 가상 동네입니다. 하드코딩된 도로 위로 차량이 이동하며 교통
-          이벤트 이후 대체 경로를 표시합니다.
-        </desc>
-        <defs>
-          <pattern
-            id={`${uid}-grain`}
-            width="28"
-            height="28"
-            patternUnits="userSpaceOnUse"
-          >
-            <circle cx="4" cy="3" r="0.6" fill="#9cad9730" />
-            <circle cx="19" cy="17" r="0.5" fill="#9cad9720" />
-          </pattern>
-          <filter
-            id={`${uid}-pin-shadow`}
-            x="-60%"
-            y="-60%"
-            width="220%"
-            height="240%"
-          >
-            <feDropShadow
-              dx="0"
-              dy="4"
-              stdDeviation="5"
-              floodColor="#26483b"
-              floodOpacity="0.15"
-            />
-          </filter>
-          <filter
-            id={`${uid}-car-shadow`}
-            x="-100%"
-            y="-100%"
-            width="300%"
-            height="300%"
-          >
-            <feDropShadow
-              dx="0"
-              dy="3"
-              stdDeviation="5"
-              floodColor="#183e30"
-              floodOpacity="0.3"
-            />
-          </filter>
-        </defs>
-        <rect x="-1500" width="4000" height="800" fill="#e8eee2" />
-        <rect x="-1500" width="4000" height="800" fill={`url(#${uid}-grain)`} />
-        <g
-          transform={`translate(500 400) scale(${zoom}) translate(-500 -400)`}
-          className="city-map-world"
-        >
+// The city never changes during a trip. Keep its SVG subtree out of 100ms route updates.
+const StaticCity = memo(function StaticCity() {
+  return <>
+          <path d="M 900 -1500 C 940 -900 845 -370 900 -40 M 905 840 C 865 1100 970 1510 910 2100" fill="none" stroke="#dce7d5" strokeWidth="115" />
+          <path d="M 900 -1500 C 940 -900 845 -370 900 -40 M 905 840 C 865 1100 970 1510 910 2100" fill="none" stroke="#b9d8ce" strokeWidth="74" />
           <path
             d="M 816 -40 C 765 95 916 160 835 295 C 758 424 825 465 808 590 C 792 715 851 743 828 840 L 1040 840 L 1040 -40 Z"
             fill="#dce7d5"
@@ -699,6 +679,128 @@ export default function CityMap({
             </text>
           </g>
 
+  </>;
+});
+
+export default function CityMap({
+  stage,
+  progress,
+  destination,
+  parking,
+  onPlaceSelect,
+  navigationMode = false,
+  followVehicle = true,
+  alternate,
+  showControls = true,
+  cameraAnchorY = 0.62,
+}: CityMapProps) {
+  const uid = useId().replace(/:/g, "");
+  const container = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 1000, height: 800 });
+  const [zoom, setZoom] = useState(1);
+  useEffect(() => {
+    const observer = new ResizeObserver((entries) => {
+      const { width, height } = entries[0].contentRect;
+      if (width > 0 && height > 0) setSize({ width, height });
+    });
+    if (container.current) observer.observe(container.current);
+    return () => observer.disconnect();
+  }, []);
+  const following = navigationMode && followVehicle;
+  const viewWidth = Math.max(1000, (800 * size.width) / size.height);
+  const compactMap = size.width < 500;
+  const markerScale = following ? 1.15 : compactMap ? 1.6 : 1.35;
+  const hasRerouted = alternate ?? (stage === "rerouted" || stage === "arrived");
+  const activeRoute = ROUTES[destination][hasRerouted ? "rerouted" : "normal"];
+  const car = getCarPosition(
+    destination,
+    stage === "ready" ? 0 : progress,
+    hasRerouted,
+  );
+  const fullPath = pointsToPath([...COMMON, ...activeRoute.slice(1)]);
+  const alternatePath = pointsToPath(ROUTES[destination].rerouted);
+  const traveled =
+    progress <= 0.3
+      ? pointsToPath(car.traversed)
+      : pointsToPath([...COMMON, ...car.traversed.slice(1)]);
+  const destinationPlace = PLACES.find((place) => place.id === destination)!;
+  const trafficSegment = ROUTES[destination].normal.slice(0, 2);
+  const traffic = locate(trafficSegment, 0.57);
+  const vehicleScale = compactMap ? 1.05 : Math.min(1.6, Math.max(1.05, size.width / 760));
+  const navWidth = following ? size.width / vehicleScale : viewWidth;
+  const navHeight = following ? size.height / vehicleScale : viewWidth * size.height / size.width;
+  const viewBox = navigationMode
+    ? following ? `0 0 ${navWidth} ${navHeight}` : `${(1000 - navWidth) / 2} ${(800 - navHeight) / 2} ${navWidth} ${navHeight}`
+    : `${(1000 - viewWidth) / 2} 0 ${viewWidth} 800`;
+  const focus = parking ? destinationPlace : car;
+  const anchorY = Number.isFinite(cameraAnchorY) ? Math.max(0, Math.min(1, cameraAnchorY)) : 0.62;
+  const worldTransform = following
+    ? `translate(${navWidth * 0.5} ${navHeight * anchorY}) scale(${zoom}) translate(${-focus.x} ${-focus.y})`
+    : `translate(500 400) scale(${zoom}) translate(-500 -400)`;
+  const selectable = Boolean(onPlaceSelect) && !navigationMode;
+
+  return (
+    <div ref={container} className={`city-map city-map--${stage}${navigationMode ? " city-map--navigation" : ""}${following ? " city-map--following" : ""}`}>
+      <svg
+        className="city-map-svg"
+        viewBox={viewBox}
+        preserveAspectRatio="xMidYMid slice"
+        role="group"
+        aria-label={selectable ? "메이트 시티 가상 지도. 우리 집, 오피스, 카페와 정비소를 선택할 수 있습니다." : "메이트 시티 경로 안내 지도"}
+      >
+        <title>DriveMate · 메이트 시티</title>
+        <desc>
+          약 5km의 가상 동네입니다. 하드코딩된 도로 위로 차량이 이동하며 교통
+          이벤트 이후 대체 경로를 표시합니다.
+        </desc>
+        <defs>
+          <pattern
+            id={`${uid}-grain`}
+            width="28"
+            height="28"
+            patternUnits="userSpaceOnUse"
+          >
+            <circle cx="4" cy="3" r="0.6" fill="#9cad9730" />
+            <circle cx="19" cy="17" r="0.5" fill="#9cad9720" />
+          </pattern>
+          <filter
+            id={`${uid}-pin-shadow`}
+            x="-60%"
+            y="-60%"
+            width="220%"
+            height="240%"
+          >
+            <feDropShadow
+              dx="0"
+              dy="4"
+              stdDeviation="5"
+              floodColor="#26483b"
+              floodOpacity="0.15"
+            />
+          </filter>
+          <filter
+            id={`${uid}-car-shadow`}
+            x="-100%"
+            y="-100%"
+            width="300%"
+            height="300%"
+          >
+            <feDropShadow
+              dx="0"
+              dy="3"
+              stdDeviation="5"
+              floodColor="#183e30"
+              floodOpacity="0.3"
+            />
+          </filter>
+        </defs>
+        <rect x="-1500" y="-1500" width="4000" height="4000" fill="#e8eee2" />
+        <rect x="-1500" y="-1500" width="4000" height="4000" fill={`url(#${uid}-grain)`} />
+        <g
+          transform={worldTransform}
+          className="city-map-world"
+        >
+          <StaticCity />
           {stage === "traffic" && (
             <path
               d={alternatePath}
@@ -797,7 +899,7 @@ export default function CityMap({
           </g>
           {PLACES.map((place) => {
             const selected = place.id === destination;
-            const labelShift = compactMap
+            const labelShift = compactMap && !following
               ? place.id === "home"
                 ? 20
                 : place.id === "service"
@@ -808,17 +910,17 @@ export default function CityMap({
               <g
                 key={place.id}
                 transform={`translate(${place.x} ${place.y}) scale(${markerScale})`}
-                className={`city-map-place${selected ? " city-map-place--selected" : ""}`}
-                role="button"
-                tabIndex={0}
-                aria-label={`${place.name}${selected ? ", 현재 목적지" : " 목적지로 선택"}`}
-                onClick={() => onPlaceSelect?.(place.id)}
-                onKeyDown={(event) => {
+                className={`city-map-place${selected ? " city-map-place--selected" : ""}${selectable ? " city-map-place--interactive" : ""}`}
+                role={selectable ? "button" : "img"}
+                tabIndex={selectable ? 0 : undefined}
+                aria-label={`${place.name}${selected ? ", 현재 목적지" : selectable ? " 목적지로 선택" : ""}`}
+                onClick={selectable ? () => onPlaceSelect?.(place.id) : undefined}
+                onKeyDown={selectable ? (event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     onPlaceSelect?.(place.id);
                   }
-                }}
+                } : undefined}
               >
                 <circle r="19" fill="transparent" />
                 {selected && <circle r="18" fill="#cfdf7c" opacity="0.38" />}
@@ -957,7 +1059,7 @@ export default function CityMap({
           )}
         </g>
       </svg>
-      <div className="city-map-compass" aria-hidden="true">
+      {showControls && <><div className="city-map-compass" aria-hidden="true">
         <span>N</span>
         <svg viewBox="0 0 24 28">
           <path d="m12 2 7 22-7-5-7 5Z" fill="#335744" />
@@ -1008,6 +1110,7 @@ export default function CityMap({
         <span className="city-map-scale" />
         가상 도시 · DEMO MAP
       </div>
+      </>}
     </div>
   );
 }

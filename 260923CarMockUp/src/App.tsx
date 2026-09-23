@@ -14,10 +14,7 @@ import {
   History,
   LayoutDashboard,
   MapPin,
-  Maximize2,
   Navigation,
-  Pause,
-  Play,
   Plus,
   RotateCcw,
   Route,
@@ -32,6 +29,7 @@ import {
 import Calendar from "./components/Calendar";
 import type { ScheduleEvent } from "./components/Calendar";
 import CityMap, { ROUTE_DISTANCES } from "./components/CityMap";
+import NavigationView from "./components/NavigationView";
 import {
   clockTime,
   dayOffset,
@@ -43,40 +41,12 @@ import {
   parseSavedState,
   planTrip,
   PLACES,
-  stageIndex,
   STORAGE_KEY,
   timeToMinutes,
 } from "./model";
 import type { Destination, SavedState, Stage } from "./model";
 
 type View = "cockpit" | "calendar" | "vehicle" | "trips";
-const STAGES: { id: Stage; label: string; description: string }[] = [
-  {
-    id: "ready",
-    label: "출발 추천",
-    description: "일정과 나의 운전 패턴을 함께 확인해요.",
-  },
-  {
-    id: "driving",
-    label: "주행 시작",
-    description: "메이트 시티에서 목적지를 향해 이동해요.",
-  },
-  {
-    id: "traffic",
-    label: "돌발 정체",
-    description: "12분 지연이 다음 일정에 미칠 영향을 판단해요.",
-  },
-  {
-    id: "rerouted",
-    label: "경로 변경",
-    description: "9분을 아끼는 강변 우회도로로 안내해요.",
-  },
-  {
-    id: "arrived",
-    label: "도착 · 기록",
-    description: "주행 기록과 마지막 주차 위치를 기억해요.",
-  },
-];
 const NAV_ITEMS = [
   { id: "cockpit", label: "드라이브", icon: LayoutDashboard },
   { id: "calendar", label: "캘린더", icon: CalendarDays },
@@ -98,10 +68,11 @@ export default function App() {
   const [preview, setPreview] = useState<Destination | null>(null);
   const [stage, setStage] = useState<Stage>("ready");
   const [progress, setProgress] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const [auto, setAuto] = useState(false);
-  const [speed, setSpeed] = useState(1);
-  const [presenting, setPresenting] = useState(false);
+  const [navigating, setNavigating] = useState(false);
+  const [confirmExit, setConfirmExit] = useState(false);
+  const [routeChoice, setRouteChoice] = useState<
+    "none" | "pending" | "accepted" | "kept"
+  >("none");
   const [question, setQuestion] = useState("");
   const [toast, setToast] = useState("");
   const [showHelp, setShowHelp] = useState(false);
@@ -109,7 +80,6 @@ export default function App() {
   const [storageFailed, setStorageFailed] = useState(false);
   const [selectedParking, setSelectedParking] = useState(false);
   const tripSaved = useRef(false);
-  const autoElapsed = useRef(0);
   const availableEvents = [...data.events]
     .filter(
       (e) =>
@@ -136,8 +106,13 @@ export default function App() {
   const plan = planTrip(event, data.trips);
   const destination = event.destination;
   const startTime = event.date === DEMO_DATE ? DEMO_TIME : plan.departure;
-  const disrupted = stage === "rerouted" || stage === "arrived";
-  const delay = stage === "traffic" ? 12 : disrupted ? 3 : 0;
+  const disrupted = routeChoice === "accepted";
+  const delay =
+    routeChoice === "pending" || routeChoice === "kept"
+      ? 12
+      : disrupted
+        ? 3
+        : 0;
   const driveTime = plan.drive + delay;
   const arrival = startTime + plan.duration + delay;
   const margin = timeToMinutes(event.time) - arrival;
@@ -153,7 +128,9 @@ export default function App() {
   const remaining = Math.max(0, 10000 - data.mileage);
   const slot = maintenanceSlot(data.events);
   const normalSamples = data.trips
-    .filter((t) => t.destination === destination && !t.rerouted)
+    .filter(
+      (t) => t.destination === destination && !t.rerouted && !t.trafficDelay,
+    )
     .slice(0, 10).length;
   const todayEvents = data.events
     .filter((e) => e.date === DEMO_DATE)
@@ -176,9 +153,8 @@ export default function App() {
   function restart() {
     setStage("ready");
     setProgress(0);
-    setPlaying(false);
-    setAuto(false);
-    autoElapsed.current = 0;
+    setRouteChoice("none");
+    setConfirmExit(false);
     tripSaved.current = false;
     setQuestion("");
     setSelectedParking(false);
@@ -199,75 +175,63 @@ export default function App() {
   }
   function navigate(next: View) {
     setView(next);
-    setPlaying(false);
-    setAuto(false);
     setQuestion("");
   }
-  function jump(next: Stage) {
-    setAuto(false);
-    setQuestion("");
-    setStage(next);
-    setProgress(
-      next === "ready"
-        ? 0
-        : next === "arrived"
-          ? 1
-          : next === "driving"
-            ? 0
-            : 0.3,
-    );
-    setPlaying(next === "driving" || next === "rerouted");
-    if (next === "ready") {
-      tripSaved.current = false;
-      setSelectedParking(false);
-    }
-  }
-  function playDemo() {
+  function startDrive() {
     restart();
+    setToast("");
     setView("cockpit");
-    setAuto(true);
-    setPlaying(true);
+    setStage("driving");
+    setNavigating(true);
   }
-
+  function finishDrive() {
+    setNavigating(false);
+    restart();
+  }
+  function chooseRoute(alternate: boolean) {
+    setRouteChoice(alternate ? "accepted" : "kept");
+    setStage(alternate ? "rerouted" : "driving");
+  }
   useEffect(() => {
-    if (!playing || view !== "cockpit") return;
-    const interval = setInterval(() => {
-      if (auto) {
-        autoElapsed.current += 0.1 * speed;
-        const t = autoElapsed.current;
-        if (t < 4) {
-          setStage("ready");
-          setProgress(0);
-        } else if (t < 12) {
-          setStage("driving");
-          setProgress(((t - 4) / 8) * 0.3);
-        } else if (t < 20) {
-          setStage("traffic");
-          setProgress(0.3);
-        } else if (t < 40) {
-          setStage("rerouted");
-          setProgress(0.3 + ((t - 20) / 20) * 0.7);
-        } else {
-          setStage("arrived");
-          setProgress(1);
-          setPlaying(false);
-          setAuto(false);
-        }
-      } else if (stage === "driving") {
-        setProgress((p) => Math.min(0.3, p + 0.00375 * speed));
-      } else if (stage === "rerouted") {
-        setProgress((p) => Math.min(1, p + 0.0035 * speed));
+    if (!navigating) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const native = (
+      window as Window & {
+        DriveMateNative?: { setNavigationActive: (active: boolean) => void };
       }
+    ).DriveMateNative;
+    native?.setNavigationActive(true);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      native?.setNavigationActive(false);
+    };
+  }, [navigating]);
+  useEffect(() => {
+    if (
+      !navigating ||
+      confirmExit ||
+      (stage !== "driving" && stage !== "rerouted")
+    )
+      return;
+    const interval = setInterval(() => {
+      const approachingJunction = routeChoice === "none";
+      setProgress((p) =>
+        Math.min(
+          approachingJunction ? 0.3 : 1,
+          p + (approachingJunction ? 0.00375 : 0.0035),
+        ),
+      );
     }, 100);
     return () => clearInterval(interval);
-  }, [playing, auto, stage, speed, view]);
+  }, [navigating, confirmExit, stage, routeChoice]);
   useEffect(() => {
-    if (!auto && stage === "driving" && progress >= 0.3) setPlaying(false);
-    if (stage === "rerouted" && progress >= 1) {
-      setStage("arrived");
-      setPlaying(false);
-    }
-  }, [progress, stage, auto]);
+    if (!navigating) return;
+    if (routeChoice === "none" && progress >= 0.3) {
+      setRouteChoice("pending");
+      setStage("traffic");
+    } else if (progress >= 1) setStage("arrived");
+  }, [navigating, progress, routeChoice]);
   useEffect(() => {
     if (stage !== "arrived" || tripSaved.current) return;
     tripSaved.current = true;
@@ -283,9 +247,10 @@ export default function App() {
           title: hasSchedule ? event.title : `${PLACES[destination].name} 방문`,
           distance,
           baseline: plan.baseline,
-          actual: plan.drive + 3,
+          actual: driveTime,
           destination,
-          rerouted: true,
+          rerouted: disrupted,
+          trafficDelay: delay,
         },
         ...d.trips,
       ],
@@ -300,6 +265,9 @@ export default function App() {
     hasSchedule,
     plan.baseline,
     plan.drive,
+    driveTime,
+    disrupted,
+    delay,
   ]);
   useEffect(() => {
     const handleBack = () => {
@@ -313,8 +281,9 @@ export default function App() {
         setShowReset(false);
         return true;
       }
-      if (presenting) {
-        setPresenting(false);
+      if (navigating) {
+        if (stage === "arrived") finishDrive();
+        else setConfirmExit((value) => !value);
         return true;
       }
       if (view !== "cockpit") {
@@ -329,18 +298,22 @@ export default function App() {
       delete (window as Window & { driveMateBack?: () => boolean })
         .driveMateBack;
     };
-  }, [showHelp, showReset, presenting, view]);
+  }, [showHelp, showReset, navigating, stage, view]);
   useEffect(() => {
     const listener = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (document.querySelector("dialog[open]")) return;
         setShowHelp(false);
         setShowReset(false);
-        setPresenting(false);
+        if (navigating) {
+          if (stage === "arrived") finishDrive();
+          else setConfirmExit((value) => !value);
+        }
       }
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, []);
+  }, [navigating, stage]);
 
   function addMaintenance() {
     if (!slot) return;
@@ -388,8 +361,32 @@ export default function App() {
             ? `${event.time} ${event.title}. ${normalSamples ? `최근 같은 목적지의 운전 기록 ${normalSamples}회` : "이 목적지의 기본 이동시간"}와 주차·도보시간까지 함께 계산했어요.`
             : "지도에서 장소를 고르거나 내장 캘린더에 약속을 추가해보세요. 일정에 맞는 출발시간을 계산해드릴게요.";
 
+  if (navigating)
+    return (
+      <NavigationView
+        stage={stage}
+        progress={progress}
+        destination={destination}
+        alternate={disrupted}
+        totalDistance={distance}
+        driveTime={driveTime}
+        elapsed={elapsedDrive(plan.drive, delay, progress)}
+        vehicleArrival={startTime + driveTime}
+        venueArrival={arrival}
+        schedule={hasSchedule ? event : null}
+        parkingMinutes={plan.parking}
+        walkMinutes={plan.walk}
+        needsRouteChoice={routeChoice === "pending"}
+        confirmExit={confirmExit}
+        onChooseRoute={chooseRoute}
+        onRequestEnd={() => setConfirmExit(true)}
+        onCancelEnd={() => setConfirmExit(false)}
+        onFinish={finishDrive}
+      />
+    );
+
   return (
-    <div className={`app-shell ${presenting ? "is-presenting" : ""}`}>
+    <div className="app-shell">
       <aside className="sidebar">
         <button
           className="brand-symbol"
@@ -415,7 +412,7 @@ export default function App() {
           <button
             className="icon-button"
             onClick={() => setShowHelp(true)}
-            aria-label="시연 도움말"
+            aria-label="사용 안내"
           >
             <CircleHelp size={21} />
           </button>
@@ -436,17 +433,9 @@ export default function App() {
               <span /> INTERACTIVE DEMO
             </span>
             <button
-              className={`icon-button ${presenting ? "active" : ""}`}
-              onClick={() => setPresenting((p) => !p)}
-              aria-label={presenting ? "발표 모드 종료" : "발표 모드"}
-              title="발표 모드"
-            >
-              <Maximize2 size={18} />
-            </button>
-            <button
               className="icon-button help-top"
               onClick={() => setShowHelp(true)}
-              aria-label="시연 안내"
+              aria-label="사용 안내"
             >
               <CircleHelp size={19} />
             </button>
@@ -760,51 +749,10 @@ export default function App() {
                     )}
                   </div>
                   <div className="agent-primary">
-                    {stage === "ready" && (
-                      <button
-                        className="primary-button"
-                        onClick={() => jump("driving")}
-                      >
-                        <Navigation size={17} /> 주행 시작
-                        <ArrowRight size={18} />
-                      </button>
-                    )}
-                    {stage === "driving" && (
-                      <button
-                        className="primary-button"
-                        onClick={() => jump("traffic")}
-                      >
-                        <TriangleAlert size={17} /> 정체 상황 시연
-                        <ArrowRight size={18} />
-                      </button>
-                    )}
-                    {stage === "traffic" && (
-                      <button
-                        className="primary-button"
-                        onClick={() => jump("rerouted")}
-                      >
-                        <Route size={17} /> 우회 경로로 변경
-                        <ArrowRight size={18} />
-                      </button>
-                    )}
-                    {stage === "rerouted" && (
-                      <button
-                        className="primary-button"
-                        onClick={() => jump("arrived")}
-                      >
-                        <Flag size={17} /> 도착 장면으로 이동
-                        <ArrowRight size={18} />
-                      </button>
-                    )}
-                    {stage === "arrived" && (
-                      <button
-                        className="primary-button"
-                        onClick={() => navigate("trips")}
-                      >
-                        <History size={17} /> 이번 주행 기록 보기
-                        <ArrowRight size={18} />
-                      </button>
-                    )}
+                    <button className="primary-button" onClick={startDrive}>
+                      <Navigation size={17} /> 주행 시작{" "}
+                      <ArrowRight size={18} />
+                    </button>
                   </div>
                   <div className="quick-questions">
                     <button
@@ -937,79 +885,6 @@ export default function App() {
                   </section>
                 </div>
               </div>
-              <section className="demo-controls" aria-label="시연 컨트롤">
-                <div className="demo-controls-heading">
-                  <div>
-                    <span className="demo-control-icon">
-                      <Play size={14} fill="currentColor" />
-                    </span>
-                    <strong>한 번의 이동, 다섯 가지 순간</strong>
-                    <span className="demo-duration">약 40초 자동 시연</span>
-                  </div>
-                  <div className="playback-buttons">
-                    <button
-                      className="speed-button"
-                      onClick={() => setSpeed((s) => (s === 1 ? 2 : 1))}
-                      aria-label="시연 배속 변경"
-                    >
-                      {speed}×
-                    </button>
-                    <button
-                      className="icon-button"
-                      onClick={restart}
-                      aria-label="시연 처음으로"
-                    >
-                      <RotateCcw size={16} />
-                    </button>
-                    <button
-                      className="demo-play"
-                      onClick={() => {
-                        if (playing) setPlaying(false);
-                        else if (auto) setPlaying(true);
-                        else playDemo();
-                      }}
-                    >
-                      {playing ? (
-                        <Pause size={15} fill="currentColor" />
-                      ) : (
-                        <Play size={15} fill="currentColor" />
-                      )}
-                      {playing
-                        ? "일시정지"
-                        : auto
-                          ? "이어서 재생"
-                          : "전체 시연"}
-                    </button>
-                  </div>
-                </div>
-                <div className="scene-steps">
-                  {STAGES.map((s, i) => (
-                    <button
-                      key={s.id}
-                      className={`scene-step ${stage === s.id ? "active" : ""} ${stageIndex(stage) > i ? "done" : ""}`}
-                      onClick={() => jump(s.id)}
-                      aria-current={stage === s.id ? "step" : undefined}
-                    >
-                      <span className="step-number">
-                        {stageIndex(stage) > i ? (
-                          <Check size={13} />
-                        ) : (
-                          `0${i + 1}`
-                        )}
-                      </span>
-                      <span>{s.label}</span>
-                      {i < 4 && <ChevronRight size={14} />}
-                    </button>
-                  ))}
-                </div>
-                <p className="scene-description">
-                  <span className="live-dot" />
-                  {STAGES[stageIndex(stage)].description}
-                  <span className="demo-disclaimer">
-                    가상 지도 · 일정 · 교통으로 작동하는 시연입니다
-                  </span>
-                </p>
-              </section>
             </>
           )}
           {view === "calendar" && (
@@ -1202,7 +1077,11 @@ export default function App() {
                       <span>
                         {t.date.replaceAll("-", ".")} ·{" "}
                         {PLACES[t.destination].name}
-                        {t.rerouted ? " · 정체·우회 시연" : ""}
+                        {t.rerouted
+                          ? " · 정체·우회"
+                          : t.trafficDelay
+                            ? " · 정체 구간 주행"
+                            : ""}
                       </span>
                     </div>
                     <b>
@@ -1276,7 +1155,7 @@ export default function App() {
             <h2 id="info-modal-title">
               {showReset
                 ? "처음의 DriveMate로 돌아갈까요?"
-                : "40초, DriveMate와 함께."}
+                : "일정에서 길 안내까지."}
             </h2>
             {showReset ? (
               <>
@@ -1306,10 +1185,11 @@ export default function App() {
                 </p>
                 <ol>
                   <li>
-                    <b>전체 시연</b>으로 출발부터 주차까지 자동 재생해요.
+                    <b>주행 시작</b>을 누르면 전체 화면 길 안내로 전환돼요.
                   </li>
                   <li>
-                    <b>다섯 장면</b>을 눌러 원하는 순간을 바로 보여주세요.
+                    <b>길 안내</b>에서 다음 회전과 남은 거리, 도착시간을
+                    확인해요.
                   </li>
                   <li>
                     <b>캘린더</b>에서 시간·목적지·도착 여유를 바꿔보세요.
@@ -1326,10 +1206,10 @@ export default function App() {
                   className="primary-button"
                   onClick={() => {
                     setShowHelp(false);
-                    playDemo();
+                    startDrive();
                   }}
                 >
-                  <Play size={17} /> 전체 시연 시작
+                  <Navigation size={17} /> 주행 시작
                 </button>
               </>
             )}

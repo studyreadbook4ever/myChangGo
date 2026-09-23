@@ -965,137 +965,6 @@ h1 {
   color: #839671;
   padding: 23px 0;
 }
-.demo-controls {
-  margin-top: 24px;
-  padding: 19px 23px 15px;
-  border: 1px solid #e1e6d7;
-  background: #f0f3e9;
-  border-radius: 18px;
-}
-.demo-controls-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.demo-controls-heading > div:first-child {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.demo-control-icon {
-  height: 25px;
-  width: 25px;
-  display: grid;
-  place-items: center;
-  background: #e0e9ce;
-  color: #78934d;
-  border-radius: 7px;
-}
-.demo-controls-heading strong {
-  font-size: 11px;
-  font-weight: 550;
-}
-.demo-duration {
-  font-size: 9px;
-  color: #9aa88b;
-  margin-left: 7px;
-}
-.playback-buttons {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.speed-button {
-  font-size: 11px;
-  font-family: Arial, sans-serif;
-  color: #8b9c75;
-  border: 1px solid #dde5d1;
-  border-radius: 6px;
-  min-width: 29px;
-  padding: 4px 5px;
-}
-.demo-play {
-  font-size: 10px;
-  font-weight: 550;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: #dce9c3;
-  padding: 9px 13px;
-  border-radius: 8px;
-  color: #57733d;
-  white-space: nowrap;
-}
-.scene-steps {
-  display: flex;
-  align-items: center;
-  margin-top: 20px;
-  gap: 10px;
-}
-.scene-step {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0;
-  flex: 1;
-  font-size: 10px;
-  color: #a0ab92;
-  white-space: nowrap;
-  min-height: 33px;
-}
-.step-number {
-  width: 25px;
-  height: 25px;
-  display: grid;
-  place-items: center;
-  border: 1px solid #dfe6d3;
-  background: #f5f7ee;
-  border-radius: 7px;
-  font-size: 9px;
-  font-family: Arial, sans-serif;
-  font-weight: 600;
-}
-.scene-step > svg {
-  margin-left: auto;
-  color: #c0cbb2;
-  margin-right: 7px;
-}
-.scene-step.active {
-  color: #5b783f;
-  font-weight: 650;
-}
-.scene-step.active .step-number {
-  background: #698347;
-  color: #f1f7e5;
-  border-color: #698347;
-  box-shadow: 0 0 0 3px #e3ebd4;
-}
-.scene-step.done .step-number {
-  background: #e3ebd3;
-  color: #92a970;
-  border-color: #e3ebd3;
-}
-.scene-description {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 9px;
-  color: #8f9e7c;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #e1e7d6;
-  line-height: 1.6;
-}
-.scene-description .live-dot {
-  width: 4px;
-  height: 4px;
-}
-.demo-disclaimer {
-  margin-left: auto;
-  color: #a6af9b;
-  font-size: 8px;
-}
 .app-footer {
   max-width: 1600px;
   margin: 0 auto;
@@ -1537,25 +1406,6 @@ h1 {
   text-align: center;
   color: #a07e4c;
 }
-.is-presenting .sidebar {
-  display: none;
-}
-.is-presenting .workspace {
-  margin-left: 0;
-  width: 100%;
-}
-.is-presenting .topbar {
-  height: 65px;
-}
-.is-presenting .app-footer {
-  display: none;
-}
-.is-presenting main {
-  padding-top: 24px;
-}
-.is-presenting .page-heading {
-  margin-bottom: 22px;
-}
 @media (min-width: 1600px) {
   .map-canvas {
     height: 525px;
@@ -1593,9 +1443,6 @@ h1 {
   }
   .agent-footnote {
     font-size: 9px;
-  }
-  .demo-controls {
-    margin-top: 25px;
   }
   h1 {
     font-size: 31px;
@@ -1666,12 +1513,6 @@ h1 {
     grid-template-columns: 32px 1fr repeat(4, 70px);
     gap: 10px;
   }
-  .scene-description .demo-disclaimer {
-    display: none;
-  }
-  .demo-duration {
-    display: none;
-  }
   .app-footer {
     padding-left: 27px;
     padding-right: 27px;
@@ -1729,17 +1570,6 @@ h1 {
   }
   .map-location-card strong {
     font-size: 10px;
-  }
-  .scene-step {
-    font-size: 8px;
-    gap: 5px;
-  }
-  .scene-step > svg {
-    display: none;
-  }
-  .step-number {
-    width: 22px;
-    height: 22px;
   }
   .vehicle-grid {
     grid-template-columns: 1fr;
@@ -2121,71 +1951,6 @@ h1 {
     padding-top: 17px;
     margin-top: 21px;
   }
-  .demo-controls {
-    margin-top: 17px;
-    padding: 17px 16px;
-    border-radius: 17px;
-  }
-  .demo-controls-heading {
-    gap: 8px;
-  }
-  .demo-controls-heading strong {
-    font-size: 10px;
-  }
-  .demo-controls-heading > div:first-child {
-    gap: 7px;
-  }
-  .demo-control-icon {
-    width: 22px;
-    height: 22px;
-  }
-  .playback-buttons {
-    gap: 5px;
-  }
-  .playback-buttons .icon-button {
-    width: 27px;
-  }
-  .demo-play {
-    padding: 9px 10px;
-    font-size: 9px;
-    gap: 5px;
-  }
-  .speed-button {
-    font-size: 10px;
-    min-width: 24px;
-  }
-  .scene-steps {
-    gap: 5px;
-    margin-top: 19px;
-    align-items: stretch;
-  }
-  .scene-step {
-    font-size: 8px;
-    gap: 8px;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    white-space: normal;
-    text-align: center;
-    line-height: 1.6;
-  }
-  .scene-step > svg {
-    display: none;
-  }
-  .step-number {
-    width: 27px;
-    height: 27px;
-    font-size: 10px;
-  }
-  .scene-description {
-    font-size: 9px;
-    align-items: flex-start;
-    margin-top: 17px;
-    padding-top: 13px;
-  }
-  .scene-description > .live-dot {
-    margin-top: 5px;
-  }
   .app-footer {
     padding: 17px 18px 21px;
     font-size: 8px;
@@ -2337,18 +2102,6 @@ h1 {
   .traffic-callout b {
     font-size: 10px;
   }
-  .is-presenting .workspace {
-    padding-bottom: 0;
-  }
-  .is-presenting main {
-    padding-top: 20px;
-  }
-  .is-presenting .topbar {
-    height: 58px;
-  }
-  .is-presenting .demo-controls {
-    margin-bottom: 20px;
-  }
   .secondary-heading .heading-subtitle {
     max-width: 100%;
   }
@@ -2373,12 +2126,6 @@ h1 {
   }
   .route-stats strong {
     font-size: 20px;
-  }
-  .demo-controls-heading strong {
-    font-size: 9px;
-  }
-  .demo-control-icon {
-    display: none;
   }
   .map-world-label {
     font-size: 7px;
@@ -2414,9 +2161,6 @@ h1 {
 .event-details strong {
   font-size: 11px;
 }
-.scene-description {
-  color: #7b8d65;
-}
 .heading-subtitle {
   color: #83907a;
 }
@@ -2430,82 +2174,6 @@ h1 {
   font-size: 11px;
   color: #738564;
 }
-@media (min-width: 1000px) {
-  .is-presenting main {
-    max-width: 1660px;
-    padding-top: 21px;
-  }
-  .is-presenting .cockpit-grid {
-    grid-template-columns: minmax(0, 1fr) 345px;
-  }
-  .is-presenting .bottom-cards {
-    display: none;
-  }
-  .is-presenting .agent-panel {
-    grid-row: 1;
-    padding: 18px;
-  }
-  .is-presenting .agent-label {
-    margin-bottom: 15px;
-  }
-  .is-presenting .agent-message {
-    padding: 18px;
-  }
-  .is-presenting .agent-message h2 {
-    font-size: 22px;
-    margin: 9px 0;
-  }
-  .is-presenting .agent-message p {
-    font-size: 11px;
-  }
-  .is-presenting .recommendation-time {
-    margin-top: 13px;
-    padding-top: 12px;
-    gap: 5px;
-  }
-  .is-presenting .recommendation-time strong {
-    font-size: 27px;
-  }
-  .is-presenting .reasoning {
-    padding-top: 17px;
-  }
-  .is-presenting .section-kicker {
-    margin-bottom: 14px;
-  }
-  .is-presenting .reason-row {
-    margin-bottom: 13px;
-  }
-  .is-presenting .quick-questions,
-  .is-presenting .agent-footnote {
-    display: none;
-  }
-  .is-presenting .agent-primary {
-    margin-top: auto;
-  }
-  .is-presenting .map-canvas {
-    height: 455px;
-  }
-  .is-presenting .map-heading {
-    height: 49px;
-  }
-  .is-presenting .route-stats {
-    padding: 18px 8px;
-  }
-  .is-presenting .page-heading h1 {
-    font-size: 26px;
-  }
-  .is-presenting .demo-controls {
-    margin-top: 19px;
-    padding: 16px 21px 12px;
-  }
-  .is-presenting .scene-steps {
-    margin-top: 14px;
-  }
-  .is-presenting .scene-description {
-    margin-top: 12px;
-    padding-top: 9px;
-  }
-}
 @media (max-width: 700px) {
   .cockpit-main {
     display: flex;
@@ -2514,22 +2182,8 @@ h1 {
   .cockpit-main > .page-heading {
     order: 0;
   }
-  .cockpit-main > .demo-controls {
-    order: 1;
-    margin: 0 0 17px;
-    padding: 14px 13px;
-  }
   .cockpit-main > .cockpit-grid {
     order: 2;
-  }
-  .cockpit-main > .demo-controls .scene-description {
-    display: none;
-  }
-  .cockpit-main > .demo-controls .scene-steps {
-    margin-top: 13px;
-  }
-  .cockpit-main > .demo-controls .scene-step {
-    gap: 6px;
   }
   .agent-message p {
     font-size: 12px;

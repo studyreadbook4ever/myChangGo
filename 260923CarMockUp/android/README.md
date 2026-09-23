@@ -28,7 +28,9 @@ adb shell am start -n dev.drivemate.demo/.MainActivity
 - [Android 공식 WebViewAssetLoader](https://developer.android.com/develop/ui/views/layout/webapps/load-local-content)를 사용해 번들 파일을 `https://appassets.androidplatform.net/index.html`에서 읽습니다. 외부 주소 요청은 차단합니다.
 - localStorage는 같은 로컬 HTTPS origin에 저장되어 앱 재실행 후에도 유지됩니다.
 - 상태바·내비게이션 바·키보드 영역을 피하고 가로/세로 화면 전환을 지원합니다.
-- 앱이 화면에 열려 있는 동안 화면 꺼짐을 막아 자동 시연과 영상 촬영을 돕습니다.
+- 주행을 시작하면 시스템 상태바와 내비게이션 바도 숨겨 [Android 몰입 모드](https://developer.android.com/develop/ui/views/layout/immersive)로 전환합니다. 화면 가장자리를 쓸어 시스템 바를 잠깐 표시할 수 있고 주행을 마치면 원래대로 복원합니다. 컷아웃과 키보드의 안전 영역은 유지합니다.
+- 프론트엔드는 `window.DriveMateNative?.setNavigationActive(true | false)`로 이 화면 상태만 전달합니다. 네이티브 브리지는 파일·위치·개인정보에 접근하는 기능을 제공하지 않으며 외부 웹 콘텐츠를 로드하지 않습니다.
+- 앱이 화면에 열려 있는 동안 화면 꺼짐을 막아 주행 화면 확인과 영상 촬영을 돕습니다.
 - 안드로이드 뒤로 가기는 `window.driveMateBack()`이 `true`를 반환하면 웹 UI에 위임합니다. 그 외에는 웹 히스토리를 이동하거나 앱을 백그라운드로 보냅니다.
 - debug APK에서는 Chrome DevTools로 WebView를 검사할 수 있습니다.
 

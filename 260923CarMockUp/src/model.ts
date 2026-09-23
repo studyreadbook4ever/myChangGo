@@ -95,6 +95,7 @@ export interface TripRecord {
   actual: number;
   destination: Destination;
   rerouted?: boolean;
+  trafficDelay?: number;
 }
 export const INITIAL_TRIPS: TripRecord[] = [
   {
@@ -156,7 +157,9 @@ export function personalResidual(
   // Only same-destination, non-disrupted trips calibrate habitual driving pace.
   return median(
     trips
-      .filter((t) => t.destination === destination && !t.rerouted)
+      .filter(
+        (t) => t.destination === destination && !t.rerouted && !t.trafficDelay,
+      )
       .slice(0, 10)
       .map((t) => t.actual - t.baseline),
   );
@@ -291,7 +294,9 @@ export function parseSavedState(raw: string | null): SavedState {
           t.actual > 0 &&
           Number.isFinite(t.baseline) &&
           t.baseline > 0 &&
-          (t.rerouted === undefined || typeof t.rerouted === "boolean"),
+          (t.rerouted === undefined || typeof t.rerouted === "boolean") &&
+          (t.trafficDelay === undefined ||
+            (Number.isFinite(t.trafficDelay) && t.trafficDelay >= 0)),
       ) ||
       !Number.isFinite(s.mileage) ||
       s.mileage < 0 ||

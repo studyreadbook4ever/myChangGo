@@ -115,3 +115,16 @@ test("clock formatting supports midnight boundary", () => {
   assert.equal(clockTime(-5), "23:55");
   assert.equal(clockTime(1445), "00:05");
 });
+
+test("keeping a congested route does not distort normal driving habits", () => {
+  const kept = {
+    ...INITIAL_TRIPS[0],
+    id: "kept",
+    actual: 27,
+    rerouted: false,
+    trafficDelay: 12,
+  };
+  assert.equal(personalResidual([kept, ...INITIAL_TRIPS], "office"), 3);
+  const state = { ...freshState(), trips: [kept, ...INITIAL_TRIPS] };
+  assert.deepEqual(parseSavedState(JSON.stringify(state)), state);
+});
