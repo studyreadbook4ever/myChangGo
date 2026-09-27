@@ -1,0 +1,66 @@
+[Unit]
+Description=idlepilot condition-gated task supervisor (%i)
+Documentation=man:idlepilot(1)
+StartLimitIntervalSec=30min
+StartLimitBurst=10
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/idlepilot run --config %h/.config/idlepilot/%i.conf
+
+# Let the supervisor perform its bounded process-group shutdown first. If it
+# cannot, systemd sends SIGKILL to every process left in this user-unit cgroup.
+KillMode=mixed
+SendSIGKILL=yes
+TimeoutStopSec=315s
+SuccessExitStatus=130 143
+
+# Guard loss and runtime-limit exits are failures on purpose: restarting puts
+# the supervisor back into its fail-closed waiting state after cgroup cleanup.
+Restart=on-failure
+RestartSec=15s
+RestartPreventExitStatus=2 4 5 6 70
+
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=idlepilot-%i
+UMask=0077
+
+# The action shares these constraints. Create the state/share directories
+# before starting the unit; add only reviewed output paths in an instance
+# drop-in with ReadWritePaths=.
+ProtectSystem=strict
+ReadWritePaths=%h/.local/state/idlepilot
+ReadWritePaths=%h/.local/share/idlepilot
+ReadWritePaths=%t
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+LimitCORE=0
+TasksMax=512
+
+# Opportunistic household work should yield to interactive activity even
+# before the live idle guard observes it.
+Nice=10
+CPUWeight=20
+IOWeight=20
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
