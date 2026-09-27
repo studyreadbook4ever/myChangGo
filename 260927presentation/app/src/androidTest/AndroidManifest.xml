@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Included only in the instrumentation APK, never in the distributed app. -->
+        <provider
+            android:name="dev.presentation.FixtureProvider"
+            android:authorities="dev.presentation.studio.test.fixtures"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+    </application>
+</manifest>

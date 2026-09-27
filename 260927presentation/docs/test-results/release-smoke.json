@@ -1,0 +1,25 @@
+{
+  "programs": [],
+  "stream_groups": [],
+  "streams": [
+    {
+      "codec_name": "h264",
+      "codec_type": "video",
+      "width": 1280,
+      "height": 720,
+      "duration": "4.222689"
+    },
+    {
+      "codec_name": "aac",
+      "codec_type": "audio",
+      "duration": "4.205034"
+    }
+  ],
+  "format": {
+    "duration": "4.222689",
+    "size": "604593"
+  },
+  "apk_sha256": "a52005d13105e0d6497a6e0e351d33e2c42837b510f5a23d1a38942b0ad5d0b5",
+  "gallery_path": "/sdcard/Movies/PresentationStudio/Presentation_20260927_140225_499.mp4",
+  "survived_app_uninstall": true
+}

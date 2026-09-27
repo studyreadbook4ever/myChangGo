@@ -1,0 +1,30 @@
+{
+  "demo-4x3.pdf": {
+    "bytes": 4264,
+    "sha256": "2d1265334278d3e2cbba2d0e4784c54d409e66c331f7ccb896c65862f64d689f"
+  },
+  "demo-portrait.pdf": {
+    "bytes": 4289,
+    "sha256": "b1475335a67f9aca452060c5b112433f1a387ee4b83b1ce098fad39574eac778"
+  },
+  "demo-prefixed.pdf": {
+    "bytes": 4308,
+    "sha256": "748e7a06b7acbdd0b7845c2c13d50d7003303b30d62904c36dc0ff60983095e4"
+  },
+  "demo-rotated.pdf": {
+    "bytes": 4292,
+    "sha256": "cca645347c30f929072492fcac16fdd00c3d65bb9692d3a6c075288771c9c7a2"
+  },
+  "demo.pdf": {
+    "bytes": 4255,
+    "sha256": "4ab9f3f43d356dd81f81bfc545f401807c15031876cf8308f12238d6647e35b4"
+  },
+  "malformed.pdf": {
+    "bytes": 65,
+    "sha256": "a64b9f188761528efee789979dca5c673feaa09e4b00c368c8e60827f241fa7f"
+  },
+  "not-a-pdf.pdf": {
+    "bytes": 42,
+    "sha256": "9922cedffcf521fc8e6228c8592d779d7db5a9e714171f5edf9746dc0836aabd"
+  }
+}
