@@ -44,10 +44,28 @@ jobs:
       - run: dart format --output=none --set-exit-if-changed lib test integration_test
       - run: flutter analyze
       - run: flutter test --concurrency=1
-      - run: flutter build apk --debug
+      - name: Create temporary CI signing key
+        shell: bash
+        run: |
+          signing_dir="$RUNNER_TEMP/jpstudy-signing"
+          mkdir -p "$signing_dir"
+          keytool -genkeypair -keystore "$signing_dir/ci.jks" \
+            -storepass ci-validation-only -keypass ci-validation-only \
+            -alias jpstudy-ci -keyalg RSA -keysize 2048 -validity 2 \
+            -dname "CN=JPstudy CI" -noprompt
+          printf 'storeFile=%s\nstorePassword=ci-validation-only\nkeyAlias=jpstudy-ci\nkeyPassword=ci-validation-only\n' \
+            "$signing_dir/ci.jks" > "$signing_dir/release.properties"
+          echo "JPSTUDY_SIGNING_PROPERTIES=$signing_dir/release.properties" >> "$GITHUB_ENV"
+      - name: Build minified release and check Kotlin JNI bridge
+        run: |
+          flutter build apk --release
+          python3 tool/verify_release_jni.py
       - uses: actions/upload-artifact@v4
         with:
-          name: jpstudy-debug-apk
+          name: jpstudy-ci-release-apk
           path: |
-            261021JPstudy/build/app/outputs/flutter-apk/app-debug.apk
+            261021JPstudy/build/app/outputs/flutter-apk/app-release.apk
           retention-days: 14
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/jpstudy-signing"

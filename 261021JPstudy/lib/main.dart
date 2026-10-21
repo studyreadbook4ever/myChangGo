@@ -32,7 +32,23 @@ class _BootstrapState extends State<Bootstrap> {
   @override
   void initState() {
     super.initState();
-    _loading = StudyStore.load();
+    _loading = _load();
+  }
+
+  Future<StudyStore> _load() async {
+    try {
+      return await StudyStore.load();
+    } catch (error, stack) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'jpstudy',
+          context: ErrorDescription('loading the local wordbook'),
+        ),
+      );
+      rethrow;
+    }
   }
 
   @override
@@ -54,8 +70,7 @@ class _BootstrapState extends State<Bootstrap> {
                         const Text('단어장을 불러오지 못했어요.'),
                         const SizedBox(height: 16),
                         FilledButton(
-                          onPressed: () =>
-                              setState(() => _loading = StudyStore.load()),
+                          onPressed: () => setState(() => _loading = _load()),
                           child: const Text('다시 시도'),
                         ),
                       ],
