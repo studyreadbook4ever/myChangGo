@@ -224,7 +224,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         child: IndexedStack(
           index: _selected,
           children: [
-            LibraryPage(store: widget.store),
+            LibraryPage(store: widget.store, isActive: _selected == 0),
             SettingsPage(store: widget.store),
           ],
         ),

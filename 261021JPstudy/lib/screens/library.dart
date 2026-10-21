@@ -1,12 +1,31 @@
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../design.dart';
 import '../domain.dart';
 import '../study_store.dart';
+import '../wordbook_order.dart';
 import 'reader.dart';
 
+typedef _LibraryLookup = ({
+  StudyStore store,
+  int? level,
+  String? topic,
+  String query,
+  bool bookmarksOnly,
+});
+
 class LibraryPage extends StatefulWidget {
-  const LibraryPage({super.key, required this.store});
+  const LibraryPage({
+    super.key,
+    required this.store,
+    this.isActive = true,
+    this.random,
+  });
   final StudyStore store;
+  final bool isActive;
+  final Random? random;
   @override
   State<LibraryPage> createState() => _LibraryPageState();
 }
@@ -14,31 +33,66 @@ class LibraryPage extends StatefulWidget {
 class _LibraryPageState extends State<LibraryPage> {
   final _search = TextEditingController();
   bool _bookmarksOnly = false;
+  bool _readerOpen = false;
   String? _topic;
+  late final _random = widget.random ?? Random();
+  _LibraryLookup? _lookup;
+  Set<String> _bookmarks = const {};
+  List<Vocabulary> _visibleCards = const [];
+  List<Vocabulary> _cards = const [];
+  List<String> _topics = const [];
+
+  @override
+  void didUpdateWidget(covariant LibraryPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isActive && widget.isActive) _lookup = null;
+  }
+
   @override
   void dispose() {
     _search.dispose();
     super.dispose();
   }
 
-  void _open(Vocabulary card, List<Vocabulary> cards) {
+  Future<void> _open(Vocabulary card, List<Vocabulary> cards) async {
     FocusManager.instance.primaryFocus?.unfocus();
-    Navigator.push(
-      context,
-      MaterialPageRoute<void>(
-        builder: (_) =>
-            ReaderPage(store: widget.store, cards: cards, initialId: card.id),
-      ),
-    );
+    _readerOpen = true;
+    try {
+      await Navigator.push(
+        context,
+        MaterialPageRoute<void>(
+          builder: (_) =>
+              ReaderPage(store: widget.store, cards: cards, initialId: card.id),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _readerOpen = false;
+          _lookup = null;
+        });
+      }
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
+  List<Vocabulary> _lookupCards(String query) {
     final store = widget.store;
-    final query = _search.text.trim().toLowerCase();
-    final topics = store.visibleCards.map((c) => c.topic).toSet().toList();
-    final selectedTopic = topics.contains(_topic) ? _topic : null;
-    final cards = store.visibleCards
+    final lookup = (
+      store: store,
+      level: store.preferredLevel,
+      topic: _topic,
+      query: query,
+      bookmarksOnly: _bookmarksOnly,
+    );
+    final bookmarks = _bookmarksOnly ? store.bookmarks : const <String>{};
+    // Paints, scrolling and unrelated saved preferences reuse this snapshot.
+    if (_lookup == lookup && setEquals(_bookmarks, bookmarks)) return _cards;
+    _lookup = lookup;
+    _bookmarks = bookmarks;
+    _visibleCards = store.visibleCards;
+    _topics = _visibleCards.map((c) => c.topic).toSet().toList();
+    final selectedTopic = _topics.contains(_topic) ? _topic : null;
+    final matching = _visibleCards
         .where(
           (c) =>
               (!_bookmarksOnly || store.isBookmarked(c.id)) &&
@@ -49,6 +103,17 @@ class _LibraryPageState extends State<LibraryPage> {
                       .contains(query)),
         )
         .toList();
+    _cards = randomFirst(matching, random: _random);
+    return _cards;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = widget.store;
+    final query = _search.text.trim().toLowerCase();
+    final cards = widget.isActive && !_readerOpen ? _lookupCards(query) : _cards;
+    final topics = _topics;
+    final selectedTopic = topics.contains(_topic) ? _topic : null;
     final last = store.lastReadCard;
     return CustomScrollView(
       key: const PageStorageKey('library-scroll'),
@@ -79,8 +144,8 @@ class _LibraryPageState extends State<LibraryPage> {
                       borderRadius: BorderRadius.circular(18),
                       onTap: () => _open(
                         last,
-                        store.visibleCards.any((c) => c.id == last.id)
-                            ? store.visibleCards
+                        _visibleCards.any((c) => c.id == last.id)
+                            ? _visibleCards
                             : store.cards,
                       ),
                       child: Padding(
@@ -208,7 +273,7 @@ class _LibraryPageState extends State<LibraryPage> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  '${cards.length}개 단어 · 누르면 예문과 한자 풀이가 열려요.',
+                  '${cards.length}개 단어 · 맨 위 ${min(5, cards.length)}개는 무작위로 보여요.',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],

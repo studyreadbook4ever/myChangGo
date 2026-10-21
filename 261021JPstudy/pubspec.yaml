@@ -1,7 +1,7 @@
 name: jpstudy
 description: 한국인을 위한 한자 연결 학습 · 한자 잇다
 publish_to: none
-version: 1.0.0+1
+version: 1.0.1+2
 environment:
   sdk: '>=3.10.0 <4.0.0'
 dependencies:

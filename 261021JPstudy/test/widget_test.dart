@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -6,6 +8,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:jpstudy/main.dart';
 import 'package:jpstudy/domain.dart';
 import 'package:jpstudy/study_store.dart';
+import 'package:jpstudy/screens/library.dart';
+import 'package:jpstudy/screens/reader.dart';
+
+class CountingRandom extends Fake implements Random {
+  final _delegate = Random(42);
+  int calls = 0;
+
+  @override
+  int nextInt(int max) {
+    calls++;
+    return _delegate.nextInt(max);
+  }
+}
 
 List<Vocabulary> fixtures() => [
   const Vocabulary(
@@ -117,6 +132,127 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('flutter_tts'), null);
   });
+  testWidgets('random words refresh on lookup and navigation, not redraws', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = await makeStore();
+    final random = CountingRandom();
+    Widget host({bool active = true}) => MaterialApp(
+      home: Scaffold(
+        body: ListenableBuilder(
+          listenable: store,
+          builder: (context, _) =>
+              LibraryPage(store: store, random: random, isActive: active),
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+    final firstLookup = random.calls;
+    expect(firstLookup, greaterThan(0));
+    expect(firstLookup, lessThanOrEqualTo(5));
+    await tester.pumpWidget(host());
+    await store.setHideReadings(true);
+    await store.toggleBookmark('school');
+    await store.markRead('student');
+    await tester.pumpAndSettle();
+    expect(random.calls, firstLookup);
+
+    await tester.pumpWidget(host(active: false));
+    await store.setPreferredLevel(5);
+    await tester.pumpAndSettle();
+    expect(random.calls, firstLookup);
+    await tester.pumpWidget(host());
+    await tester.pumpAndSettle();
+    expect(random.calls, greaterThan(firstLookup));
+
+    final beforeSearch = random.calls;
+    await tester.enterText(find.byType(TextField), '일상');
+    await tester.pumpAndSettle();
+    expect(random.calls, greaterThan(beforeSearch));
+    expect(random.calls, lessThanOrEqualTo(beforeSearch + 3));
+    final searched = random.calls;
+    await tester.enterText(find.byType(TextField), ' 일상 ');
+    await tester.pumpAndSettle();
+    expect(random.calls, searched);
+
+    await tester.tap(find.text('学校'));
+    await tester.pumpAndSettle();
+    final reader = tester.widget<ReaderPage>(find.byType(ReaderPage));
+    expect(
+      reader.cards.map((card) => card.id),
+      unorderedEquals(['school', 'student', 'book']),
+    );
+    expect(random.calls, searched);
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    expect(random.calls, greaterThan(searched));
+
+    final beforeEmptyQuery = random.calls;
+    await store.setPreferredLevel(1);
+    await tester.pumpAndSettle();
+    expect(random.calls, beforeEmptyQuery);
+    expect(find.textContaining('표시할 단어가 없어요'), findsOneWidget);
+    expectNoFlutterErrors(tester);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  testWidgets('bookmarks-only lookup tracks candidate membership changes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = await makeStore();
+    for (final id in ['school', 'student', 'water']) {
+      await store.toggleBookmark(id);
+    }
+    final random = CountingRandom();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ListenableBuilder(
+            listenable: store,
+            builder: (context, _) => LibraryPage(store: store, random: random),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilterChip, '책갈피만'));
+    await tester.pumpAndSettle();
+    final bookmarkedLookup = random.calls;
+    final before = tester.widget<SliverList>(find.byType(SliverList)).delegate;
+    expect(before.estimatedChildCount, 3);
+    await store.toggleBookmark('water');
+    await tester.pumpAndSettle();
+    expect(random.calls, greaterThan(bookmarkedLookup));
+    final after = tester.widget<SliverList>(find.byType(SliverList)).delegate;
+    expect(after.estimatedChildCount, 2);
+    expect(find.text('水'), findsNothing);
+    final beforeReader = random.calls;
+    await tester.tap(find.text('学校'));
+    await tester.pumpAndSettle();
+    await store.toggleBookmark('student');
+    await tester.pumpAndSettle();
+    expect(random.calls, beforeReader);
+    final reader = tester.widget<ReaderPage>(find.byType(ReaderPage));
+    expect(
+      reader.cards.map((card) => card.id),
+      unorderedEquals(['school', 'student']),
+    );
+    await tester.tap(find.byType(BackButton));
+    await tester.pumpAndSettle();
+    final list = tester.widget<SliverList>(find.byType(SliverList));
+    expect(list.delegate.estimatedChildCount, 1);
+    expectNoFlutterErrors(tester);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   testWidgets('opens a readable wordbook, searches, bookmarks and resumes', (
     tester,
   ) async {
@@ -124,9 +260,9 @@ void main() {
     await tester.pumpWidget(KanjiApp(store: store));
     await tester.pumpAndSettle();
     expect(find.text('내 속도로 읽는 단어장'), findsOneWidget);
-    expect(find.text('がっこう'), findsOneWidget);
     await tester.enterText(find.byType(TextField), '학교');
     await tester.pumpAndSettle();
+    expect(find.text('がっこう'), findsOneWidget);
     expect(find.text('学校'), findsOneWidget);
     expect(find.text('学生'), findsNothing);
     await tester.ensureVisible(find.byTooltip('책갈피 추가'));
@@ -207,7 +343,16 @@ void main() {
     await tester.tap(find.text('단어장').last);
     await tester.pumpAndSettle();
     expect(find.text('がっこう'), findsNothing);
-    await tester.ensureVisible(find.text('学校'));
+    await tester.scrollUntilVisible(
+      find.text('学校'),
+      150,
+      scrollable: find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('学校'));
     await tester.pumpAndSettle();
