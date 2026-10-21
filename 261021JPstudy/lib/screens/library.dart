@@ -111,7 +111,9 @@ class _LibraryPageState extends State<LibraryPage> {
   Widget build(BuildContext context) {
     final store = widget.store;
     final query = _search.text.trim().toLowerCase();
-    final cards = widget.isActive && !_readerOpen ? _lookupCards(query) : _cards;
+    final cards = widget.isActive && !_readerOpen
+        ? _lookupCards(query)
+        : _cards;
     final topics = _topics;
     final selectedTopic = topics.contains(_topic) ? _topic : null;
     final last = store.lastReadCard;
