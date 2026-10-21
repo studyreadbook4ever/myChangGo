@@ -170,6 +170,7 @@ class _LibraryPageState extends State<LibraryPage> {
                   key: ValueKey('${store.preferredLevel}:$selectedTopic'),
                   initialValue: selectedTopic ?? '',
                   isExpanded: true,
+                  isDense: false,
                   decoration: const InputDecoration(
                     labelText: '주제',
                     prefixIcon: Icon(Icons.folder_open_rounded),

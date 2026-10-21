@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -129,6 +130,7 @@ void main() {
     expect(find.text('学校'), findsOneWidget);
     expect(find.text('学生'), findsNothing);
     await tester.ensureVisible(find.byTooltip('책갈피 추가'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('책갈피 추가'));
     await tester.pumpAndSettle();
     expect(store.isBookmarked('school'), isTrue);
@@ -140,9 +142,11 @@ void main() {
     await tester.tap(find.byType(BackButton));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.byTooltip('검색 지우기'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('검색 지우기'));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.byKey(const Key('continue-reading')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('continue-reading')));
     await tester.pumpAndSettle();
     expect(find.text('단어 읽기'), findsOneWidget);
@@ -158,6 +162,7 @@ void main() {
     await tester.pumpAndSettle();
     final n1 = find.widgetWithText(ChoiceChip, 'N1');
     await tester.ensureVisible(n1);
+    await tester.pumpAndSettle();
     await tester.tap(n1);
     await tester.pumpAndSettle();
     expect(store.preferredLevel, 1);
@@ -165,6 +170,7 @@ void main() {
     expect(find.text('学校'), findsNothing);
     final all = find.widgetWithText(ChoiceChip, '모든 급수');
     await tester.ensureVisible(all);
+    await tester.pumpAndSettle();
     await tester.tap(all);
     await tester.pumpAndSettle();
     await tester.tap(find.byType(DropdownButtonFormField<String>));
@@ -177,6 +183,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('水'), findsOneWidget);
     await tester.ensureVisible(find.byTooltip('책갈피 해제'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('책갈피 해제'));
     await tester.pumpAndSettle();
     expect(find.textContaining('표시할 단어가 없어요'), findsOneWidget);
@@ -201,6 +208,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('がっこう'), findsNothing);
     await tester.ensureVisible(find.text('学校'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('学校'));
     await tester.pumpAndSettle();
     expect(find.text('がっこう'), findsNothing);
@@ -242,6 +250,66 @@ void main() {
     await tester.tap(find.text('설정'));
     await tester.pumpAndSettle();
     expect(tester.testTextInput.isVisible, isFalse);
+    expectNoFlutterErrors(tester);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  testWidgets('long topic stays fully readable with combined large text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    const topic = '문맥 속 고유어와 한자';
+    SharedPreferences.setMockInitialValues({});
+    final store = StudyStore(
+      preferences: await SharedPreferences.getInstance(),
+      cards: const [
+        Vocabulary(
+          id: 'atmosphere',
+          word: '趣',
+          reading: 'おもむき',
+          meaning: '정취; 취지',
+          level: 1,
+          topic: topic,
+          example: 'この庭には落ち着いた趣がある。',
+          exampleReading: 'このにわにはおちついたおもむきがある。',
+          exampleMeaning: '이 정원에는 차분한 정취가 있다.',
+          note: '',
+        ),
+      ],
+      kanji: const {},
+    );
+    await store.setTextScale(1.4);
+    await tester.pumpWidget(KanjiApp(store: store));
+    await tester.pumpAndSettle();
+    final field = find.byType(DropdownButtonFormField<String>);
+    await tester.ensureVisible(field);
+    await tester.pumpAndSettle();
+    await tester.tap(field);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text(topic).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(topic).last);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(field);
+    await tester.pumpAndSettle();
+
+    final selected = find.descendant(of: field, matching: find.text(topic));
+    expect(selected, findsOneWidget);
+    final paragraph = tester.renderObject<RenderParagraph>(selected);
+    final neededHeight = paragraph.getMaxIntrinsicHeight(paragraph.size.width);
+    final singleLineHeight = paragraph.getMaxIntrinsicHeight(double.infinity);
+    // Exercise real wrapping, and compare against the full un-clipped text
+    // height. A constrained Text's layout rect alone can hide clipped lines.
+    expect(neededHeight, greaterThan(singleLineHeight));
+    expect(paragraph.size.height, greaterThanOrEqualTo(neededHeight - 0.5));
+    final labelRect = tester.getRect(selected);
+    final fieldRect = tester.getRect(field);
+    expect(labelRect.top, greaterThanOrEqualTo(fieldRect.top));
+    expect(labelRect.bottom, lessThanOrEqualTo(fieldRect.bottom + 0.5));
     expectNoFlutterErrors(tester);
     await tester.pumpWidget(const SizedBox.shrink());
   });
