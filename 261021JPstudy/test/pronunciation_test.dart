@@ -73,4 +73,40 @@ void main() {
     expect(find.text('기기의 음성 설정에서 일본어 음성을 설치해 주세요.'), findsOneWidget);
     await tester.pumpAndSettle();
   });
+  testWidgets('stalled native voice reports a bounded failure', (tester) async {
+    final readiness = Completer<bool>();
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'isLanguageAvailable') return readiness.future;
+      return 1;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    late BuildContext context;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (c) {
+            context = c;
+            return const Scaffold();
+          },
+        ),
+      ),
+    );
+    final pending = Pronunciation().speak(context, 'がっこう');
+    await tester.pump(const Duration(seconds: 9));
+    await pending;
+    await tester.pump();
+    expect(
+      find.text('일본어 음성을 재생할 수 없어요. 기기의 TTS 설정을 확인해 주세요.'),
+      findsOneWidget,
+    );
+    readiness.complete(true);
+    await tester.pumpAndSettle();
+  });
 }

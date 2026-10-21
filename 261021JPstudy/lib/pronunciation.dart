@@ -13,7 +13,9 @@ class Pronunciation {
     final request = ++_generation;
     bool cancelled() => request != _generation || !context.mounted;
     try {
-      final available = await _tts.isLanguageAvailable('ja-JP');
+      final available = await _tts
+          .isLanguageAvailable('ja-JP')
+          .timeout(const Duration(seconds: 8));
       if (cancelled()) return;
       if (available != true && available != 1) {
         if (context.mounted) {
@@ -21,13 +23,15 @@ class Pronunciation {
         }
         return;
       }
-      await _tts.stop();
+      await _tts.stop().timeout(const Duration(seconds: 3));
       if (cancelled()) return;
-      await _tts.setLanguage('ja-JP');
+      await _tts.setLanguage('ja-JP').timeout(const Duration(seconds: 8));
       if (cancelled()) return;
-      await _tts.setSpeechRate(slow ? 0.30 : 0.45);
+      await _tts
+          .setSpeechRate(slow ? 0.30 : 0.45)
+          .timeout(const Duration(seconds: 8));
       if (cancelled()) return;
-      await _tts.speak(reading);
+      await _tts.speak(reading).timeout(const Duration(seconds: 8));
     } catch (_) {
       if (context.mounted && !cancelled()) {
         toast(context, '일본어 음성을 재생할 수 없어요. 기기의 TTS 설정을 확인해 주세요.');
@@ -38,7 +42,7 @@ class Pronunciation {
   Future<void> stop() async {
     ++_generation;
     try {
-      await _tts.stop();
+      await _tts.stop().timeout(const Duration(seconds: 3));
     } catch (_) {}
   }
 }

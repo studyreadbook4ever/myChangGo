@@ -193,7 +193,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _selected,
-        onDestinationSelected: (i) => setState(() => _selected = i),
+        onDestinationSelected: (i) {
+          FocusManager.instance.primaryFocus?.unfocus();
+          setState(() => _selected = i);
+        },
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.grid_view_outlined),

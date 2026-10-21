@@ -25,7 +25,11 @@ flutter test integration_test/android_smoke_test.dart -d <ANDROID_DEVICE_ID>
 
 - 콘텐츠 생성물 일치 검사 `python3 tool/build_curriculum.py --check`: 통과.
 - 콘텐츠 검증 `python3 tool/validate_curriculum.py`: 1,000단어·300한자, 중복/가나/필수 필드/미치환 조사 검사 통과.
+- `dart format --output=none --set-exit-if-changed lib test integration_test`: 19개 파일 변경 없음.
+- `flutter analyze`: **No issues found**, 종료 코드 0.
 - `flutter test --concurrency=1`: **56개 모두 통과**, 종료 코드 0.
+- TTS 지연 제한·검색 키보드 닫기 보강 후 해당 화면/음성 테스트 **11개 재통과**.
+- `TZ=America/New_York`로 DST 경계 테스트 별도 실행: **1개 통과**.
 - 별도 담당자에 의한 전체 어휘 읽기·예문·한국어 뜻 검토 후 수정 반영. 전문 사전·언어 교사의 검증을 대체하지 않음.
 
 `flutter test --coverage`에서는 테스트의 assertion들이 통과한 뒤 일부 Linux Flutter 테스트 프로세스가 segmentation fault로 종료하고 수집이 멈췄습니다. 해당 실행은 통과로 집계하지 않았고, 커버리지 없이 전체 56개를 다시 실행하여 정상 통과를 확인했습니다. 따라서 커버리지 비율은 보고하지 않습니다. CI도 재현 가능한 `flutter test --concurrency=1`을 사용합니다.

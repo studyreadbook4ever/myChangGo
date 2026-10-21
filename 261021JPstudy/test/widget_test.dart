@@ -252,6 +252,9 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('学校'), findsOneWidget);
+    await tester.tap(find.text('오늘').last);
+    await tester.pumpAndSettle();
+    expect(tester.testTextInput.isVisible, isFalse);
     await tester.pumpWidget(const SizedBox.shrink());
   });
   for (final size in [
