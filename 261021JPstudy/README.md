@@ -6,6 +6,18 @@
 
 N5~N1 선별 어휘 **1,000개**, 한자 풀이 **300자**를 담았습니다. 한국어 뜻·히라가나·예문을 처음부터 함께 보여주며, 필요할 때만 읽기를 가릴 수 있습니다. 계정이나 서버 없이 오프라인에서 사용합니다.
 
+## 실제 앱 화면
+
+N1 단어장, 예문 읽기, 한국식 훈음으로 연결하는 한자 풀이입니다. 배포 APK를 비행기 모드의 Android에 설치해 촬영했습니다.
+
+<p>
+  <img src="docs/screenshots/library.png" width="260" alt="N1 단어장과 급수·주제 필터">
+  <img src="docs/screenshots/reader.png" width="260" alt="큰 한자, 히라가나, 한국어 뜻과 예문">
+  <img src="docs/screenshots/kanji.png" width="260" alt="한국식 훈음과 일본어 음독·훈독 설명">
+</p>
+
+[글자 크기·백업 설정 화면](docs/screenshots/settings.png)도 볼 수 있습니다.
+
 ## 설치
 
 1. 맨 위 APK 링크를 Android 기기에서 엽니다.
