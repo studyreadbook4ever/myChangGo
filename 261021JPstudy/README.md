@@ -1,5 +1,7 @@
 📱 **[한자 잇다 APK 다운로드](https://github.com/studyreadbook4ever/myChangGo/releases/download/jpstudy-v1.0.0/kanji-itda-v1.0.0.apk)** · [릴리스·SHA-256](https://github.com/studyreadbook4ever/myChangGo/releases/tag/jpstudy-v1.0.0)
 
+정식 배포 APK는 **1.0.0**입니다. 아래 무작위 5개 표시 기능은 **1.0.1 소스**에 반영되어 있습니다. [1.0.1 CI 빌드](https://github.com/studyreadbook4ever/myChangGo/actions/runs/39628188777)의 APK는 임시 키로 서명한 테스트용이므로 기존 정식 앱 위에 업데이트 설치할 수 없습니다. 정식 업데이트에는 기존 릴리스 서명 키가 필요합니다.
+
 # 한자 잇다 · 261021JPstudy
 
 **아는 소리에, 한자를 잇다.** 일본어 말하기·듣기는 익숙하지만 한자는 어려운 한국인 학습자를 위한 Flutter 단어장입니다. N1을 목표로, 기초부터 고급까지 원하는 순서와 속도로 읽습니다.
