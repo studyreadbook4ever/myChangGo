@@ -96,8 +96,10 @@ void main() {
         await tester.tap(find.byType(BackButton));
         await tester.pumpAndSettle();
         await tester.ensureVisible(find.byKey(const Key('continue-reading')));
+        await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('continue-reading')));
         await tester.pumpAndSettle();
+        expect(find.text('단어 읽기'), findsOneWidget);
         expect(find.text(second.word), findsWidgets);
         await tester.tap(find.byType(BackButton));
         await tester.pumpAndSettle();
