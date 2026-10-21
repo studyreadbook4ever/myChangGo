@@ -1,6 +1,6 @@
-📱 **[한자 잇다 APK 다운로드](https://github.com/studyreadbook4ever/myChangGo/releases/download/jpstudy-v1.0.0/kanji-itda-v1.0.0.apk)** · [릴리스·SHA-256](https://github.com/studyreadbook4ever/myChangGo/releases/tag/jpstudy-v1.0.0)
+📱 **[한자 잇다 APK 다운로드](https://github.com/studyreadbook4ever/myChangGo/releases/download/jpstudy-v1.0.1/kanji-itda-v1.0.1.apk)** · [릴리스·SHA-256](https://github.com/studyreadbook4ever/myChangGo/releases/tag/jpstudy-v1.0.1)
 
-정식 배포 APK는 **1.0.0**입니다. 아래 무작위 5개 표시 기능은 **1.0.1 소스**에 반영되어 있습니다. [1.0.1 CI 빌드](https://github.com/studyreadbook4ever/myChangGo/actions/runs/39628188777)의 APK는 임시 키로 서명한 테스트용이므로 기존 정식 앱 위에 업데이트 설치할 수 없습니다. 정식 업데이트에는 기존 릴리스 서명 키가 필요합니다.
+정식 배포 APK는 **1.0.1 (빌드 2)**입니다. 무작위 5개 표시 기능을 포함하며, 기존 1.0.0과 같은 키로 서명해 앱을 삭제하지 않고 업데이트할 수 있습니다. 책갈피와 읽던 위치는 그대로 유지됩니다.
 
 # 한자 잇다 · 261021JPstudy
 
@@ -10,7 +10,7 @@ N5~N1 선별 어휘 **1,000개**, 한자 풀이 **300자**를 담았습니다. �
 
 ## 실제 앱 화면
 
-N1 단어장, 예문 읽기, 한국식 훈음으로 연결하는 한자 풀이입니다. 배포 APK를 비행기 모드의 Android에 설치해 촬영했습니다.
+N1 단어장, 예문 읽기, 한국식 훈음으로 연결하는 한자 풀이입니다. 아래 기본 화면은 1.0.0 APK에서 촬영했습니다. 1.0.1에서는 단어장 맨 위에 무작위 5개를 먼저 보여줍니다.
 
 <p>
   <img src="docs/screenshots/library.png" width="260" alt="N1 단어장과 급수·주제 필터">
