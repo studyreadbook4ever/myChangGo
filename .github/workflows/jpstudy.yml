@@ -29,6 +29,7 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get --enforce-lockfile
+      - run: python3 tool/build_curriculum.py --check
       - run: python3 tool/validate_curriculum.py
       - run: dart format --output=none --set-exit-if-changed lib test integration_test
       - run: flutter analyze

@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:integration_test/integration_test.dart';
-import 'package:jpstudy/domain.dart';
 import 'package:jpstudy/main.dart';
 import 'package:jpstudy/study_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,102 +9,32 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets(
-    'Android study, navigation, native persistence and backup round trip',
-    (tester) async {
-      // Uses the actual Android plugin, never mock preferences. Preserve any
-      // pre-existing app state so a developer can run this on their own device.
-      final preferences = await SharedPreferences.getInstance();
-      await preferences.reload();
-      final original = preferences.getString(StudyStore.storageKey);
-      final originalRecovery = preferences.getString(
-        StudyStore.recoveryBackupKey,
+  testWidgets('Android native preferences persist across a plugin reload', (
+    tester,
+  ) async {
+    const key = 'jpstudy.nativeSmoke';
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.reload();
+    final original = preferences.getString(key);
+    try {
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: Text('Native channel check'))),
       );
-      await preferences.remove(StudyStore.storageKey);
-      await preferences.remove(StudyStore.recoveryBackupKey);
-      try {
-        final store = await StudyStore.load(preferences: preferences);
-        expect(store.cards.length, greaterThanOrEqualTo(500));
-        final first = store.buildSession(StudyMode.reading).first;
-        await tester.pumpWidget(KanjiApp(store: store));
-        await tester.pumpAndSettle();
-        expect(find.text('한자 잇다'), findsOneWidget);
-
-        await tester.ensureVisible(find.byKey(const Key('start-reading')));
-        await tester.tap(find.byKey(const Key('start-reading')));
-        await tester.pumpAndSettle();
-        expect(find.text(first.word), findsOneWidget);
-        expect(find.text(first.reading), findsNothing);
-        await tester.tap(find.byKey(const Key('reveal-answer')));
-        await tester.pumpAndSettle();
-        expect(find.text(first.reading), findsWidgets);
-        await tester.tap(find.byKey(const Key('rate-good')));
-        await tester.pumpAndSettle();
-        final saveDeadline = DateTime.now().add(const Duration(seconds: 30));
-        while (store.todayReviewCount == 0 &&
-            DateTime.now().isBefore(saveDeadline)) {
-          await tester.pump(const Duration(milliseconds: 100));
-        }
-        await tester.pumpAndSettle();
-        expect(store.todayReviewCount, 1);
-        expect(store.progressFor(first.id, StudyMode.reading)?.reviewCount, 1);
-        expect(store.progressFor(first.id, StudyMode.meaning), isNull);
-
-        await tester.pageBack();
-        await tester.pumpAndSettle();
-        await tester.tap(find.byIcon(Icons.auto_stories_outlined));
-        await tester.pumpAndSettle();
-        expect(find.text('모든 급수'), findsOneWidget);
-        await tester.tap(find.byIcon(Icons.tune_outlined));
-        await tester.pumpAndSettle();
-        expect(find.text('나에게 맞는 학습'), findsOneWidget);
-
-        await store.toggleBookmark(first.id);
-        await store.setTargetLevel(3);
-        await store.setDailyNewLimit(5);
-        await preferences.reload();
-        final restarted = await StudyStore.load(preferences: preferences);
-        expect(restarted.todayReviewCount, 1);
-        expect(restarted.isBookmarked(first.id), isTrue);
-        expect(restarted.targetLevel, 3);
-        expect(restarted.dailyNewLimit, 5);
-        expect(
-          restarted.progressFor(first.id, StudyMode.reading)?.reviewCount,
-          1,
-        );
-
-        final backup = restarted.exportJson();
-        await restarted.resetProgress();
-        expect(restarted.learnedCount, 0);
-        await restarted.importJson(backup);
-        await preferences.reload();
-        final restored = await StudyStore.load(preferences: preferences);
-        expect(restored.exportJson(), backup);
-        expect(tester.takeException(), isNull);
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pumpAndSettle();
-        store.dispose();
-        restarted.dispose();
-        restored.dispose();
-      } finally {
-        if (original == null) {
-          await preferences.remove(StudyStore.storageKey);
-        } else {
-          await preferences.setString(StudyStore.storageKey, original);
-        }
-        if (originalRecovery == null) {
-          await preferences.remove(StudyStore.recoveryBackupKey);
-        } else {
-          await preferences.setString(
-            StudyStore.recoveryBackupKey,
-            originalRecovery,
-          );
-        }
+      expect(await preferences.setString(key, '한자 · 学校 · 2026'), isTrue);
+      await preferences.reload();
+      expect(preferences.getString(key), '한자 · 学校 · 2026');
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    } finally {
+      if (original == null) {
+        await preferences.remove(key);
+      } else {
+        await preferences.setString(key, original);
       }
-    },
-  );
+    }
+  });
 
-  testWidgets('Android TTS plugin can report Japanese voice availability', (
+  testWidgets('Android TTS plugin reports Japanese voice availability', (
     tester,
   ) async {
     final tts = FlutterTts();
@@ -113,8 +42,108 @@ void main() {
         .isLanguageAvailable('ja-JP')
         .timeout(const Duration(seconds: 30));
     expect(available is bool || available is int, isTrue);
-    // A voice need not be installed on an emulator. The application explains
-    // how to install one when the native plugin reports it unavailable.
-    await tts.stop();
+    // Voice data is optional on the emulator. The app explains installation
+    // when the native engine reports Japanese unavailable.
+    await tts.stop().timeout(const Duration(seconds: 5));
   });
+  testWidgets(
+    'Offline reading, next page, bookmark and native backup persist',
+    (tester) async {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.reload();
+      const recoveryKey = 'jpstudy.progress.corrupt.v1';
+      final original = preferences.getString(StudyStore.storageKey);
+      final originalRecovery = preferences.getString(recoveryKey);
+      await preferences.remove(StudyStore.storageKey);
+      await preferences.remove(recoveryKey);
+      final stores = <StudyStore>[];
+      Future<void> waitFor(bool Function() ready) async {
+        final deadline = DateTime.now().add(const Duration(seconds: 30));
+        while (!ready() && DateTime.now().isBefore(deadline)) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+        expect(ready(), isTrue);
+        await tester.pumpAndSettle();
+      }
+
+      try {
+        final store = await StudyStore.load(preferences: preferences);
+        stores.add(store);
+        expect(store.cards.length, 1000);
+        final first = store.cards[0];
+        final second = store.cards[1];
+        await tester.pumpWidget(KanjiApp(store: store));
+        await tester.pumpAndSettle();
+        expect(find.text('내 속도로 읽는 단어장'), findsOneWidget);
+        await tester.scrollUntilVisible(
+          find.text(first.word),
+          180,
+          scrollable: find.byType(Scrollable).first,
+        );
+        await tester.tap(find.text(first.word));
+        await tester.pumpAndSettle();
+        await waitFor(() => store.lastReadId == first.id);
+        expect(find.text(first.reading), findsWidgets);
+        expect(find.text(first.meaning), findsWidgets);
+        expect(find.byKey(const Key('reveal-answer')), findsNothing);
+
+        await tester.tap(find.byKey(const Key('reader-bookmark')));
+        await waitFor(() => store.isBookmarked(first.id));
+        await tester.tap(find.byKey(const Key('reader-next')));
+        await waitFor(() => store.lastReadId == second.id);
+        expect(find.text(second.word), findsOneWidget);
+        expect(find.text(second.reading), findsWidgets);
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        await tester.ensureVisible(find.byKey(const Key('continue-reading')));
+        await tester.tap(find.byKey(const Key('continue-reading')));
+        await tester.pumpAndSettle();
+        expect(find.text(second.word), findsOneWidget);
+        await tester.tap(find.byType(BackButton));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.tune_outlined));
+        await tester.pumpAndSettle();
+        expect(find.text('편안한 읽기 설정'), findsOneWidget);
+
+        await store.setHideReadings(true);
+        await store.setTextScale(1.2);
+        await store.setPreferredLevel(3);
+        await tester.pumpAndSettle();
+        await preferences.reload();
+        final restarted = await StudyStore.load(preferences: preferences);
+        stores.add(restarted);
+        expect(restarted.lastReadId, second.id);
+        expect(restarted.isBookmarked(first.id), isTrue);
+        expect(restarted.hideReadings, isTrue);
+        expect(restarted.textScale, 1.2);
+        expect(restarted.preferredLevel, 3);
+        final backup = restarted.exportJson();
+        await restarted.resetProgress();
+        expect(restarted.lastReadId, isNull);
+        expect(restarted.bookmarks, isEmpty);
+        await restarted.importJson(backup);
+        await preferences.reload();
+        final restored = await StudyStore.load(preferences: preferences);
+        stores.add(restored);
+        expect(restored.exportJson(), backup);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+        for (final store in stores) {
+          store.dispose();
+        }
+        if (original == null) {
+          await preferences.remove(StudyStore.storageKey);
+        } else {
+          await preferences.setString(StudyStore.storageKey, original);
+        }
+        if (originalRecovery == null) {
+          await preferences.remove(recoveryKey);
+        } else {
+          await preferences.setString(recoveryKey, originalRecovery);
+        }
+      }
+    },
+  );
 }

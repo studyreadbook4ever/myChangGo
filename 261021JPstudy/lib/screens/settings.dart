@@ -38,15 +38,17 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _export() async {
     setState(() => _busy = true);
     try {
+      final snapshot = await widget.store.exportSnapshot();
+      if (!mounted) return;
       final output = await FilePicker.saveFile(
-        dialogTitle: '학습 기록 백업',
+        dialogTitle: '읽기 기록 백업',
         fileName:
             'kanji-itda-${DateTime.now().toIso8601String().substring(0, 10)}.json',
         type: FileType.custom,
         allowedExtensions: ['json'],
-        bytes: Uint8List.fromList(utf8.encode(widget.store.exportJson())),
+        bytes: Uint8List.fromList(utf8.encode(snapshot)),
       );
-      if (mounted && output != null) toast(context, '학습 기록 백업을 저장했어요.');
+      if (mounted && output != null) toast(context, '읽기 기록 백업을 저장했어요.');
     } catch (_) {
       if (mounted) toast(context, '파일을 저장하지 못했어요. 다시 시도해 주세요.');
     } finally {
@@ -73,11 +75,11 @@ class _SettingsPageState extends State<SettingsPage> {
       if (!mounted) return;
       final confirmed = await _confirm(
         '백업을 복원할까요?',
-        '현재 학습 기록·저장한 단어·설정이 백업 내용으로 바뀝니다. 필요하면 먼저 현재 기록을 백업하세요.',
+        '현재 책갈피·읽던 위치·표시 설정이 백업 내용으로 바뀝니다. 필요하면 먼저 현재 기록을 백업하세요.',
       );
       if (!confirmed) return;
       await widget.store.importJson(utf8.decode(bytes));
-      if (mounted) toast(context, '학습 기록을 복원했어요.');
+      if (mounted) toast(context, '읽기 기록을 복원했어요.');
     } on FormatException {
       if (mounted) toast(context, '올바른 한자 잇다 백업 파일이 아니에요. 현재 기록은 유지됩니다.');
     } catch (_) {
@@ -90,55 +92,38 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) => PageBody(
     children: [
-      const Eyebrow('AT YOUR OWN PACE'),
-      const SizedBox(height: 10),
-      Text('나에게 맞는 학습', style: Theme.of(context).textTheme.headlineMedium),
+      Text('편안한 읽기 설정', style: Theme.of(context).textTheme.headlineMedium),
       const SizedBox(height: 24),
-      const SectionTitle(
-        '목표 급수',
-        subtitle: '선택한 급수까지 기초 단어를 함께 배워요. 단어장은 모든 급수를 볼 수 있어요.',
-      ),
+      const SectionTitle('글자 크기', subtitle: '기기의 접근성 글자 크기에 더해 적용해요.'),
       Wrap(
         spacing: 8,
         runSpacing: 8,
         children: [
-          for (final n in [5, 4, 3, 2, 1])
+          for (final (size, label) in [(1.0, '기본'), (1.2, '크게'), (1.4, '더 크게')])
             ChoiceChip(
-              label: Text('N$n'),
-              selected: widget.store.targetLevel == n,
+              label: Text(label),
+              selected: widget.store.textScale == size,
               onSelected: _busy
                   ? null
                   : (_) =>
-                        guarded(context, () => widget.store.setTargetLevel(n)),
+                        guarded(context, () => widget.store.setTextScale(size)),
             ),
         ],
       ),
-      const SizedBox(height: 24),
-      const SectionTitle(
-        '하루 새 단어',
-        subtitle: '처음이라면 10개를 권해요. 예정된 복습은 이 한도와 별개예요.',
+      const SizedBox(height: 16),
+      SwitchListTile.adaptive(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('히라가나 읽기 가리기'),
+        subtitle: const Text('단어 상세에서 필요할 때 펼쳐 볼 수 있어요.'),
+        value: widget.store.hideReadings,
+        onChanged: _busy
+            ? null
+            : (v) => guarded(context, () => widget.store.setHideReadings(v)),
       ),
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          for (final n in [5, 10, 15, 20, 30])
-            ChoiceChip(
-              label: Text('$n개'),
-              selected: widget.store.dailyNewLimit == n,
-              onSelected: _busy
-                  ? null
-                  : (_) => guarded(
-                      context,
-                      () => widget.store.setDailyNewLimit(n),
-                    ),
-            ),
-        ],
-      ),
-      const SizedBox(height: 30),
+      const SizedBox(height: 28),
       const SectionTitle(
-        '내 학습 기록',
-        subtitle: '계정 없이 이 기기에 저장해요. 앱 삭제·기기 교체 전 백업하세요.',
+        '책갈피와 읽던 곳 보관',
+        subtitle: '이 기기에 자동으로 저장해요. 다른 기기로 옮길 때 파일로 보관하세요.',
       ),
       Surface(
         child: Column(
@@ -163,25 +148,31 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       ),
-      const SizedBox(height: 30),
-      const SectionTitle('왜 이렇게 배우나요?'),
+      const SizedBox(height: 28),
       const Surface(
         color: mint,
-        child: Text(
-          '• 한자 하나의 모든 음을 외우기보다, 이미 아는 단어의 소리와 글자를 연결해요.\n\n• 정답을 보기 전에 기억해 내는 연습이 핵심이에요. 읽기와 뜻의 복습 간격을 따로 기록해요.\n\n• 한국 한자음은 뜻을 이해하는 다리예요. 일본어 발음을 한국 한자음으로 대체하지 않아요.\n\n• 카드 간격은 답변에 따라 달라져요. 어려운 단어는 짧게, 쉬운 단어는 길게 복습해요.',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('내 페이스에 맞게', style: TextStyle(fontWeight: FontWeight.w700)),
+            SizedBox(height: 10),
+            Text(
+              '관심 있는 급수나 주제를 골라 읽어 보세요. 익숙한 단어는 가볍게 넘기고, 다시 보고 싶은 단어에는 책갈피를 남겨요.\n\n아는 일본어 소리에 한자 모양과 한국어 뜻을 연결해 보세요. 읽던 단어는 다음에 이어서 볼 수 있어요.',
+            ),
+          ],
         ),
       ),
       const SizedBox(height: 24),
       Text(
-        '수록 단어 ${widget.store.cards.length}개 · 한자 풀이 ${widget.store.kanji.length}자',
+        '단어 ${widget.store.cards.length}개 · 한자 풀이 ${widget.store.kanji.length}자',
         style: Theme.of(context).textTheme.titleMedium,
       ),
       const SizedBox(height: 8),
       const Text(
-        '급수는 학습 편의를 위한 추정 분류입니다. JLPT는 공식 어휘·한자 목록을 공개하지 않으며 이 앱은 시험 전체 범위를 보장하지 않습니다.\n\n발음은 기기의 일본어 TTS를 사용합니다. 오프라인 발음에는 일본어 음성 데이터가 필요할 수 있어요.',
+        '급수는 학습용 추정 분류이며 JLPT 전체 범위를 보장하지 않습니다. 한자 풀이는 기초·연결 한자에 제공해요.\n\n발음은 기기의 일본어 TTS를 사용합니다. 오프라인으로 들으려면 일본어 음성 데이터를 설치해야 할 수 있어요.',
         style: TextStyle(fontSize: 12, color: muted),
       ),
-      const SizedBox(height: 20),
+      const SizedBox(height: 16),
       TextButton(
         onPressed: () => showLicensePage(
           context: context,
@@ -195,14 +186,14 @@ class _SettingsPageState extends State<SettingsPage> {
             ? null
             : () async {
                 if (await _confirm(
-                  '학습 기록을 초기화할까요?',
-                  '학습 횟수와 복습 일정을 삭제합니다. 저장한 단어와 학습 설정은 유지합니다. 필요한 기록을 먼저 백업하세요.',
+                  '읽기 기록과 설정을 초기화할까요?',
+                  '책갈피와 읽던 위치를 지우고 표시 설정을 기본값으로 되돌립니다. 필요한 기록은 먼저 백업하세요.',
                 )) {
                   if (!context.mounted) return;
                   await guarded(context, () => widget.store.resetProgress());
                 }
               },
-        child: const Text('학습 기록 초기화', style: TextStyle(color: accent)),
+        child: const Text('읽기 기록·설정 초기화', style: TextStyle(color: accent)),
       ),
     ],
   );

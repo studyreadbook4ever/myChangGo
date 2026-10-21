@@ -76,6 +76,6 @@ png(ROOT / "web/favicon.png", 32)
 manifest = json.loads((ROOT / "web/manifest.json").read_text())
 manifest.update(name="한자 잇다", short_name="한자 잇다", lang="ko",
                 background_color="#FAF8F1", theme_color=GREEN,
-                description="한국인을 위한 일본어 한자 연결 학습")
+                description="한국인을 위한 차분한 일본어 한자 단어장")
 write("web/manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
 print("Native and web monogram icons regenerated.")

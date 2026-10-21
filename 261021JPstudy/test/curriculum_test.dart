@@ -8,30 +8,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
-    'bundled curriculum parses, has all levels, and starts from foundations',
+    'bundled curriculum is unrestricted and persists the reading position',
     () async {
       SharedPreferences.setMockInitialValues({});
       final store = await StudyStore.load();
-      expect(store.cards.length, greaterThanOrEqualTo(1000));
-      expect(store.kanji.length, greaterThanOrEqualTo(120));
+      expect(store.cards.length, 1000);
+      expect(store.kanji.length, 300);
       expect(store.cards.map((c) => c.id).toSet().length, store.cards.length);
       expect(store.cards.map((c) => c.level).toSet(), {1, 2, 3, 4, 5});
-      expect(store.targetLevel, 1);
-      expect(
-        store.buildSession(StudyMode.reading).every((c) => c.level == 5),
-        isTrue,
-      );
-      expect(store.buildSession(StudyMode.reading).length, 10);
+      expect(store.visibleCards.length, 1000);
+      expect(store.lastReadId, isNull);
+      final advanced = store.cards.firstWhere((c) => c.level == 1);
+      await store.markRead(advanced.id);
+      await store.toggleBookmark(advanced.id);
       final backup = store.exportJson();
-      await store.grade(
-        store.cards.first.id,
-        StudyMode.reading,
-        ReviewRating.good,
-      );
       final restored = await StudyStore.load();
-      expect(restored.todayReviewCount, 1);
+      expect(restored.lastReadId, advanced.id);
+      expect(restored.isBookmarked(advanced.id), isTrue);
+      await restored.resetProgress();
+      expect(restored.lastReadId, isNull);
       await restored.importJson(backup);
-      expect(restored.todayReviewCount, 0);
+      expect(restored.lastReadId, advanced.id);
+      expect(restored.isBookmarked(advanced.id), isTrue);
     },
   );
   test(

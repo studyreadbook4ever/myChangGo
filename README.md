@@ -1,4 +1,4 @@
-📱 **[한자 잇다 APK 다운로드](https://github.com/studyreadbook4ever/myChangGo/releases/download/jpstudy-v1.0.0/kanji-itda-v1.0.0.apk)** · N1을 목표로 기초부터 연결하는 Flutter 한자 학습 앱 · [261021JPstudy](261021JPstudy/)
+📱 **[한자 잇다 APK 다운로드](https://github.com/studyreadbook4ever/myChangGo/releases/download/jpstudy-v1.0.0/kanji-itda-v1.0.0.apk)** · N1 목표, 내 속도로 읽는 Flutter 한자 단어장 · [261021JPstudy](261021JPstudy/)
 
 📱 **[DriveMate 안드로이드 APK 바로 다운로드](https://github.com/studyreadbook4ever/myChangGo/releases/download/drivemate-v1.1.0/DriveMate-demo.apk)** — 폰에 설치하고 차량·자체 캘린더·AI 추천 목업을 시연해보세요. [프로젝트 설명·발표 영상](260923CarMockUp/)
 
