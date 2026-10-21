@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:jpstudy/main.dart';
+import 'package:jpstudy/screens/reader.dart';
 import 'package:jpstudy/study_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -71,7 +72,6 @@ void main() {
         stores.add(store);
         expect(store.cards.length, 1000);
         final first = store.cards[0];
-        final second = store.cards[1];
         await tester.pumpWidget(KanjiApp(store: store));
         await tester.pumpAndSettle();
         expect(find.text('내 속도로 읽는 단어장'), findsOneWidget);
@@ -82,6 +82,9 @@ void main() {
         );
         await tester.tap(find.text(first.word));
         await tester.pumpAndSettle();
+        final reader = tester.widget<ReaderPage>(find.byType(ReaderPage));
+        final index = reader.cards.indexWhere((card) => card.id == first.id);
+        final second = reader.cards[index + 1];
         await waitFor(() => store.lastReadId == first.id);
         expect(find.text(first.reading), findsWidgets);
         expect(find.text(first.meaning), findsWidgets);
