@@ -1,0 +1,42 @@
+name: JPstudy Flutter checks
+on:
+  push:
+    paths: ['261021JPstudy/**', '.github/workflows/jpstudy.yml']
+  pull_request:
+    paths: ['261021JPstudy/**', '.github/workflows/jpstudy.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: jpstudy-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: 261021JPstudy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - run: python3 tool/validate_curriculum.py
+      - run: dart format --output=none --set-exit-if-changed lib test integration_test
+      - run: flutter analyze
+      - run: flutter test --concurrency=1
+      - run: flutter build apk --debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jpstudy-debug-apk
+          path: |
+            261021JPstudy/build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 14

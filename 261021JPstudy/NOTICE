@@ -1,0 +1,22 @@
+한자 잇다 / 261021JPstudy
+
+Original application code, original curriculum (vocabulary, examples,
+Korean explanations), and documentation: The Unlicense (see LICENSE).
+This grant applies to this project directory, not to unrelated projects
+elsewhere in the myChangGo repository.
+
+Third-party components retain their respective licenses:
+- Flutter and Dart: BSD-style licenses, https://github.com/flutter/flutter
+- Noto Sans JP / Noto Sans KR: SIL Open Font License 1.1.
+  Original unmodified font files from https://github.com/google/fonts,
+  ofl/notosansjp and ofl/notosanskr. Full notices bundled in assets/fonts/.
+- flutter_tts: MIT, https://pub.dev/packages/flutter_tts
+- shared_preferences: BSD-3-Clause, https://pub.dev/packages/shared_preferences
+- file_picker: MIT, https://pub.dev/packages/file_picker
+- Gradle Wrapper: Apache License 2.0; full upstream LICENSE/NOTICE
+  preserved in android/gradle/wrapper/.
+- Transitive package licenses are collected by Flutter and visible in
+  the application's Settings > Open-source licenses page.
+
+Curriculum levels are unofficial learning estimates. This application
+is not affiliated with or endorsed by the JLPT organizers.
