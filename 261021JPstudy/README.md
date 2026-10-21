@@ -66,7 +66,7 @@ flutter test --concurrency=1
 flutter run
 ```
 
-Android 통합 테스트와 전용 키로 서명하는 릴리스 빌드는 [빌드 안내](docs/building.md), [테스트 기록](docs/testing.md)을 참고하세요. GitHub Actions도 콘텐츠·형식·정적 분석·테스트·Android APK 빌드를 확인합니다.
+Android 통합 테스트와 전용 키로 서명하는 릴리스 빌드는 [빌드 안내](docs/building.md), [테스트 기록](docs/testing.md)을 참고하세요. GitHub Actions도 콘텐츠·형식·정적 분석·테스트·Android APK 빌드를 확인합니다. 소개 문서·검증 기록·스크린샷만 바뀌면 APK 빌드를 반복하지 않습니다.
 
 ```text
 lib/domain.dart          단어·한자 데이터 모델

@@ -33,7 +33,9 @@ flutter test integration_test/android_smoke_test.dart -d <ANDROID_DEVICE_ID>
 - `dart format --output=none --set-exit-if-changed lib test integration_test`: 16개 파일 변경 없음.
 - `flutter analyze`: **No issues found**, 종료 코드 0.
 
-Android·최종 배포 검증은 완료 후 기록합니다.
+- [GitHub Actions 39616876284](https://github.com/studyreadbook4ever/myChangGo/actions/runs/39616876284): 코드 `8aa8944`의 데이터·포맷·정적 분석·50개 테스트·Android 디버그 APK 빌드 모두 성공.
+
+Android 통합·서명 릴리스·최종 배포 검증은 완료 후 기록합니다.
 
 별도 담당자가 전체 1,000개 어휘의 읽기·예문·한국어 뜻 및 300자 한자 풀이를 독립 검토하고 수정했습니다. 전문 사전·언어 교사의 검증을 대체하지는 않습니다.
 

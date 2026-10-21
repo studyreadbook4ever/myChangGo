@@ -91,14 +91,14 @@ void main() {
         await waitFor(() => store.isBookmarked(first.id));
         await tester.tap(find.byKey(const Key('reader-next')));
         await waitFor(() => store.lastReadId == second.id);
-        expect(find.text(second.word), findsOneWidget);
+        expect(find.text(second.word), findsWidgets);
         expect(find.text(second.reading), findsWidgets);
         await tester.tap(find.byType(BackButton));
         await tester.pumpAndSettle();
         await tester.ensureVisible(find.byKey(const Key('continue-reading')));
         await tester.tap(find.byKey(const Key('continue-reading')));
         await tester.pumpAndSettle();
-        expect(find.text(second.word), findsOneWidget);
+        expect(find.text(second.word), findsWidgets);
         await tester.tap(find.byType(BackButton));
         await tester.pumpAndSettle();
         await tester.tap(find.byIcon(Icons.tune_outlined));

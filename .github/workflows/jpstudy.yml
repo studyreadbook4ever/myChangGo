@@ -1,9 +1,19 @@
 name: JPstudy Flutter checks
 on:
   push:
-    paths: ['261021JPstudy/**', '.github/workflows/jpstudy.yml']
+    paths:
+      - '261021JPstudy/**'
+      - '!261021JPstudy/README.md'
+      - '!261021JPstudy/docs/testing.md'
+      - '!261021JPstudy/docs/screenshots/**'
+      - '.github/workflows/jpstudy.yml'
   pull_request:
-    paths: ['261021JPstudy/**', '.github/workflows/jpstudy.yml']
+    paths:
+      - '261021JPstudy/**'
+      - '!261021JPstudy/README.md'
+      - '!261021JPstudy/docs/testing.md'
+      - '!261021JPstudy/docs/screenshots/**'
+      - '.github/workflows/jpstudy.yml'
   workflow_dispatch:
 permissions:
   contents: read
