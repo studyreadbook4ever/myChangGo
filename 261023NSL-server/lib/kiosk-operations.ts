@@ -61,10 +61,10 @@ export async function changeOperation(env:KioskEnv,input:unknown,fetchImpl:typeo
       const now=Date.now();
       // One atomic update authorizes the existing event. Concurrent clicks
       // cannot allocate another event or refresh an already authorized payload.
-      const written=await env.DB.prepare(`UPDATE kiosk_outbox SET payload=json_set(payload,'$.data',json(?),'$.staffApprovedAt',?),status='queued',next_attempt_at=?,last_error=NULL
+      const written=await env.DB.prepare(`UPDATE kiosk_outbox SET url=?,payload=json_set(payload,'$.data',json(?),'$.staffApprovedAt',?),status='queued',next_attempt_at=?,last_error=NULL
         WHERE id=? AND status!='delivered' AND json_extract(payload,'$.staffApprovedAt') IS NULL AND lease_until<=?
         AND NOT EXISTS(SELECT 1 FROM kiosk_operation_states WHERE source_id=? AND stage='closed') RETURNING id`)
-        .bind(service.payload,new Date(now).toISOString(),now,row.id,now,action.sourceId).first();
+        .bind(env.ROBOT_WEBHOOK_URL,service.payload,new Date(now).toISOString(),now,row.id,now,action.sourceId).first();
       if(!written) {
         const current=await env.DB.prepare('SELECT payload,status FROM kiosk_outbox WHERE id=?').bind(row.id).first<{payload:string;status:string}>();
         if(!current||(!JSON.parse(current.payload).staffApprovedAt&&current.status!=='delivered'))throw new KioskError(409,'ROBOT_DELIVERY_BUSY','Refresh this request before sending it.');
