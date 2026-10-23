@@ -275,7 +275,9 @@ test('staff click alone authorizes a service robot event; raw and Korean text su
   assert.equal(history.serviceRequests[0].deliveries.find(d=>d.target==='robot').status,'awaiting_staff');
   assert.equal(wires.length,1,'Customer and staff polling must not authorize a robot');
   assert.equal((await f.api('operations',{action:'send-robot',sourceId},{transport})).status,404,'Public gateway prefix cannot access staff actions');
+  f.env.ROBOT_WEBHOOK_URL='https://separate-robot.example/api/webhooks/orders';
   const results=await Promise.all([changeOperation(f.env,{action:'send-robot',sourceId},transport),changeOperation(f.env,{action:'send-robot',sourceId},transport)]);
+  assert.equal(f.sql.prepare("SELECT url FROM kiosk_outbox WHERE source_id=? AND target='robot'").get(sourceId).url,f.env.ROBOT_WEBHOOK_URL,'First staff approval uses the current robot destination');
   assert.equal(wires.filter(event=>event.target==='robot').length,1);
   assert.equal(received.size,2);assert.ok(results.some(result=>result.duplicate));
   const robot=wires.find(event=>event.target==='robot');
