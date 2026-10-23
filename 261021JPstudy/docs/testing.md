@@ -1,8 +1,21 @@
 # 검증 기록
 
-최종 자율 열람 버전의 검사를 기록합니다.
+## 1.0.1 · 빌드 2
 
-## 재현 명령
+2026-10-22 업데이트:
+
+- `flutter test --concurrency=1`: **59개 모두 통과**, 종료 코드 0.
+- `flutter analyze`: **No issues found**, 종료 코드 0.
+- 단어장 진입·검색·필터 변경 시 무작위 5개를 앞에 표시하고, 나머지 순서와 읽는 동안의 목록을 유지하는 동작을 검사했습니다.
+- 라이선스 화면의 실제 버전 표시가 `pubspec.yaml`과 일치하는 회귀 테스트를 추가했습니다. 앱 안의 버전 표시도 `1.0.1`입니다.
+- 기존 CI는 임시 서명 키의 검증용 APK만 만들기 때문에 정식 배포 APK를 자동으로 갱신하지 않습니다. 정식 업데이트는 최초 배포와 같은 키로 서명합니다.
+- 정식 APK의 인증서·업데이트 설치·기록 보존·공개 다운로드 해시와 소스 커밋은 [1.0.1 릴리스 검증 기록](https://github.com/studyreadbook4ever/myChangGo/releases/tag/jpstudy-v1.0.1)에 함께 기록합니다.
+
+## 1.0.0 · 빌드 1
+
+1.0.0 자율 열람 버전의 검사를 기록합니다.
+
+### 재현 명령
 
 ```sh
 python3 tool/build_curriculum.py --check
@@ -13,7 +26,7 @@ flutter test --concurrency=1
 flutter test integration_test/android_smoke_test.dart -d <ANDROID_DEVICE_ID>
 ```
 
-## 검사 범위
+### 검사 범위
 
 - 저장: 책갈피·마지막 위치·표시 설정, 재시작, 연속 요청 순서, 쓰기 실패 시 상태 보존.
 - 백업: 왕복 복원, 잘못된 형식·ID·설정 거부, 버전 1 이전, 손상 원본 보존, 초기화.
@@ -23,7 +36,7 @@ flutter test integration_test/android_smoke_test.dart -d <ANDROID_DEVICE_ID>
 - 음성: 일본어 음성 없음, 지연/시간 초과, 이동·종료 시 취소.
 - Android: 실제 저장 플러그인과 TTS 연결, 자율 열람, 서명 APK 설치·오프라인 실행·파일 백업.
 
-## 결과
+### 결과
 
 2026-10-21~22 자율 열람 버전:
 
@@ -39,13 +52,13 @@ flutter test integration_test/android_smoke_test.dart -d <ANDROID_DEVICE_ID>
 - API 35 Android 에뮬레이터(비행기 모드)에서 개발 빌드(`97e57eb`) 통합 테스트 **3개 통과**, 종료 코드 0. 실제 저장 플러그인 재로드, 일본어 TTS 사용 가능 여부 조회, 단어 읽기·다음·책갈피·이어 보기, 표시 설정 재로드, 백업→초기화→복원 일치를 확인했습니다.
 - 통합 테스트의 스크롤 후 클릭은 다음 화면 렌더링을 기다리도록 보정한 뒤 재실행했습니다. 테스트 실행 시간은 6초, 마지막 증분 빌드는 82초였습니다.
 
-## 배포에서 발견해 수정한 문제
+### 배포에서 발견해 수정한 문제
 
 디버그 통합 테스트를 통과한 뒤 서명 릴리스 APK를 직접 설치하자 단어장 시작 실패를 발견했습니다. R8 코드 축소가 Dart JNI에서 이름으로 찾는 Kotlin 클래스를 변경한 것이 원인이었습니다. [Pigeon 공식 가이드](https://flutter.googlesource.com/mirrors/packages/+/refs/heads/main/packages/pigeon/native_interop_guide.md)에 따라 필요한 클래스와 메서드를 보존하고, 수정 APK의 오프라인 시작을 확인했습니다. 문제가 있던 APK는 공개하지 않았습니다.
 
 `python3 tool/verify_release_jni.py`는 실제 R8 매핑과 APK DEX 정의를 함께 검사합니다. 수정된 APK는 통과하고, 기존의 잘못된 APK는 수정된 매핑과 조합해도 실패하는 것을 확인했습니다. CI도 임시 서명 키로 축소 릴리스 APK를 빌드해 같은 검사를 수행합니다.
 
-## 배포 APK
+### 배포 APK
 
 - 전용 RSA 4096 릴리스 키로 서명한 `kanji-itda-v1.0.0.apk` 빌드 완료: **64,539,135바이트**.
 - `apksigner verify --verbose --print-certs`: 검증 성공, v2 서명.

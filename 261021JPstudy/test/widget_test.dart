@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -360,6 +361,32 @@ void main() {
     await tester.tap(find.byKey(const Key('reader-reveal')));
     await tester.pumpAndSettle();
     expect(find.text('がっこう'), findsOneWidget);
+    expectNoFlutterErrors(tester);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  testWidgets('license page version matches the packaged app version', (
+    tester,
+  ) async {
+    final expectedVersion = RegExp(
+      r'''^version:\s*['"]?([^'"\s+]+)''',
+      multiLine: true,
+    ).firstMatch(File('pubspec.yaml').readAsStringSync())?.group(1);
+    expect(expectedVersion, isNotNull);
+    final store = await makeStore();
+    await tester.pumpWidget(KanjiApp(store: store));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('설정'));
+    await tester.pumpAndSettle();
+    final licenses = find.text('오픈소스 라이선스');
+    await tester.ensureVisible(licenses);
+    await tester.pumpAndSettle();
+    await tester.tap(licenses);
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<LicensePage>(find.byType(LicensePage)).applicationVersion,
+      expectedVersion,
+    );
+    expect(find.text(expectedVersion!), findsOneWidget);
     expectNoFlutterErrors(tester);
     await tester.pumpWidget(const SizedBox.shrink());
   });

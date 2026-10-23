@@ -177,7 +177,7 @@ class _SettingsPageState extends State<SettingsPage> {
         onPressed: () => showLicensePage(
           context: context,
           applicationName: '한자 잇다',
-          applicationVersion: '1.0.0',
+          applicationVersion: '1.0.1',
         ),
         child: const Text('오픈소스 라이선스'),
       ),
