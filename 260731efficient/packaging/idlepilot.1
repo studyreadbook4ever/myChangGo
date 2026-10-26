@@ -1,0 +1,452 @@
+.TH IDLEPILOT 1 "July 2026" "idlepilot 0.1.0" "User Commands"
+.
+.SH NAME
+idlepilot \- fail-closed, condition-gated process supervision for Linux
+.
+.SH SYNOPSIS
+.B idlepilot
+.I COMMAND
+.RI [ OPTIONS ]
+.
+.SH DESCRIPTION
+.B idlepilot
+starts one reviewed executable without a shell only while every configured
+local condition is proven true.  The built-in Linux probe can require a local
+time window, a systemd-logind idle hint, Wi-Fi carrier, and external power.
+An unknown observation fails closed.
+.PP
+While waiting, conditions are polled at the configured late-poll interval.
+While an action is running, all conditions are rechecked at the configured
+guard interval.  Loss of a guard sends SIGTERM immediately followed by
+SIGKILL to the action process group and terminates the supervisor with exit 7.
+.PP
+The program is Linux-only, refuses root and setuid execution, and has no GUI,
+network listener, or arbitrary-exec control endpoint.  Output is JSON or JSON
+Lines by default.  Add
+.B --human
+for terse text intended for people.
+.PP
+Ordinary command errors are also emitted as JSON, or as human text with
+.BR --human .
+A terminal supervisor error that cannot prove its process group or background
+state writer quiescent emits neither form: it returns only a nonzero exit code
+so a full pipe or journal cannot delay process exit and cgroup cleanup.
+.PP
+Single-result commands and doctor snapshots treat stdout EPIPE as a consumer
+that has closed normally: they do not panic or replace the command's own exit
+decision.  The run JSONL event sink instead treats a write failure as an
+operating-system supervision error.  Consumers must drain run output through
+EOF rather than piping it to an early-exit program such as head.
+.
+.SH COMMANDS
+.TP
+.B init --config PATH --executable PATH --state-file PATH [OPTIONS]
+Create a mode 0600 schema-v1 canonical configuration.  Optional arguments are
+.B --name ID
+and
+.B --working-directory
+.IR PATH ;
+repeatable
+.B --arg VALUE
+and
+.BR --env KEY=VALUE ;
+policies
+.BR --window ,
+.BR --wifi ,
+.BR --power ,
+and
+.BR --idle ;
+timing
+.BR --poll-seconds ,
+.BR --guard-milliseconds ,
+.BR --start-stability-seconds ,
+.BR --idle-seconds ,
+and
+.BR --stop-grace-seconds ;
+runtime
+.B --max-runtime-seconds
+or
+.BR --no-runtime-limit ;
+and retry controls
+.BR --max-attempts-per-window ,
+.BR --retry-on-failure ,
+and
+.BR --no-retry-after-guard-loss .
+Repeated argv order is retained and duplicate environment keys are rejected.
+The executable SHA-256 is calculated and pinned.  Existing configurations are
+not overwritten.  Missing configuration and state parent paths are created
+with mode 0700.  An existing final parent must be a non-symlink directory
+owned by the current user with mode 0700.
+.TP
+.B validate --config PATH
+Parse the configuration, enforce file and runtime-path security invariants,
+and report warnings for weakened conditions or a missing digest pin.
+Digest syntax is checked here; content equality is checked at launch or with
+the explicit digest command.
+.TP
+.B check --config PATH
+Take one complete condition snapshot.  Exit zero only when all conditions are
+met; exit 3 for false or unknown conditions.
+.TP
+.B plan --config PATH
+Read configuration, conditions, executable digest, durable state, and recorded
+process identities without taking the instance lock, reserving an attempt, or
+creating state.  Stable decisions are ready, conditions_blocked,
+artifact_mismatch, daemon_running, recovery_required, already_completed,
+attempts_exhausted, and invalid_snapshot.  Ready exits 0; ordinary no-launch
+decisions exit 3; artifact_mismatch, recovery_required, and invalid_snapshot
+require operator attention and exit 5.  A ready plan is only a snapshot; run
+repeats the lock, digest, and final-guard checks.
+.PP
+Recovery_required includes a persisted fault or, when no owning daemon is
+alive, any persisted action identity.  It remains recovery_required when the
+recorded leader and process group are both gone: process absence cannot prove
+the action's terminal result or absence of external side effects.
+.TP
+.B doctor --config PATH [--watch-seconds N]
+Emit snapshots about once per second for 1 to 3600 seconds (default 30).
+Exit zero if eligibility was observed at least once, otherwise exit 3.  No
+action is started.
+.TP
+.B run --config PATH [--once]
+Run the supervisor and emit JSONL audit events.  Daemon mode waits and polls;
+.B --once
+performs one eligibility decision and reserves at most one durable launch
+intent.  If the final guard remains true and no termination signal arrives,
+the action is launched and monitored synchronously until it exits or is
+stopped.  A final guard change, signal, or crash after intent persistence can
+consume the attempt without an exec.
+.TP
+.B status --config PATH
+Read durable state and verify the daemon PID with its /proc start ticks.
+The JSON includes daemon and action liveness, an action_status classification,
+attention_required, attempt/window counters, PID/PGID observations, last exit
+code or signal, and the state update timestamp.  Valid stopped or attention
+states still exit 0; consumers must inspect the fields.
+.PP
+Stable action_status values are none, recorded_process_running,
+terminal_result_unknown, descendant_group_running, pid_reused,
+identity_incomplete, and launch_intent_unresolved.  Terminal_result_unknown
+means that the recorded leader and group are gone but no durable terminal
+result exists; it has action_alive false and attention_required true.  A
+persisted fault also requires attention even if action_status is none.
+.TP
+.B stop --config PATH [--wait-seconds N]
+Open a pidfd, verify its /proc start ticks, send SIGTERM through that exact
+kernel process handle, and poll the pidfd for 1 to 60 seconds (default 15).
+A missing daemon is a successful no-op.  If pidfd support is unavailable,
+stop fails closed instead of falling back to a race-prone numeric PID signal.
+.TP
+.B digest --file PATH
+Validate a regular input file no larger than 512 MiB and print its SHA-256.
+.TP
+.B import --source PATH --artifact-dir PATH
+Copy a reviewed input into a private content-addressed directory under its
+SHA-256 name with mode 0500.  Import is idempotent for identical content.
+.TP
+.B schema
+Print the stable machine-interface capabilities, plan decisions, API version,
+configuration schema version 1, and durable-state schema version 2.
+.TP
+.B version
+Print the program and API versions.
+.TP
+.B help
+Print command help.
+.PP
+Validation, check, plan, doctor, status, and digest do not create a missing
+directory or state file.  For the configuration-based commands, the configured
+state parent must already be a caller-owned mode 0700 directory.  Init creates
+configuration/state parents.  An explicit run may create only the configured
+private state-parent chain before mutating state and its lock.  Stop does not
+create files but can signal a verified daemon.
+.
+.SH CONFIGURATION
+The UTF-8 format is one
+.I key = value
+per line.  Blank lines and lines beginning with # are ignored.  Values may be
+unquoted or double-quoted; the quoted escapes are backslash, quote, newline,
+carriage return, and tab.  There is no shell, environment-variable, tilde,
+glob, or inline-comment expansion.
+.PP
+All keys below are required except
+.B executable_sha256
+and
+.BR max_runtime_seconds .
+Only
+.B arg
+and
+.B env
+may repeat.
+.TP
+.B schema_version = 1
+Configuration schema.
+.TP
+.B name = ID
+Identifier matching [A-Za-z0-9][A-Za-z0-9._-]{0,63}.
+.TP
+.B executable = PATH
+Absolute path to the regular executable or reviewed shebang script.
+.TP
+.B arg = STRING
+One literal argv entry, in order.  It is never shell-parsed.
+.TP
+.B working_directory = PATH
+Absolute action working directory.
+.TP
+.B env = KEY=value
+One explicit non-secret environment entry.  Inherited environment is cleared.
+Dangerous loader and interpreter keys are rejected.
+.TP
+.B executable_sha256 = HEX
+Optional 64-character lowercase SHA-256 content pin.
+.TP
+.B window = HH:MM-HH:MM
+Half-open local-time interval.  It may cross midnight; equal endpoints are
+rejected.
+.TP
+.B poll_seconds = N
+Waiting-state poll interval, 10 through 600.  No configuration can delay the
+late poll beyond ten minutes.
+.TP
+.B guard_milliseconds = N
+Qualifying/running guard interval, 100 through 250.  The generated default is
+250 ms; the bounded loginctl query also has a 250 ms timeout.  The normal Linux
+adapter targets action-stop initiation within one second, but this is not a
+hard real-time guarantee.
+.TP
+.B start_stability_seconds = N
+Required continuously eligible time before launch, 0 through 300.
+.TP
+.B idle_seconds = N
+Minimum logind-reported idle duration, 0 through 86400.
+.TP
+.B wifi = any|interface:NAME|disabled
+Wi-Fi carrier policy.
+.TP
+.B power = auto|required|ignore
+External-power policy.  Auto requires external power when a system battery or
+portable DMI chassis is discovered.  Without a battery, only an explicitly
+stationary DMI chassis passes without external power.
+.TP
+.B idle = logind-seat:NAME|logind-user|disabled
+Idle provider.
+.TP
+.B stop_grace_seconds = N
+Seconds between process-group TERM and KILL, 1 through 300.
+.TP
+.B max_runtime_seconds = N
+Optional action runtime cap, 1 through 604800.
+.TP
+.B max_attempts_per_window = N
+Durable launch-intent limit per local window, 1 through 100.  The intent is
+persisted before spawn, so a final guard change, termination signal, or crash
+can consume an attempt even when exec does not occur.
+.TP
+.B retry_on_failure = true|false
+Whether a failed action may be attempted again in the same window.
+.TP
+.B retry_after_guard_loss = true|false
+Whether a later supervisor instance may retry after conditions become true
+again in the same window.  An operator SIGINT/SIGTERM shutdown is not a guard
+loss and is not terminally completed solely because this value is false; its
+durably reserved launch attempt still counts on the next evaluation.
+.TP
+.B state_file = PATH
+Absolute durable state path in a caller-owned mode 0700 directory.
+.
+.SH FILE SECURITY
+Security-sensitive paths must be absolute and must not contain dot, dot-dot,
+symlink, or group- or world-writable existing directory components.  Consequently,
+/tmp and /var/tmp are unsuitable.
+.PP
+Configuration and executable files must be regular non-symlink files owned by
+the caller or root and not writable by group or others.  The executable must
+have an execute bit.  The working directory must not be a symlink or group- or
+world-writable.  State directories are caller-owned mode 0700; state and lock
+files are mode 0600.
+.
+.SH DURABLE STATE
+Durable state uses schema version 2 and contains every state key in canonical
+form.  The config_fingerprint preimage is the UTF-8 canonical configuration
+output with every line beginning with `#` removed and each retained line
+terminated by one newline byte.  It therefore binds argv order, environment,
+artifact pin, policies, and state path while ignoring generated comments.  A
+pristine never-initialized state may be unbound; the supervisor binds it at its
+first durable write.
+.PP
+Run, plan, status, and stop reject a fingerprint mismatch before launching or
+signalling.  Changing configuration semantics therefore requires stopping the
+service, verifying that the cgroup and any persisted action are gone,
+preserving and rotating the old state, and starting a new state.  Rotation can
+reset completion and attempt history, so duplicate side effects must be
+reviewed.  Schema-v1 state is not migrated automatically and requires the same
+procedure.
+.PP
+The same evidence-preserving recovery applies to an unresolved launch intent,
+a persisted action without a durable terminal result, and a persisted fault.
+.
+.SH PROCESS CONTRACT
+The action receives null standard input, output, and error, a cleared
+environment, PATH=/usr/bin:/bin, LANG=C.UTF-8, and explicitly configured
+environment entries.  It runs with no_new_privs, core dumps disabled, umask
+0077, and a dedicated POSIX process group.
+.PP
+The action and its descendants must remain in that process group.  Programs
+that call setsid, create a new process group, double-fork, or delegate work to
+an external daemon can escape live guard cleanup and are unsupported.  A
+systemd user service with KillMode=mixed provides cgroup cleanup when the unit
+stops, but this is not a hostile-code sandbox.
+.PP
+After child spawn, executable identity, the dedicated PGID, and process start
+ticks are rechecked.  On failure, cleanup has at most two seconds to prove both
+leader reap and emptiness of a process group proven to be owned by that child.
+If either fact cannot be proved, the error requires process exit and follows
+the terminal no-output path described above.
+.PP
+Before reserving a launch attempt, idlepilot preflights pidfd support on its
+own process.  It opens a child pidfd immediately after spawn and observes exit
+without reaping.  The unreaped leader reserves its numeric PGID while
+/proc process-group field 5 is scanned and descendants are cleaned; the leader
+is reaped only after two empty scans five milliseconds apart show that no
+other group member remains.  Only an exit observed
+before the first stop signal overrides a guard, runtime, or shutdown reason.
+A code-zero status first observed after signalling can be a TERM handler and
+keeps the original stop policy.
+.PP
+After spawn, running state is persisted in the background while action
+monitoring continues.  Its finite deadline is the greater of fifteen seconds and
+the configured guard interval.  Fast actions that already exited after the
+post-spawn observation skip this unnecessary running-state write.  The bound
+allows transient home-storage writeback stalls because launch intent is
+already durable.  If that deadline
+expires, or if an empty
+process group cannot be confirmed after cleanup, idlepilot skips later audit
+and final-state I/O and retains the instance lock until process exit.  An
+embedding caller sees an Error whose requires_process_exit method returns true
+and must terminate immediately without blocking log, flush, or cleanup.  The
+packaged systemd service supplies cgroup cleanup as the backstop.
+.PP
+OS thread creation for the background writer is fallible.  A creation failure
+is returned as an error only after the live action group has been stopped and
+proved empty; uncertain cleanup instead requires immediate process exit.
+.PP
+If an earlier daemon dies after persisting a launch intent but before durable
+action identity or normal final state, the next startup recognizes state with
+phase qualifying, reason launch_intent_persisted, daemon identity, and no
+action identity as unresolved.  It fails closed instead of risking a duplicate
+exec.  Stop and verify the old cgroup and processes, preserve and rotate the
+state file, and only then restart.  This startup security error is an ordinary
+reported error, not a requires-process-exit error in the new process.
+.PP
+Any persisted action identity is also rejected when its owning daemon is gone.
+If its leader and group are gone, status calls the state
+terminal_result_unknown: cleanup may be complete, but success, failure,
+external side effects, and terminal-state persistence remain unknown.  A
+persisted fault is likewise rejected regardless of whether action identity is
+present.  Plan reports recovery_required and supervisor startup fails with a
+security error until the evidence is reviewed and the state is preserved and
+rotated.
+.
+.SH BUILD COMPATIBILITY
+The supported family is 64-bit GNU/Linux with /proc and /sys.  Continuous
+integration executes tests and release packaging on x86-64 Ubuntu GNU/Linux.
+The aarch64-unknown-linux-gnu job is a compile check only; it does not link,
+run, or package the product.  musl targets are not currently validated.
+.PP
+Action supervision and the stop command require Linux pidfd_open,
+pidfd_send_signal, and pidfd polling (Linux 5.3 or newer) on x86-64 or
+aarch64.  Capability is checked before an action launch, and there is no
+numeric-PID fallback.
+.PP
+A native release archive contains an ELF linked against the build host's glibc
+and other system libraries.  It does not promise compatibility with an older
+glibc distribution.  Build on the oldest supported deployment environment or
+produce and smoke-test distribution-specific packages.
+.
+.SH SYSTEMD
+The packaged template expects
+.I %h/.config/idlepilot/%i.conf
+and runs as a user service.  Start an instance with:
+.PP
+.nf
+systemctl --user enable --now idlepilot@NAME.service
+.fi
+.PP
+The template has a strict read-only filesystem view and grants write access to
+private temporary storage and the conventional idlepilot state, share, and
+user-runtime directories.  Add only required output paths with an instance drop-in
+.BR ReadWritePaths= .
+The service restarts after guard-loss and runtime-limit exits so a fresh
+supervisor can resume fail-closed waiting after systemd cgroup cleanup.
+Runtime-limit state is terminal for the current local window; guard-loss state
+is retryable only when configured accordingly.  An unresolved launch intent
+requires operator cleanup verification and state preservation/rotation.  So do
+terminal_result_unknown and persisted fault states; do not blindly restart
+them.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Successful command, completed action, or already-completed window.
+.TP
+.B 2
+Usage or configuration error.
+.TP
+.B 3
+Not eligible, no eligible doctor sample, attempts exhausted, or an ordinary
+plan no-launch decision.
+.TP
+.B 4
+Probe error.
+.TP
+.B 5
+Security invariant failure, including an unresolved launch-intent startup
+fence, unknown durable terminal result, persisted fault,
+configuration/state fingerprint mismatch, or a plan attention decision.
+.TP
+.B 6
+Process error or failed action.
+.TP
+.B 7
+Live guard lost and action stopped.
+.TP
+.B 8
+Runtime cap stopped the action.
+.TP
+.B 70
+State, operating-system, or internal error.
+.TP
+.B 130, 143
+Supervisor terminated by SIGINT or SIGTERM respectively.
+.
+.SH ENVIRONMENT
+The CLI uses the process environment only as normal operating-system context.
+The supervised action does not inherit it.  Configuration paths never expand
+HOME or other environment variables.
+.
+.SH FILES
+.TP
+.I %h/.config/idlepilot/NAME.conf
+Conventional per-instance configuration used by the packaged user unit.
+.TP
+.I %h/.local/state/idlepilot/NAME.state
+Recommended durable state location.
+.TP
+.I %h/.local/lib/idlepilot/artifacts/SHA256
+Recommended content-addressed action location.
+.TP
+.I %h/.local/share/idlepilot/
+Default packaged-unit writable workspace root.
+.
+.SH SEE ALSO
+.BR loginctl (1),
+.BR systemd.service (5),
+.BR systemd.exec (5)
+.
+.SH THIRD-PARTY COMPONENTS
+The Rust standard library, glibc, libgcc, and other toolchain or system
+components linked into a binary retain their own copyright and license terms.
+Release archives include the exact Rust standard-library notice bundle and an
+SPDX SBOM that records static and dynamic link relationships; see
+THIRD_PARTY.md and NOTICE in the installed documentation.
