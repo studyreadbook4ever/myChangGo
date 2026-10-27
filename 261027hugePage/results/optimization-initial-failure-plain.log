@@ -1,0 +1,75 @@
+test_address_space_and_memlock_residuals (test_capacity.CapacityTests.test_address_space_and_memlock_residuals) ... ok
+test_ancestor_cgroup_limit_reserves_room_inside_cgroup (test_capacity.CapacityTests.test_ancestor_cgroup_limit_reserves_room_inside_cgroup) ... ok
+test_host_safety_reserve_and_explicit_cap (test_capacity.CapacityTests.test_host_safety_reserve_and_explicit_cap) ... ok
+test_hugetlb_free_reservations_and_both_controller_limits (test_capacity.CapacityTests.test_hugetlb_free_reservations_and_both_controller_limits) ... ok
+test_hugetlb_memory_controller_accounting_mount_option (test_capacity.CapacityTests.test_hugetlb_memory_controller_accounting_mount_option) ... ok
+test_missing_or_malformed_required_data_fails_closed (test_capacity.CapacityTests.test_missing_or_malformed_required_data_fails_closed) ... ok
+test_mount_root_and_escaped_mount_point (test_capacity.CapacityTests.test_mount_root_and_escaped_mount_point) ... ok
+test_widest_mount_keeps_visible_parent_limits (test_capacity.CapacityTests.test_widest_mount_keeps_visible_parent_limits) ... ok
+test_all_matching_leases_are_invalid_before_first_refill (test_deny_batch.DenyBatchTests.test_all_matching_leases_are_invalid_before_first_refill) ... ok
+test_daemon_error_to_errno (test_native.NativeClientTests.test_daemon_error_to_errno) ... ok
+test_rejects_bad_ancillary_data_without_leaks (test_native.NativeClientTests.test_rejects_bad_ancillary_data_without_leaks) ... ok
+test_rejects_malformed_metadata_without_leaks (test_native.NativeClientTests.test_rejects_malformed_metadata_without_leaks) ... ok
+test_release_after_revoke (test_native.NativeClientTests.test_release_after_revoke) ... ok
+test_shared_mapping_and_idempotent_release (test_native.NativeClientTests.test_shared_mapping_and_idempotent_release) ... ok
+test_abrupt_daemon_death_does_not_claim_revocation (test_protocol.ProtocolTests.test_abrupt_daemon_death_does_not_claim_revocation) ... ok
+test_ancillary_fd_rejection_and_no_descriptor_leak (test_protocol.ProtocolTests.test_ancillary_fd_rejection_and_no_descriptor_leak) ... ok
+test_client_cannot_grow_active_lease_or_block_revocation_with_seals (test_protocol.ProtocolTests.test_client_cannot_grow_active_lease_or_block_revocation_with_seals) ... ok
+test_concurrent_exclusive_slots_and_zeroing (test_protocol.ProtocolTests.test_concurrent_exclusive_slots_and_zeroing) ... ok
+test_data_and_admin_command_separation (test_protocol.ProtocolTests.test_data_and_admin_command_separation) ... ok
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ERROR
+/usr/lib/python3.14/unittest/case.py:668: ResourceWarning: unclosed <socket.socket fd=69, family=1, type=5, proto=0>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+test_deny_revokes_all_leases_and_allow_restores (test_protocol.ProtocolTests.test_deny_revokes_all_leases_and_allow_restores) ... ok
+test_disconnect_releases_and_zeroes (test_protocol.ProtocolTests.test_disconnect_releases_and_zeroes) ... ok
+test_explicit_authorization_and_socket_permissions (test_protocol.ProtocolTests.test_explicit_authorization_and_socket_permissions) ... ok
+test_free_returns_entire_pool_and_invalidates_active_mappings (test_protocol.ProtocolTests.test_free_returns_entire_pool_and_invalidates_active_mappings) ... ok
+test_lease_ownership_and_pool_exhaustion (test_protocol.ProtocolTests.test_lease_ownership_and_pool_exhaustion) ... ok
+test_malformed_packets_and_truncation_do_not_mutate (test_protocol.ProtocolTests.test_malformed_packets_and_truncation_do_not_mutate) ... ok
+test_nonreading_client_cannot_stall_other_clients (test_protocol.ProtocolTests.test_nonreading_client_cannot_stall_other_clients) ... ok
+test_normal_shutdown_invalidates_and_removes_sockets (test_protocol.ProtocolTests.test_normal_shutdown_invalidates_and_removes_sockets) ... ok
+test_release_zeroes_replacement_and_prevents_fd_regrowth (test_protocol.ProtocolTests.test_release_zeroes_replacement_and_prevents_fd_regrowth) ... ok
+test_resize_busy_and_allocation_rollback (test_protocol.ProtocolTests.test_resize_busy_and_allocation_rollback) ... ok
+test_revocation_invalidates_a_live_mapping_with_sigbus (test_protocol.ProtocolTests.test_revocation_invalidates_a_live_mapping_with_sigbus) ... ok
+test_rejects_unsafe_socket_parent (test_protocol.StartupTests.test_rejects_unsafe_socket_parent) ... ok
+test_resize_allocation_failure_rolls_back_partially_built_pool (test_protocol.StartupTests.test_resize_allocation_failure_rolls_back_partially_built_pool) ... ok
+test_strict_hugetlb_does_not_silently_fallback (test_protocol.StartupTests.test_strict_hugetlb_does_not_silently_fallback) ... ok
+test_native_release_failure_unmaps_and_closes_every_descriptor (test_review.ReleaseFailureTests.test_native_release_failure_unmaps_and_closes_every_descriptor) ... ok
+test_python_release_failure_still_closes_mapping_and_connection (test_review.ReleaseFailureTests.test_python_release_failure_still_closes_mapping_and_connection) ... ok
+test_cli_status_and_demo (test_sdk.SdkTests.test_cli_status_and_demo) ... ok
+test_context_manager_releases_on_body_exception (test_sdk.SdkTests.test_context_manager_releases_on_body_exception) ... ok
+test_denied_then_context_manager_roundtrip (test_sdk.SdkTests.test_denied_then_context_manager_roundtrip) ... ok
+test_exported_buffer_prevents_unsafe_close_and_pins_owner (test_sdk.SdkTests.test_exported_buffer_prevents_unsafe_close_and_pins_owner) ... ok
+test_gc_keeps_exported_buffer_live_then_reclaims_dropped_lease (test_sdk.SdkTests.test_gc_keeps_exported_buffer_live_then_reclaims_dropped_lease) ... ok
+test_native_static_table_load_lookup_scan_and_release (test_sdk.SdkTests.test_native_static_table_load_lookup_scan_and_release) ... ok
+test_revoked_lease_can_be_closed_without_reading_stale_mapping (test_sdk.SdkTests.test_revoked_lease_can_be_closed_without_reading_stale_mapping) ... ok
+test_unreachable_unclosed_lease_closes_received_descriptor (test_sdk.SdkTests.test_unreachable_unclosed_lease_closes_received_descriptor) ... ok
+test_explicit_legacy_slot_sizing_remains_noninteractive (test_startup.StartupTests.test_explicit_legacy_slot_sizing_remains_noninteractive) ... ok
+test_four_pages_split_into_two_four_mib_slots (test_startup.StartupTests.test_four_pages_split_into_two_four_mib_slots) ... ok
+test_invalid_or_indivisible_page_counts_fail_before_startup (test_startup.StartupTests.test_invalid_or_indivisible_page_counts_fail_before_startup) ... ok
+test_missing_page_count_defaults_to_no_on_empty_answer (test_startup.StartupTests.test_missing_page_count_defaults_to_no_on_empty_answer) ... ok
+test_missing_page_count_rejects_explicit_no_and_unknown_answer (test_startup.StartupTests.test_missing_page_count_rejects_explicit_no_and_unknown_answer) ... ok
+test_piped_yes_cannot_authorize_an_unspecified_allocation (test_startup.StartupTests.test_piped_yes_cannot_authorize_an_unspecified_allocation) ... ok
+test_terminal_y_and_yes_allocate_only_the_configured_maximum (test_startup.StartupTests.test_terminal_y_and_yes_allocate_only_the_configured_maximum) ... ok
+test_too_few_file_descriptors_rejects_startup_and_cleans_sockets (test_startup.StartupTests.test_too_few_file_descriptors_rejects_startup_and_cleans_sockets) ... ok
+test_two_pages_create_one_four_mib_slot_without_confirmation (test_startup.StartupTests.test_two_pages_create_one_four_mib_slot_without_confirmation) ... ok
+
+======================================================================
+ERROR: test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/tempest/261027/hugekeeper/tests/test_protocol.py", line 408, in test_data_connection_pressure_preserves_admin_and_idle_cpu
+    self.client()
+    ~~~~~~~~~~~^^
+  File "/home/tempest/261027/hugekeeper/tests/test_protocol.py", line 120, in client
+    s = connect(str(self.path) + (".admin" if admin else ""))
+  File "/home/tempest/261027/hugekeeper/tests/test_protocol.py", line 35, in connect
+    s.connect(str(path))
+    ~~~~~~~~~^^^^^^^^^^^
+BlockingIOError: [Errno 11] Resource temporarily unavailable
+
+----------------------------------------------------------------------
+Ran 53 tests in 3.223s
+
+FAILED (errors=1)

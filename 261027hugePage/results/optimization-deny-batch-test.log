@@ -1,0 +1,6 @@
+test_all_matching_leases_are_invalid_before_first_refill (test_deny_batch.DenyBatchTests.test_all_matching_leases_are_invalid_before_first_refill) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.093s
+
+OK

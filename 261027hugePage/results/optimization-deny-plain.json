@@ -1,0 +1,300 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-27T06:39:52.833727+00:00",
+  "host": {
+    "platform": "Linux-7.0.10-arch1-1-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "cpu_count": 4,
+    "uid": 1000,
+    "clock_ticks_per_second": 100,
+    "load_average": [
+      0.90283203125,
+      1.8349609375,
+      2.42138671875
+    ],
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "cpu_model": "Intel(R) Celeron(R) N5095 @ 2.00GHz",
+    "hugepage_meminfo": {
+      "AnonHugePages": "292864 kB",
+      "ShmemHugePages": "428032 kB",
+      "ShmemPmdMapped": "114688 kB",
+      "HugePages_Total": "0",
+      "HugePages_Free": "0",
+      "HugePages_Rsvd": "0",
+      "HugePages_Surp": "0",
+      "Hugepagesize": "2048 kB",
+      "Hugetlb": "0 kB"
+    },
+    "thp_enabled": "[always] madvise never",
+    "thp_shmem_enabled": "always [within_size] advise never deny force",
+    "thp_defrag": "always defer defer+madvise [madvise] never"
+  },
+  "binaries": {
+    "before": {
+      "path": "/home/tempest/261027/hugekeeper/build/hugekeeperd-before-opt",
+      "sha256": "21b41b65f15b6a4a705da0719a90e9622f7db776f35708f6c76e46cab2f9a820"
+    },
+    "after": {
+      "path": "/home/tempest/261027/hugekeeper/build/hugekeeperd",
+      "sha256": "c9d944affcdafa3b1ebcceb8db38ad7bebb4a0b5f1888fcc77997a6bb533e795"
+    }
+  },
+  "backend": "plain",
+  "config": {
+    "slots": 8,
+    "slot_mib": 16,
+    "pool_mib": 128,
+    "rounds": 8,
+    "warmup_runs_per_binary": 1
+  },
+  "method": "Alternate before/after order each round; start one fresh daemon per sample. Hold every slot, issue DENY, observe the last stale FD's size becoming zero, then await the reply after replacement prefaults finish.",
+  "limitations": [
+    "Single-host control-plane benchmark; no claim about SQL or memory traversal speed.",
+    "Observer polls fstat in Python and consumes one CPU while waiting; scheduling and IPC overhead are included in both variants.",
+    "The last-FD timing measures its size becoming zero; DENY still replies only after refilling.",
+    "Timed leases hold FDs without client mmap views. The observer detects file size zero, not the completion of TLB invalidation in arbitrary client mappings.",
+    "THP remains a hint. Initial observed backing is recorded for each sample."
+  ],
+  "samples": [
+    {
+      "last_lease_invalidated_ns": 72752284,
+      "deny_reply_after_refill_ns": 83275938,
+      "fd_size_polls": 47840,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 1,
+      "variant": "before"
+    },
+    {
+      "last_lease_invalidated_ns": 14234682,
+      "deny_reply_after_refill_ns": 83404423,
+      "fd_size_polls": 8853,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 1,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 15347450,
+      "deny_reply_after_refill_ns": 85528196,
+      "fd_size_polls": 9986,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 2,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 74032219,
+      "deny_reply_after_refill_ns": 84669321,
+      "fd_size_polls": 47766,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 2,
+      "variant": "before"
+    },
+    {
+      "last_lease_invalidated_ns": 76930465,
+      "deny_reply_after_refill_ns": 86729895,
+      "fd_size_polls": 48025,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 3,
+      "variant": "before"
+    },
+    {
+      "last_lease_invalidated_ns": 15527997,
+      "deny_reply_after_refill_ns": 98749036,
+      "fd_size_polls": 10210,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 3,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 21128240,
+      "deny_reply_after_refill_ns": 99613793,
+      "fd_size_polls": 11508,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 4,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 76469244,
+      "deny_reply_after_refill_ns": 86344296,
+      "fd_size_polls": 43609,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 4,
+      "variant": "before"
+    },
+    {
+      "last_lease_invalidated_ns": 72702837,
+      "deny_reply_after_refill_ns": 83397668,
+      "fd_size_polls": 44150,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 5,
+      "variant": "before"
+    },
+    {
+      "last_lease_invalidated_ns": 12489785,
+      "deny_reply_after_refill_ns": 84562580,
+      "fd_size_polls": 8308,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 5,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 12919005,
+      "deny_reply_after_refill_ns": 82258926,
+      "fd_size_polls": 8595,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 6,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 67220608,
+      "deny_reply_after_refill_ns": 77238625,
+      "fd_size_polls": 43967,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 6,
+      "variant": "before"
+    },
+    {
+      "last_lease_invalidated_ns": 98077504,
+      "deny_reply_after_refill_ns": 116347712,
+      "fd_size_polls": 47160,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 7,
+      "variant": "before"
+    },
+    {
+      "last_lease_invalidated_ns": 17274840,
+      "deny_reply_after_refill_ns": 97386569,
+      "fd_size_polls": 11256,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 7,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 12501209,
+      "deny_reply_after_refill_ns": 83458217,
+      "fd_size_polls": 6161,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 8,
+      "variant": "after"
+    },
+    {
+      "last_lease_invalidated_ns": 72007933,
+      "deny_reply_after_refill_ns": 82084906,
+      "fd_size_polls": 43604,
+      "initial_resident_bytes": 134217728,
+      "initial_hugetlb_bytes": 0,
+      "initial_thp_mapped_bytes": 0,
+      "ready_after": 8,
+      "degraded_after": 0,
+      "round": 8,
+      "variant": "before"
+    }
+  ],
+  "summary": {
+    "before": {
+      "last_lease_invalidated": {
+        "samples": 8,
+        "p50_us": 73392.2515,
+        "p95_us": 98077.504,
+        "p99_us": 98077.504,
+        "mean_us": 76274.13675,
+        "min_us": 67220.608,
+        "max_us": 98077.504
+      },
+      "deny_reply_after_refill": {
+        "samples": 8,
+        "p50_us": 84033.4945,
+        "p95_us": 116347.712,
+        "p99_us": 116347.712,
+        "mean_us": 87511.045125,
+        "min_us": 77238.625,
+        "max_us": 116347.712
+      }
+    },
+    "after": {
+      "last_lease_invalidated": {
+        "samples": 8,
+        "p50_us": 14791.066,
+        "p95_us": 21128.24,
+        "p99_us": 21128.24,
+        "mean_us": 15177.901,
+        "min_us": 12489.785,
+        "max_us": 21128.24
+      },
+      "deny_reply_after_refill": {
+        "samples": 8,
+        "p50_us": 85045.388,
+        "p95_us": 99613.793,
+        "p99_us": 99613.793,
+        "mean_us": 89370.2175,
+        "min_us": 82258.926,
+        "max_us": 99613.793
+      }
+    }
+  },
+  "last_lease_invalidation_median_reduction_percent": 79.8465564174714
+}

@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "recorded_at": "2026-10-27T07:07:59.038819+00:00",
+  "runs": [
+    {
+      "name": "plain",
+      "backend": "plain",
+      "command": [
+        "/usr/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "environment": {
+        "PYTHONPATH": "python",
+        "HUGEKEEPER_BIN": "/home/tempest/261027/hugekeeper/build/hugekeeperd",
+        "HUGEKEEPER_TEST_BACKEND": "plain"
+      },
+      "exit_code": 0,
+      "tests_run": 53,
+      "elapsed_seconds": 6.769304702000227,
+      "skipped": 0,
+      "log": "results/tests-host-plain.log",
+      "daemon_sha256": "c9d944affcdafa3b1ebcceb8db38ad7bebb4a0b5f1888fcc77997a6bb533e795"
+    },
+    {
+      "name": "thp",
+      "backend": "thp",
+      "command": [
+        "/usr/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "environment": {
+        "PYTHONPATH": "python",
+        "HUGEKEEPER_BIN": "/home/tempest/261027/hugekeeper/build/hugekeeperd",
+        "HUGEKEEPER_TEST_BACKEND": "thp"
+      },
+      "exit_code": 0,
+      "tests_run": 53,
+      "elapsed_seconds": 5.948382638000112,
+      "skipped": 0,
+      "log": "results/tests-host-thp.log",
+      "daemon_sha256": "c9d944affcdafa3b1ebcceb8db38ad7bebb4a0b5f1888fcc77997a6bb533e795"
+    },
+    {
+      "name": "asan",
+      "backend": "plain",
+      "command": [
+        "/usr/bin/python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "environment": {
+        "PYTHONPATH": "python",
+        "HUGEKEEPER_BIN": "/home/tempest/261027/hugekeeper/build/hugekeeperd-asan",
+        "HUGEKEEPER_TEST_BACKEND": "plain"
+      },
+      "exit_code": 0,
+      "tests_run": 52,
+      "elapsed_seconds": 7.246260380001331,
+      "skipped": 2,
+      "log": "results/tests-host-asan.log",
+      "daemon_sha256": "483728684d5c9157d8e4eea1f06431c6d47c9a72d60cde5dfd1258da2544815a"
+    }
+  ],
+  "ok": true
+}

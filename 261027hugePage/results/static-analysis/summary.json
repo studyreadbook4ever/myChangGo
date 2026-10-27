@@ -1,0 +1,24 @@
+{
+  "recorded_at": "2026-10-27T07:08:43.168531+00:00",
+  "tool": "clang version 22.1.5",
+  "commands": [
+    "clang --analyze -std=c11 -Wall -Wextra -Iinclude src/daemon.c -o results/static-analysis/daemon.plist",
+    "clang --analyze -std=c11 -Wall -Wextra -Iinclude src/capacity.c -o results/static-analysis/capacity.plist",
+    "clang --analyze -std=c11 -Wall -Wextra -Iinclude src/client.c -o results/static-analysis/client.plist"
+  ],
+  "warnings": [
+    {
+      "file": "src/daemon.c",
+      "line": 246,
+      "check": "core.NullDereference",
+      "message": "Dereference of null pointer (loaded from variable hugetlb)",
+      "disposition": "unreachable standalone-analysis path in current program",
+      "evidence": "memory_stats is static with exactly one call at daemon.c:261; that call passes addresses of three distinct initialized live size_t locals. The function does not escape through a pointer. The reported path instead assumes hugetlb=NULL after counter=hugetlb.",
+      "review": "Root inspection and independent source review agree; no runtime change made only to suppress this warning."
+    }
+  ],
+  "other_translation_units": {
+    "capacity.c": "no diagnostics",
+    "client.c": "no diagnostics"
+  }
+}

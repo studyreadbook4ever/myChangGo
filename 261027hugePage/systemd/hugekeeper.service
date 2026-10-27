@@ -1,0 +1,33 @@
+[Unit]
+Description=Hugekeeper explicit hugepage memory broker
+Documentation=file:/usr/local/share/doc/hugekeeper/README.md
+After=local-fs.target
+
+[Service]
+Type=simple
+User=hugekeeper
+Group=hugekeeper
+RuntimeDirectory=hugekeeper
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/bin/hugekeeperd --socket /run/hugekeeper/pool.sock --backend hugetlb --pages 32 --slots 4 --max-mib 1024
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_IPC_LOCK
+AmbientCapabilities=CAP_IPC_LOCK
+LimitMEMLOCK=1073741824
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,162 @@
+Pressure test repeated on CPU 0; parent and daemon inherit one CPU to exercise backlog pressure.
+[plain 1/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.280s
+
+OK
+
+[plain 2/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.270s
+
+OK
+
+[plain 3/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.268s
+
+OK
+
+[plain 4/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.272s
+
+OK
+
+[plain 5/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.278s
+
+OK
+
+[plain 6/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.280s
+
+OK
+
+[plain 7/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.279s
+
+OK
+
+[plain 8/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.268s
+
+OK
+
+[plain 9/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.273s
+
+OK
+
+[plain 10/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.274s
+
+OK
+
+[asan 1/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.306s
+
+OK
+
+[asan 2/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.307s
+
+OK
+
+[asan 3/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.303s
+
+OK
+
+[asan 4/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.303s
+
+OK
+
+[asan 5/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.295s
+
+OK
+
+[asan 6/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.308s
+
+OK
+
+[asan 7/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.310s
+
+OK
+
+[asan 8/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.305s
+
+OK
+
+[asan 9/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.309s
+
+OK
+
+[asan 10/10] exit=0
+test_data_connection_pressure_preserves_admin_and_idle_cpu (test_protocol.ProtocolTests.test_data_connection_pressure_preserves_admin_and_idle_cpu) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.305s
+
+OK
+
+PRESSURE_REPEAT_PASS runs=20

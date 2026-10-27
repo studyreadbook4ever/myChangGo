@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-27T06:22:04.931096+00:00",
+  "daemon_sha256": "21b41b65f15b6a4a705da0719a90e9622f7db776f35708f6c76e46cab2f9a820",
+  "tests": {
+    "schema_version": 1,
+    "recorded_at": "2026-10-27T06:20:38.563075+00:00",
+    "runs": [
+      {
+        "name": "plain",
+        "backend": "plain",
+        "command": [
+          "make",
+          "test"
+        ],
+        "environment": {
+          "HUGEKEEPER_BIN": "build/hugekeeperd",
+          "HUGEKEEPER_TEST_BACKEND": "plain"
+        },
+        "exit_code": 0,
+        "tests_run": 50,
+        "elapsed_seconds": 2.662,
+        "skipped": 0,
+        "log": "results/tests-host-plain.log",
+        "daemon_sha256": "21b41b65f15b6a4a705da0719a90e9622f7db776f35708f6c76e46cab2f9a820"
+      },
+      {
+        "name": "thp",
+        "backend": "thp",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-v"
+        ],
+        "environment": {
+          "HUGEKEEPER_BIN": "build/hugekeeperd",
+          "HUGEKEEPER_TEST_BACKEND": "thp"
+        },
+        "exit_code": 0,
+        "tests_run": 50,
+        "elapsed_seconds": 3.686,
+        "skipped": 0,
+        "log": "results/tests-host-thp.log",
+        "daemon_sha256": "21b41b65f15b6a4a705da0719a90e9622f7db776f35708f6c76e46cab2f9a820"
+      },
+      {
+        "name": "asan",
+        "backend": "plain",
+        "command": [
+          "/usr/bin/python3",
+          "-m",
+          "unittest",
+          "discover",
+          "-s",
+          "tests",
+          "-v"
+        ],
+        "environment": {
+          "HUGEKEEPER_BIN": "build/hugekeeperd-asan",
+          "HUGEKEEPER_TEST_BACKEND": "plain"
+        },
+        "exit_code": 0,
+        "tests_run": 50,
+        "elapsed_seconds": 5.016,
+        "skipped": 1,
+        "log": "results/tests-host-asan.log",
+        "daemon_sha256": "ddf490b399d1c403a76f82aeb6dce5b7371123a78d9b2568f5693bbac02b88f2"
+      }
+    ],
+    "ok": true
+  },
+  "backends": {
+    "plain": {
+      "benchmark_artifact": "results/benchmark-host-plain.json",
+      "stress_artifact": "results/stress-host-plain.json",
+      "acquire": {
+        "samples": 300,
+        "p50_us": 66.826,
+        "p95_us": 191.476,
+        "p99_us": 432.334,
+        "mean_us": 87.47104333333334,
+        "min_us": 37.429,
+        "max_us": 497.373
+      },
+      "release_and_replace": {
+        "samples": 300,
+        "p50_us": 1375.3995,
+        "p95_us": 2598.542,
+        "p99_us": 5628.963,
+        "mean_us": 1551.3893033333331,
+        "min_us": 1004.261,
+        "max_us": 5860.5
+      },
+      "idle": {
+        "wall_seconds": 2.0001184979992104,
+        "cpu_ticks": 0,
+        "cpu_seconds": 0.0,
+        "percent_of_one_cpu": 0.0,
+        "resolution_seconds": 0.01
+      },
+      "backing": {
+        "pool_bytes": 4194304,
+        "resident_bytes": 4194304,
+        "hugetlb_bytes": 0,
+        "thp_mapped_bytes": 0
+      },
+      "daemon_rss_kib": 5892,
+      "stress_ok": true,
+      "stress_total_leases": 4000,
+      "stress_operations": {
+        "release": 2353,
+        "disconnect": 1210,
+        "revoke": 437,
+        "empty_retries": 2572
+      },
+      "stress_elapsed_seconds": 13.420134445999793,
+      "stress_final_status": {
+        "ok": true,
+        "backend": "plain",
+        "slot_bytes": 2097152,
+        "capacity": 4,
+        "ready": 4,
+        "leased": 0,
+        "degraded": 0,
+        "pool_bytes": 8388608,
+        "pid": 16865,
+        "locked": false,
+        "memory_observed": true,
+        "resident_bytes": 8388608,
+        "hugetlb_bytes": 0,
+        "thp_mapped_bytes": 0,
+        "page_bytes": 2097152,
+        "total_pages": 4,
+        "ready_pages": 4,
+        "leased_pages": 0,
+        "allowed_uids": [
+          1000
+        ],
+        "leases": []
+      }
+    },
+    "thp": {
+      "benchmark_artifact": "results/benchmark-host-thp.json",
+      "stress_artifact": "results/stress-host-thp.json",
+      "acquire": {
+        "samples": 300,
+        "p50_us": 64.826,
+        "p95_us": 193.731,
+        "p99_us": 687.174,
+        "mean_us": 89.51213333333334,
+        "min_us": 38.524,
+        "max_us": 1064.613
+      },
+      "release_and_replace": {
+        "samples": 300,
+        "p50_us": 590.6795,
+        "p95_us": 1545.637,
+        "p99_us": 2678.01,
+        "mean_us": 735.52321,
+        "min_us": 397.766,
+        "max_us": 2730.674
+      },
+      "idle": {
+        "wall_seconds": 2.000139110999953,
+        "cpu_ticks": 0,
+        "cpu_seconds": 0.0,
+        "percent_of_one_cpu": 0.0,
+        "resolution_seconds": 0.01
+      },
+      "backing": {
+        "pool_bytes": 4194304,
+        "resident_bytes": 4194304,
+        "hugetlb_bytes": 0,
+        "thp_mapped_bytes": 4194304
+      },
+      "daemon_rss_kib": 5888,
+      "stress_ok": true,
+      "stress_total_leases": 4000,
+      "stress_operations": {
+        "release": 2331,
+        "disconnect": 1218,
+        "revoke": 451,
+        "empty_retries": 2415
+      },
+      "stress_elapsed_seconds": 7.622749689000557,
+      "stress_final_status": {
+        "ok": true,
+        "backend": "thp",
+        "slot_bytes": 2097152,
+        "capacity": 4,
+        "ready": 4,
+        "leased": 0,
+        "degraded": 0,
+        "pool_bytes": 8388608,
+        "pid": 16866,
+        "locked": false,
+        "memory_observed": true,
+        "resident_bytes": 8388608,
+        "hugetlb_bytes": 0,
+        "thp_mapped_bytes": 8388608,
+        "page_bytes": 2097152,
+        "total_pages": 4,
+        "ready_pages": 4,
+        "leased_pages": 0,
+        "allowed_uids": [
+          1000
+        ],
+        "leases": []
+      }
+    }
+  },
+  "limitations": [
+    "Host has no reserved HugeTLB pool; true HugeTLB validation ran separately in the disposable QEMU guest.",
+    "Latency includes Python and Unix socket overhead; small-pool cache-hot scans do not establish SQL workload speedups.",
+    "Zero idle ticks means below the 10ms CPU accounting resolution over the two-second sample.",
+    "Descriptor leak stress uses a bounded RLIMIT_NOFILE; /proc descriptor enumeration is blocked by daemon dumpability hardening.",
+    "Sanitizer skips RLIMIT_AS allocation fault injection because ASan reserves a large address space."
+  ],
+  "all_host_checks_passed": true
+}

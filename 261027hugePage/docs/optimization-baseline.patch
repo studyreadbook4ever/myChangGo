@@ -1,0 +1,60 @@
+--- daemon.c
++++ daemon.c
+@@ -220,26 +220,16 @@
+     bool ours = false;
+     size_t rss = 0;
+     while (fgets(line, sizeof(line), f)) {
+-        /* A mapping header starts with a hex address immediately followed by
+-         * '-'. All metric lines have a colon. Avoid scanf on every smaps row. */
+-        size_t hex = strspn(line, "0123456789abcdefABCDEF");
+-        if (hex && line[hex] == '-') {
++        unsigned long start, end, kb;
++        if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+             ours = strstr(line, "/memfd:hugekeeper (deleted)") != NULL;
+             continue;
+         }
+         if (!ours) continue;
+-        const char *value = NULL;
+-        size_t *counter = NULL;
+-        if (!strncmp(line, "Rss:", 4)) { value = line + 4; counter = &rss; }
+-        else if (!strncmp(line, "Shared_Hugetlb:", 15)) { value = line + 15; counter = hugetlb; }
+-        else if (!strncmp(line, "Private_Hugetlb:", 16)) { value = line + 16; counter = hugetlb; }
+-        else if (!strncmp(line, "ShmemPmdMapped:", 15)) { value = line + 15; counter = thp; }
+-        if (counter) {
+-            char *end;
+-            unsigned long long kb = strtoull(value, &end, 10);
+-            if (end != value && kb <= (SIZE_MAX - *counter) / 1024)
+-                *counter += (size_t)kb * 1024;
+-        }
++        if (sscanf(line, "Rss: %lu kB", &kb) == 1) rss += (size_t)kb * 1024;
++        else if (sscanf(line, "Shared_Hugetlb: %lu kB", &kb) == 1 ||
++                 sscanf(line, "Private_Hugetlb: %lu kB", &kb) == 1) *hugetlb += (size_t)kb * 1024;
++        else if (sscanf(line, "ShmemPmdMapped: %lu kB", &kb) == 1) *thp += (size_t)kb * 1024;
+     }
+     bool success = !ferror(f);
+     fclose(f);
+@@ -386,21 +376,11 @@
+         for (size_t i = 0; i < allowed_count; i++) {
+             if (allowed[i] == (uid_t)value) { allowed[i] = allowed[--allowed_count]; break; }
+         }
+-        unsigned revoked[MAX_SLOTS], count = 0;
+         for (unsigned i = 0; i < MAX_SLOTS; i++) {
+             struct slot *s = &slots[i];
+-            if (s->lease && clients[s->owner].cred.uid == (uid_t)value) {
+-                if (!discard_slot(s)) {
+-                    error_reply(index, "internal", "Revocation failed; daemon stopping"); return;
+-                }
+-                revoked[count++] = i;
+-            }
+-        }
+-        /* Invalidate every affected capability before paying any allocation
+-         * cost. No client keeps access while an earlier slot is refilled. */
+-        for (unsigned i = 0; i < count; i++) {
+-            if (!allocate_slot(&slots[revoked[i]]))
+-                log_errno("refill failed; slot is degraded (use REFILL)");
++            if (s->lease && clients[s->owner].cred.uid == (uid_t)value && !recycle_slot(s)) {
++                error_reply(index, "internal", "Revocation failed; daemon stopping"); return;
++            }
+         }
+         ok_reply(index); return;
+     }

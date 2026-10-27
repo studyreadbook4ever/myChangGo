@@ -1,0 +1,215 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-27T06:21:06.219004+00:00",
+  "host": {
+    "platform": "Linux-7.0.10-arch1-1-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "cpu_count": 4,
+    "uid": 1000,
+    "clock_ticks_per_second": 100,
+    "load_average": [
+      5.46484375,
+      4.08154296875,
+      3.12646484375
+    ],
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "cpu_model": "Intel(R) Celeron(R) N5095 @ 2.00GHz",
+    "hugepage_meminfo": {
+      "AnonHugePages": "274432 kB",
+      "ShmemHugePages": "350208 kB",
+      "ShmemPmdMapped": "118784 kB",
+      "HugePages_Total": "0",
+      "HugePages_Free": "0",
+      "HugePages_Rsvd": "0",
+      "HugePages_Surp": "0",
+      "Hugepagesize": "2048 kB",
+      "Hugetlb": "0 kB"
+    },
+    "thp_enabled": "[always] madvise never",
+    "thp_shmem_enabled": "always [within_size] advise never deny force",
+    "thp_defrag": "always defer defer+madvise [madvise] never"
+  },
+  "daemon": {
+    "path": "/home/tempest/261027/hugekeeper/build/hugekeeperd",
+    "sha256": "21b41b65f15b6a4a705da0719a90e9622f7db776f35708f6c76e46cab2f9a820"
+  },
+  "backend_requested": "thp",
+  "config": {
+    "slots": 2,
+    "slot_mib": 2,
+    "iterations": 300
+  },
+  "limitations": [
+    "Single machine and small pool; timings include Python and socket IPC.",
+    "THP is a kernel hint; actual huge-page mapping is reported separately.",
+    "Release replaces and prefaults a slot; this cost scales with slot size."
+  ],
+  "status": {
+    "ok": true,
+    "backend": "thp",
+    "slot_bytes": 2097152,
+    "capacity": 2,
+    "ready": 2,
+    "leased": 0,
+    "degraded": 0,
+    "pool_bytes": 4194304,
+    "pid": 16825,
+    "locked": false,
+    "memory_observed": true,
+    "resident_bytes": 4194304,
+    "hugetlb_bytes": 0,
+    "thp_mapped_bytes": 4194304,
+    "page_bytes": 2097152,
+    "total_pages": 2,
+    "ready_pages": 2,
+    "leased_pages": 0,
+    "allowed_uids": [
+      1000
+    ],
+    "leases": []
+  },
+  "daemon_memory": {
+    "VmSize_kib": 6872,
+    "VmLck_kib": 0,
+    "VmRSS_kib": 5888,
+    "RssAnon_kib": 112,
+    "RssFile_kib": 1680,
+    "RssShmem_kib": 4096,
+    "smaps_access": "restricted by daemon PR_SET_DUMPABLE=0; use STATUS backing counters"
+  },
+  "idle": {
+    "wall_seconds": 2.000139110999953,
+    "cpu_ticks": 0,
+    "cpu_seconds": 0.0,
+    "percent_of_one_cpu": 0.0,
+    "resolution_seconds": 0.01
+  },
+  "acquire": {
+    "samples": 300,
+    "p50_us": 64.826,
+    "p95_us": 193.731,
+    "p99_us": 687.174,
+    "mean_us": 89.51213333333334,
+    "min_us": 38.524,
+    "max_us": 1064.613
+  },
+  "map_touch_edges_unmap": {
+    "samples": 300,
+    "p50_us": 54.953,
+    "p95_us": 124.081,
+    "p99_us": 171.525,
+    "mean_us": 61.11450333333333,
+    "min_us": 23.881,
+    "max_us": 291.765
+  },
+  "release_and_replace": {
+    "samples": 300,
+    "p50_us": 590.6795,
+    "p95_us": 1545.637,
+    "p99_us": 2678.01,
+    "mean_us": 735.52321,
+    "min_us": 397.766,
+    "max_us": 2730.674
+  },
+  "direct_memory_traversal": {
+    "size_bytes": 2097152,
+    "passes": 256,
+    "stride_bytes": 64,
+    "load_bytes_per_stride": 8,
+    "repeats": 5,
+    "note": "Cache-hot microbenchmark; useful loads are one eighth of scanned span. Not a DB or DRAM bandwidth measurement. Anonymous comparison inherits host THP policy and is not a forced small-page baseline.",
+    "anonymous": [
+      {
+        "elapsed_seconds": 0.025165983,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 19.868089,
+        "loaded_gib_per_second": 2.483511
+      },
+      {
+        "elapsed_seconds": 0.022048983,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 22.676783,
+        "loaded_gib_per_second": 2.834598
+      },
+      {
+        "elapsed_seconds": 0.02320741,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 21.544843,
+        "loaded_gib_per_second": 2.693105
+      },
+      {
+        "elapsed_seconds": 0.022582508,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 22.141031,
+        "loaded_gib_per_second": 2.767629
+      },
+      {
+        "elapsed_seconds": 0.031261856,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 15.993932,
+        "loaded_gib_per_second": 1.999242
+      }
+    ],
+    "broker_shared": [
+      {
+        "elapsed_seconds": 0.027232569,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 18.360368,
+        "loaded_gib_per_second": 2.295046
+      },
+      {
+        "elapsed_seconds": 0.033782348,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 14.800629,
+        "loaded_gib_per_second": 1.850079
+      },
+      {
+        "elapsed_seconds": 0.050111837,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 9.977683,
+        "loaded_gib_per_second": 1.24721
+      },
+      {
+        "elapsed_seconds": 0.030582396,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 16.349275,
+        "loaded_gib_per_second": 2.043659
+      },
+      {
+        "elapsed_seconds": 0.030722816,
+        "checksum": 9259542123273781248,
+        "scanned_span_gib_per_second": 16.27455,
+        "loaded_gib_per_second": 2.034319
+      }
+    ]
+  },
+  "final_status": {
+    "ok": true,
+    "backend": "thp",
+    "slot_bytes": 2097152,
+    "capacity": 2,
+    "ready": 2,
+    "leased": 0,
+    "degraded": 0,
+    "pool_bytes": 4194304,
+    "pid": 16825,
+    "locked": false,
+    "memory_observed": true,
+    "resident_bytes": 4194304,
+    "hugetlb_bytes": 0,
+    "thp_mapped_bytes": 4194304,
+    "page_bytes": 2097152,
+    "total_pages": 2,
+    "ready_pages": 2,
+    "leased_pages": 0,
+    "allowed_uids": [
+      1000
+    ],
+    "leases": []
+  }
+}

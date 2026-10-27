@@ -1,0 +1,97 @@
+2026-10-27T15:20:08+09:00
+QEMU emulator version 11.1.1
+Copyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers
+Host kernel: 7.0.10-arch1-1
+Guest kernel: /boot/vmlinuz-linux
+Daemon SHA256: 21b41b65f15b6a4a705da0719a90e9622f7db776f35708f6c76e46cab2f9a820  guest:/hugekeeperd
+Host HugeTLB before: 0
+VM: KVM, 384 MiB, 2 vCPU, no disks, no network, no shared directories
+GUEST kernel=7.0.10-arch1-1 arch=x86_64 pid=1
+PASS 01 guest reserves 16 real 2 MiB HugeTLB pages
+METRIC guest_hugepages_total=16 guest_hugepages_free=16
+PASS 02 HugeTLB daemon starts
+READY backend=hugetlb pages=4 page_bytes=2097152 pool_bytes=8388608 slots=2 slot_bytes=4194304 pid=81 socket=/run/hugekeeper/test.sock
+STATUS initial {"ok":true,"backend":"hugetlb","slot_bytes":4194304,"capacity":2,"ready":2,"leased":0,"degraded":0,"pool_bytes":8388608,"pid":81,"locked":true,"memory_observed":true,"resident_bytes":8388608,"hugetlb_bytes":8388608,"thp_mapped_bytes":0,"page_bytes":2097152,"total_pages":4,"ready_pages":4,"leased_pages":0,"allowed_uids":[0],"leases":[]}
+PASS 03 two prefaulted HugeTLB slots ready
+PASS 04 8 MiB physically allocated from HugeTLB pool before acquisition
+PASS 05 worker runs with distinct unprivileged UID and GID 65534
+PASS 06 unprivileged worker has no effective capabilities or supplementary groups
+PASS 07 unprivileged worker cannot open the admin socket
+PASS 08 unlisted UID 65534 reaches data socket but acquisition is denied
+PASS 09 unprivileged worker exits cleanly
+PASS 10 admin grants HugeTLB access to UID 65534
+PASS 11 worker runs with distinct unprivileged UID and GID 65534
+PASS 12 unprivileged worker has no effective capabilities or supplementary groups
+PASS 13 unprivileged worker cannot open the admin socket
+PASS 14 allowed unprivileged worker maps and writes real HugeTLB memory
+PASS 15 broker authenticates lease UID from kernel peer credentials
+PASS 16 admin denies UID 65534 while its mapping is active
+PASS 17 DENY truncates the unprivileged client's retained FD
+PASS 18 unprivileged retained HugeTLB mapping raises SIGBUS after DENY
+PASS 19 denied unprivileged connection cannot reacquire
+PASS 20 unprivileged worker exits cleanly
+PASS 21 acquire passes a lease FD
+PASS 22 lease FD belongs to hugetlbfs, not THP or ordinary pages
+PASS 23 lease sealed against regrowth and hostile added seals
+PASS 24 client cannot seal against broker revocation
+PASS 25 map actual HugeTLB lease
+PASS 26 new HugeTLB lease is entirely zeroed
+PASS 27 direct memory access spans both huge pages
+PASS 28 client can create a private HugeTLB alias
+PASS 29 admin revokes live HugeTLB lease
+PASS 30 revoked inode is truncated to zero
+PASS 31 stale FD cannot regrow
+PASS 32 stale actual HugeTLB mapping raises SIGBUS
+PASS 33 revocation also invalidates private COW HugeTLB alias
+PASS 34 same connection can acquire a fresh generation
+PASS 35 replacement contains no previous tenant data
+PASS 36 DENY revokes active UID leases
+PASS 37 DENY invalidates active HugeTLB mappings
+PASS 38 denied UID cannot reacquire
+PASS 39 ALLOW restores future acquisitions
+PASS 40 pool grows to four slots
+PASS 41 growth allocates 16 MiB of actual HugeTLB memory
+PASS 42 pool shrinks to one idle slot
+PASS 43 shrink returns 12 MiB to guest HugeTLB pool
+hugekeeperd: resize: Cannot allocate memory
+PASS 44 growth exceeding physical HugeTLB availability fails cleanly
+PASS 45 failed growth rolls back all partially allocated HugeTLB pages
+PASS 46 acquire slot for deterministic guest pool exhaustion
+PASS 47 guest retires its persistent HugeTLB pool while a lease is active
+hugekeeperd: refill failed; slot is degraded (use REFILL): Cannot allocate memory
+PASS 48 revocation succeeds even when replacement allocation is impossible
+PASS 49 unreplenished slot is reported as degraded, not ready
+PASS 50 degraded refill does not weaken old mapping revocation
+hugekeeperd: refill: Cannot allocate memory
+PASS 51 REFILL reports physical HugeTLB exhaustion
+PASS 52 REFILL recovers after guest HugeTLB supply is restored
+PASS 53 recovered slot has verified backing and correct HugeTLB accounting
+PASS 54 200 acquire/write/release cycles retain exact HugeTLB capacity
+METRIC lifecycle_cycles=200 slot_bytes=4194304 acquire_mean_us=1166.277 release_and_refill_mean_us=4410.797
+PASS 55 acquire final slot for disconnect test
+PASS 56 connection loss revokes its outstanding FD
+PASS 57 disconnect invalidates retained HugeTLB mapping
+PASS 58 all leases reclaimed after disconnect
+STATUS final {"ok":true,"backend":"hugetlb","slot_bytes":4194304,"capacity":1,"ready":1,"leased":0,"degraded":0,"pool_bytes":4194304,"pid":81,"locked":true,"memory_observed":true,"resident_bytes":4194304,"hugetlb_bytes":4194304,"thp_mapped_bytes":0,"page_bytes":2097152,"total_pages":2,"ready_pages":2,"leased_pages":0,"allowed_uids":[0],"leases":[]}
+PASS 59 retain an active HugeTLB mapping across daemon shutdown
+PASS 60 graceful daemon shutdown
+PASS 61 SIGTERM revokes mappings even while clients retain FDs
+PASS 62 all guest HugeTLB pages returned on daemon shutdown
+METRIC guest_hugepages_total=16 guest_hugepages_free=16
+PASS 63 create actual guest terminal for maximum-size confirmation
+STARTUP terminal No --pages parameter supplied. Reserve the maximum currently available 2 MiB pages? [y/N] 
+PASS 64 missing page count prompts on a real guest terminal
+PASS 65 maximum-mode prompt does not allocate pages or publish a socket before consent
+PASS 66 explicit yes confirms guest maximum allocation
+STATUS automatic_maximum {"ok":true,"backend":"hugetlb","slot_bytes":33554432,"capacity":1,"ready":1,"leased":0,"degraded":0,"pool_bytes":33554432,"pid":91,"locked":true,"memory_observed":true,"resident_bytes":33554432,"hugetlb_bytes":33554432,"thp_mapped_bytes":0,"page_bytes":2097152,"total_pages":16,"ready_pages":16,"leased_pages":0,"allowed_uids":[0],"leases":[]}
+PASS 67 confirmed maximum consumes exactly the 16 available guest HugeTLB pages
+PASS 68 automatic maximum has real physical HugeTLB backing
+PASS 69 graceful daemon shutdown
+STARTUP terminal_complete No --pages parameter supplied. Reserve the maximum currently available 2 MiB pages? [y/N] yes
+Maximum estimate: 16 pages (32 MiB). 16 pages; limited by free minus reserved 2 MiB HugeTLB pages; safety reserve=0 MiB. Snapshot only: competing allocations, permissions or hidden ancestor limits may reduce it.
+READY backend=hugetlb pages=16 page_bytes=2097152 pool_bytes=33554432 slots=1 slot_bytes=33554432 pid=91 socket=/run/hugekeeper/test.sock
+
+PASS 70 maximum-mode shutdown returns every guest HugeTLB page
+HUGETLB_VM_RESULT PASS checks=70 failures=0
+[    3.092297] reboot: Power down
+Host HugeTLB after: 0

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugekeeper"
+version = "0.1.0"
+description = "Linux huge-page memory pool broker client"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+[project.scripts]
+hugekeeper = "hugekeeper.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["python"]

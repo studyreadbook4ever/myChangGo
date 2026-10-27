@@ -6,6 +6,7 @@
 
 + 언젠가 eff0rtchung.kr 도메인 연거도 거기에 이것저것 웹코딩한거도 여기에 넣어줘야하는디.. 
 
+- [261027hugePage](261027hugePage/): 2 MiB 페이지 개수로 선할당하고 UID별 대여·회수·전체 해제를 관리하는 Linux 메모리 풀 서비스. C/Python SDK, 실측 최적화 결과와 HugeTLB 검증 포함
 - [260921SearchStudy](260921SearchStudy/): BPE 토크나이저부터 BERT형 encoder, MLM, 문장 벡터와 Dense Retrieval 학습까지 직접 구현하는 Jupyter 실습 교재. 설치·사용법과 실행 결과 포함
 - [260711vtuber](260711vtuber/): 치지직·YouTube 컷 편집과 AudSeg 빈 자막 타이밍을 한 화면에서 다루는 Chrome Extension. 자체 작성 코드는 `UNLICENSED`이고 제3자 구성요소는 별도 고지하며, Linux에서는 `cd 260711vtuber && ./setup.sh`로 시작
 - [AudSeg](AudSeg/): 모델 없이 오디오 활동 구간을 검출하는 MIT 라이선스 Python 라이브러리

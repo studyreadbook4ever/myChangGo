@@ -1,0 +1,25 @@
+{
+  "kernel": "7.0.10-arch1-1",
+  "architecture": "x86_64",
+  "uid": 1000,
+  "memory": {
+    "MemAvailable": "3367180 kB",
+    "AnonHugePages": "299008 kB",
+    "ShmemHugePages": "337920 kB",
+    "ShmemPmdMapped": "120832 kB",
+    "HugePages_Total": "0",
+    "HugePages_Free": "0",
+    "HugePages_Rsvd": "0",
+    "HugePages_Surp": "0",
+    "Hugepagesize": "2048 kB",
+    "Hugetlb": "0 kB"
+  },
+  "thp_enabled": "[always] madvise never",
+  "shmem_thp": "always [within_size] advise never deny force",
+  "hugetlb_shm_group": "0",
+  "memlock_limits_bytes": [
+    8388608,
+    8388608
+  ],
+  "kvm_access": true
+}

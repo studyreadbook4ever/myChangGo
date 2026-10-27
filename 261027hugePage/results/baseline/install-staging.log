@@ -1,0 +1,4 @@
+install -Dm755 build/hugekeeperd /home/tempest/261027/hugekeeper/build/install-root/usr/local/bin/hugekeeperd
+install -Dm644 build/libhugekeeper.a /home/tempest/261027/hugekeeper/build/install-root/usr/local/lib/libhugekeeper.a
+install -Dm644 include/hugekeeper.h /home/tempest/261027/hugekeeper/build/install-root/usr/local/include/hugekeeper.h
+install -Dm644 README.md /home/tempest/261027/hugekeeper/build/install-root/usr/local/share/doc/hugekeeper/README.md

@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-27T07:03:39.169960+00:00",
+  "backend": "plain",
+  "daemon": {
+    "path": "/home/tempest/261027/hugekeeper/build/hugekeeperd",
+    "sha256": "c9d944affcdafa3b1ebcceb8db38ad7bebb4a0b5f1888fcc77997a6bb533e795"
+  },
+  "workers": 8,
+  "cycles_per_worker": 500,
+  "seed": 261027,
+  "ok": true,
+  "elapsed_seconds": 7.718256522999582,
+  "operations": {
+    "release": 2422,
+    "disconnect": 1170,
+    "revoke": 408,
+    "empty_retries": 2546
+  },
+  "leases_per_second": 518.2517564789958,
+  "daemon_cpu_seconds": 7.06,
+  "daemon_memory": {
+    "VmSize_kib": 10968,
+    "VmLck_kib": 0,
+    "VmRSS_kib": 9984,
+    "RssAnon_kib": 112,
+    "RssFile_kib": 1680,
+    "RssShmem_kib": 8192,
+    "smaps_access": "restricted by daemon PR_SET_DUMPABLE=0; use STATUS backing counters"
+  },
+  "daemon_fds_before": null,
+  "daemon_fds_after": null,
+  "daemon_fd_limit": 256,
+  "fd_verification": "bounded RLIMIT_NOFILE; proc count unavailable when dumpability disabled",
+  "final_status": {
+    "ok": true,
+    "backend": "plain",
+    "slot_bytes": 2097152,
+    "capacity": 4,
+    "ready": 4,
+    "leased": 0,
+    "degraded": 0,
+    "pool_bytes": 8388608,
+    "pid": 21405,
+    "locked": false,
+    "memory_observed": true,
+    "resident_bytes": 8388608,
+    "hugetlb_bytes": 0,
+    "thp_mapped_bytes": 0,
+    "page_bytes": 2097152,
+    "total_pages": 4,
+    "ready_pages": 4,
+    "leased_pages": 0,
+    "allowed_uids": [
+      1000
+    ],
+    "leases": []
+  }
+}

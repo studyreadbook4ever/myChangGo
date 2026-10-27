@@ -1,0 +1,65 @@
+Building wheel...
+running egg_info
+writing python/hugekeeper.egg-info/PKG-INFO
+writing dependency_links to python/hugekeeper.egg-info/dependency_links.txt
+writing entry points to python/hugekeeper.egg-info/entry_points.txt
+writing top-level names to python/hugekeeper.egg-info/top_level.txt
+reading manifest file 'python/hugekeeper.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file 'python/hugekeeper.egg-info/SOURCES.txt'
+running bdist_wheel
+running build
+running build_py
+running egg_info
+writing python/hugekeeper.egg-info/PKG-INFO
+writing dependency_links to python/hugekeeper.egg-info/dependency_links.txt
+writing entry points to python/hugekeeper.egg-info/entry_points.txt
+writing top-level names to python/hugekeeper.egg-info/top_level.txt
+reading manifest file 'python/hugekeeper.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file 'python/hugekeeper.egg-info/SOURCES.txt'
+installing to build/bdist.linux-x86_64/wheel
+running install
+running install_lib
+creating build/bdist.linux-x86_64/wheel
+creating build/bdist.linux-x86_64/wheel/hugekeeper
+copying build/lib/hugekeeper/__main__.py -> build/bdist.linux-x86_64/wheel/./hugekeeper
+copying build/lib/hugekeeper/__init__.py -> build/bdist.linux-x86_64/wheel/./hugekeeper
+running install_egg_info
+Copying python/hugekeeper.egg-info to build/bdist.linux-x86_64/wheel/./hugekeeper-0.1.0-py3.14.egg-info
+running install_scripts
+creating build/bdist.linux-x86_64/wheel/hugekeeper-0.1.0.dist-info/WHEEL
+creating '/home/tempest/261027/hugekeeper/build/dist/.tmp-be87qma1/hugekeeper-0.1.0-py3-none-any.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+adding 'hugekeeper/__init__.py'
+adding 'hugekeeper/__main__.py'
+adding 'hugekeeper-0.1.0.dist-info/licenses/LICENSE'
+adding 'hugekeeper-0.1.0.dist-info/METADATA'
+adding 'hugekeeper-0.1.0.dist-info/WHEEL'
+adding 'hugekeeper-0.1.0.dist-info/entry_points.txt'
+adding 'hugekeeper-0.1.0.dist-info/top_level.txt'
+adding 'hugekeeper-0.1.0.dist-info/RECORD'
+removing build/bdist.linux-x86_64/wheel
+Successfully built build/dist/hugekeeper-0.1.0-py3-none-any.whl
+Using Python 3.14.5 environment at: build/package-smoke
+Resolved 1 package in 3ms
+Prepared 1 package in 10ms
+Uninstalled 1 package in 1ms
+Installed 1 package in 5ms
+ ~ hugekeeper==0.1.0 (from file:///home/tempest/261027/hugekeeper/build/dist/hugekeeper-0.1.0-py3-none-any.whl)
+usage: hugekeeper [-h] --socket SOCKET
+                  {status,allow,deny,revoke,resize,refill,free,demo} ...
+
+Control the Hugekeeper memory broker
+
+positional arguments:
+  {status,allow,deny,revoke,resize,refill,free,demo}
+    status              show pool and authorization status as JSON
+    refill              retry allocation of degraded slots
+    free                return entire pool; immediately invalidates ALL active
+                        mappings (SIGBUS)
+    demo                acquire, write/read a message, then release
+
+options:
+  -h, --help            show this help message and exit
+  --socket SOCKET       data socket path; admin uses PATH.admin
+Installed wheel acquire/write/read/release/FREE: PASS
